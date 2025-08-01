@@ -1,0 +1,19 @@
+# vercel.json
+
+{
+  "builds": [
+    {
+      "src": "src/main.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/main.py"
+    }
+  ],
+  "env": {
+    "FLASK_ENV": "production"
+  }
+}

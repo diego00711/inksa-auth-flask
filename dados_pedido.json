@@ -1,0 +1,21 @@
+{
+    "itens": [
+        {
+            "titulo": "Pizza Grande de Calabresa",
+            "quantidade": 1,
+            "preco_unitario": 55.00
+        },
+        {
+            "titulo": "Coca-Cola 2L",
+            "quantidade": 1,
+            "preco_unitario": 12.00
+        }
+    ],
+    "cliente_email": "cliente.teste@delivery.com",
+    "pedido_id": "edba5b8c-3d24-4984-a296-d00783a315a3",  
+    "urls_retorno": {
+        "sucesso": "http://localhost:3000/pagamento_sucesso",
+        "falha": "http://localhost:3000/pagamento_falha",
+        "pendente": "http://localhost:3000/pagamento_pendente"
+    }
+}
