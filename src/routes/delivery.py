@@ -4,16 +4,18 @@ import os
 import uuid
 import traceback
 import json
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 import psycopg2
 import psycopg2.extras
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, time
 from decimal import Decimal
 from functools import wraps
+from flask_cors import cross_origin
 
 # Importa as funções e o cliente supabase do nosso helper centralizado
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
+# Define o Blueprint para as rotas de delivery
 delivery_bp = Blueprint('delivery_bp', __name__)
 
 # --- Decorator para Segurança ---
@@ -41,38 +43,38 @@ def delivery_token_required(f):
             if not profile:
                 return jsonify({"status": "error", "message": "Perfil de entregador não encontrado para este usuário"}), 404
             
-            profile_id = str(profile['id'])
-        except Exception as e:
+            g.profile_id = str(profile['id'])
+            return f(*args, **kwargs)
+
+        except psycopg2.Error as e:
             traceback.print_exc()
-            return jsonify({"status": "error", "message": "Erro interno ao buscar perfil do entregador", "detail": str(e)}), 500
+            return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
         finally:
             if conn:
                 conn.close()
-        
-        return f(profile_id=profile_id, *args, **kwargs)
+    
     return decorated_function
 
-# --- Funções Auxiliares ---
+# --- Encoder JSON Customizado ---
 class CustomJSONEncoder(json.JSONEncoder):
-    """Encoder JSON customizado para lidar com tipos de dados como Decimal, UUID e Datetime."""
     def default(self, obj):
         if isinstance(obj, Decimal):
             return float(obj)
-        if isinstance(obj, (datetime, date, timedelta)):
+        if isinstance(obj, (datetime, date, timedelta, time)):
             return obj.isoformat()
         if isinstance(obj, uuid.UUID):
             return str(obj)
-        return super(CustomJSONEncoder, self).default(obj)
+        return super().default(obj)
 
 def serialize_data_with_encoder(data):
-    """Serializa dados usando o encoder customizado para garantir a conversão correta."""
     return json.loads(json.dumps(data, cls=CustomJSONEncoder))
 
-# --- ROTAS ---
+# --- Rotas ---
 
 @delivery_bp.route('/profile', methods=['GET', 'PUT'])
 @delivery_token_required
-def delivery_profile_handler(profile_id):
+def delivery_profile_handler():
+    profile_id = g.profile_id
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
@@ -83,169 +85,151 @@ def delivery_profile_handler(profile_id):
                 cur.execute("SELECT * FROM delivery_profiles WHERE id = %s", (profile_id,))
                 profile_data = cur.fetchone()
                 if not profile_data:
-                    return jsonify({"status": "error", "message": "Perfil de entregador não encontrado."}), 404
+                    return jsonify({"status": "error", "message": "Perfil não encontrado"}), 404
                 return jsonify({"status": "success", "data": serialize_data_with_encoder(dict(profile_data))}), 200
 
-            if request.method == 'PUT':
+            elif request.method == 'PUT':
                 data = request.get_json()
                 if not data:
-                    return jsonify({"status": "error", "message": "Nenhum dado fornecido"}), 400
+                    return jsonify({"status": "error", "message": "Dados não fornecidos"}), 400
                 
-                allowed_fields = ['first_name', 'last_name', 'phone', 'cpf', 'birth_date', 'vehicle_type', 'is_available', 'address_street', 'address_number', 'address_complement', 'address_neighborhood', 'address_city', 'address_state', 'address_zipcode', 'latitude', 'longitude']
-                update_data = {key: data[key] for key in allowed_fields if key in data}
+                allowed_fields = ['first_name', 'last_name', 'phone', 'vehicle_type', 'is_available']
+                update_data = {k: v for k, v in data.items() if k in allowed_fields}
                 
                 if not update_data:
                     return jsonify({"status": "error", "message": "Nenhum campo válido para atualização"}), 400
                 
-                set_clauses = [f'"{field}" = %s' for field in update_data.keys()]
+                set_clauses = [f'"{k}" = %s' for k in update_data.keys()]
                 params = list(update_data.values()) + [profile_id]
-                sql = f"UPDATE delivery_profiles SET {', '.join(set_clauses)} WHERE id = %s RETURNING *"
                 
-                cur.execute(sql, tuple(params))
+                cur.execute(
+                    f"UPDATE delivery_profiles SET {', '.join(set_clauses)} WHERE id = %s RETURNING *",
+                    params
+                )
                 updated_profile = cur.fetchone()
                 conn.commit()
                 
-                if not updated_profile:
-                    return jsonify({"status": "error", "message": "Perfil não encontrado para atualizar."}), 404
-                
-                return jsonify({"status": "success", "message": "Perfil atualizado com sucesso.", "data": serialize_data_with_encoder(dict(updated_profile))}), 200
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno no perfil.", "detail": str(e)}), 500
+                return jsonify({
+                    "status": "success",
+                    "data": serialize_data_with_encoder(dict(updated_profile))
+                }), 200
+
+    except psycopg2.Error as e:
+        conn.rollback()
+        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
     finally:
         if conn:
             conn.close()
 
 @delivery_bp.route('/orders', methods=['GET'])
 @delivery_token_required
-def get_my_orders(profile_id):
-    status_filter = request.args.get('status')
+def get_my_orders():
+    profile_id = g.profile_id
+    status_filter = request.args.get('status', 'all').lower()
+    
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
     
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            base_query = """
+                SELECT o.*, 
+                       cp.first_name || ' ' || cp.last_name AS client_name,
+                       rp.restaurant_name
+                FROM orders o
+                LEFT JOIN client_profiles cp ON o.client_id = cp.id
+                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                WHERE o.delivery_id = %s
+            """
             params = [profile_id]
-            sql_query = "SELECT * FROM orders WHERE delivery_id = %s"
             
-            if status_filter and status_filter.lower() != 'all':
-                sql_query += " AND status = %s"
-                params.append(status_filter)
+            if status_filter != 'all':
+                base_query += " AND o.status = %s"
+                params.append(status_filter.capitalize())
             
-            sql_query += " ORDER BY created_at DESC"
-            cur.execute(sql_query, tuple(params))
+            base_query += " ORDER BY o.created_at DESC"
+            cur.execute(base_query, tuple(params))
             orders = cur.fetchall()
             
-            return jsonify({"status": "success", "data": serialize_data_with_encoder([dict(o) for o in orders])}), 200
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro ao buscar meus pedidos.", "detail": str(e)}), 500
-    finally:
-        if conn:
-            conn.close()
-
-@delivery_bp.route('/orders/<uuid:order_id>', methods=['GET'], endpoint='get_single_order_details')
-@delivery_token_required
-def get_order_details(profile_id, order_id):
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-    
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Query com a condição de JOIN corrigida para 'client_profiles'
-            sql_query = """
-                SELECT
-                    o.id,
-                    o.status,
-                    o.delivery_address,
-                    o.total_amount,
-                    o.delivery_fee,
-                    o.total_amount_items AS subtotal,
-                    o.items,
-                    o.created_at,
-                    CONCAT(c.first_name, ' ', c.last_name) AS client_name,
-                    c.phone AS client_phone,
-                    r.restaurant_name AS restaurant_name,
-                    r.phone AS restaurant_phone
-                FROM
-                    orders o
-                LEFT JOIN
-                    client_profiles c ON o.client_id = c.id
-                LEFT JOIN
-                    restaurant_profiles r ON o.restaurant_id = r.id
-                WHERE
-                    o.id = %s AND o.delivery_id = %s;
-            """
-            cur.execute(sql_query, (str(order_id), str(profile_id)))
-            order = cur.fetchone()
-
-            if not order:
-                return jsonify({"status": "error", "message": "Pedido não encontrado ou não atribuído a você."}), 404
-
-            order_data = dict(order)
-
-            # Busca os nomes dos itens do menu
-            item_ids = [item['menu_item_id'] for item in order_data.get('items', [])]
-            if item_ids:
-                cur.execute("SELECT id, name FROM menu_items WHERE id = ANY(%s)", (item_ids,))
-                menu_items_map = {str(item['id']): item['name'] for item in cur.fetchall()}
-                
-                for item in order_data['items']:
-                    item['name'] = menu_items_map.get(str(item['menu_item_id']), 'Item não encontrado')
-
-            serialized_order = serialize_data_with_encoder(order_data)
+            return jsonify({
+                "status": "success",
+                "data": serialize_data_with_encoder([dict(o) for o in orders])
+            }), 200
             
-            return jsonify({"status": "success", "data": serialized_order}), 200
-
     except psycopg2.Error as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro de banco de dados.", "detail": str(e)}), 500
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno ao buscar detalhes do pedido.", "detail": str(e)}), 500
+        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
     finally:
         if conn:
             conn.close()
 
 @delivery_bp.route('/dashboard-stats', methods=['GET'])
+@cross_origin(origins=["http://localhost:5173", "http://127.0.0.1:5173"])
 @delivery_token_required
-def get_dashboard_stats(profile_id):
+def get_dashboard_stats():
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
     
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            profile_id = g.profile_id
             today = date.today()
+            
+            # Estatísticas principais em uma única query
             cur.execute("""
-                SELECT COUNT(*) AS today_deliveries, COALESCE(SUM(delivery_fee), 0) AS today_earnings
-                FROM orders WHERE delivery_id = %s AND status = 'Entregue' AND DATE(created_at) = %s
-            """, (profile_id, today))
-            daily_stats = cur.fetchone()
+                SELECT 
+                    COUNT(CASE WHEN o.status = 'Entregue' AND DATE(o.created_at) = %s THEN 1 END) AS today_deliveries,
+                    COALESCE(SUM(CASE WHEN o.status = 'Entregue' AND DATE(o.created_at) = %s THEN o.delivery_fee END), 0) AS today_earnings,
+                    dp.rating,
+                    dp.total_deliveries,
+                    (
+                        SELECT json_agg(json_build_object(
+                            'id', o.id,
+                            'status', o.status,
+                            'client_name', cp.first_name || ' ' || cp.last_name,
+                            'restaurant_name', rp.restaurant_name,
+                            'delivery_address', o.delivery_address,
+                            'delivery_fee', o.delivery_fee,
+                            'created_at', o.created_at
+                        ))
+                        FROM orders o
+                        LEFT JOIN client_profiles cp ON o.client_id = cp.id
+                        LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                        WHERE o.delivery_id = %s 
+                          AND o.status IN ('Pendente', 'Aceito', 'Para Entrega')
+                    ) AS active_orders
+                FROM delivery_profiles dp
+                LEFT JOIN orders o ON dp.id = o.delivery_id
+                WHERE dp.id = %s
+                GROUP BY dp.id, dp.rating, dp.total_deliveries
+            """, (today, today, profile_id, profile_id))
             
-            cur.execute("SELECT rating FROM delivery_profiles WHERE id = %s", (profile_id,))
-            profile_stats = cur.fetchone()
+            stats = cur.fetchone()
             
-            stats = {
-                "todayDeliveries": daily_stats['today_deliveries'] if daily_stats else 0,
-                "todayEarnings": float(daily_stats['today_earnings']) if daily_stats else 0.0,
-                "avgRating": float(profile_stats['rating']) if profile_stats and profile_stats['rating'] else 0.0,
-            }
-            return jsonify({"status": "success", "data": stats}), 200
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro ao buscar estatísticas do dashboard.", "detail": str(e)}), 500
+            if not stats:
+                return jsonify({"status": "error", "message": "Perfil não encontrado"}), 404
+            
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "todayDeliveries": stats['today_deliveries'] or 0,
+                    "todayEarnings": float(stats['today_earnings']) if stats['today_earnings'] is not None else 0.0,
+                    "avgRating": float(stats['rating']) if stats['rating'] is not None else 0.0,
+                    "totalDeliveries": stats['total_deliveries'] or 0,
+                    "activeOrders": stats['active_orders'] or []
+                }
+            }), 200
+            
+    except psycopg2.Error as e:
+        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
     finally:
         if conn:
             conn.close()
 
 @delivery_bp.route('/earnings-history', methods=['GET'])
 @delivery_token_required
-def get_earnings_history(profile_id):
+def get_earnings_history():
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
@@ -253,17 +237,26 @@ def get_earnings_history(profile_id):
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT DATE(created_at) AS earning_date, SUM(delivery_fee) AS total_earned
+                SELECT 
+                    DATE(created_at) AS date,
+                    SUM(delivery_fee) AS earnings,
+                    COUNT(*) AS deliveries
                 FROM orders
-                WHERE delivery_id = %s AND status = 'Entregue' AND created_at >= %s
+                WHERE delivery_id = %s 
+                  AND status = 'Entregue'
+                  AND created_at >= CURRENT_DATE - INTERVAL '7 days'
                 GROUP BY DATE(created_at)
-                ORDER BY earning_date DESC;
-            """, (profile_id, date.today() - timedelta(days=7)))
+                ORDER BY date DESC
+            """, (g.profile_id,))
+            
             history = cur.fetchall()
-            return jsonify({"status": "success", "data": serialize_data_with_encoder([dict(h) for h in history])}), 200
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro ao buscar histórico de ganhos.", "detail": str(e)}), 500
+            return jsonify({
+                "status": "success",
+                "data": serialize_data_with_encoder([dict(h) for h in history])
+            }), 200
+            
+    except psycopg2.Error as e:
+        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
     finally:
         if conn:
             conn.close()
