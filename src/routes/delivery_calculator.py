@@ -1,9 +1,10 @@
 # src/routes/delivery_calculator.py
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app # <<< MUDANÇA: Adicionado current_app
 from supabase import create_client, Client
 import os
 import math
+# from src import config  # <<< MUDANÇA: REMOVIDA a importação problemática
 
 delivery_calculator_bp = Blueprint('delivery_calculator', __name__)
 
@@ -24,10 +25,6 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     distance = R * c
     return distance
 
-FIXED_DELIVERY_FEE = 5.00
-PER_KM_DELIVERY_FEE = 2.50
-FREE_DELIVERY_THRESHOLD_KM = 3.0
-
 @delivery_calculator_bp.route('/delivery/calculate_fee', methods=['POST'])
 def calculate_delivery_fee():
     try:
@@ -39,8 +36,6 @@ def calculate_delivery_fee():
         if not all([restaurant_id, client_latitude, client_longitude]):
             return jsonify({"error": "Dados incompletos."}), 400
 
-        # --- LÓGICA ALTERADA ---
-        # 1. Buscar o perfil do restaurante para verificar o tipo de entrega
         response_restaurant = supabase_client.table('restaurant_profiles').select(
             'latitude, longitude, delivery_type, delivery_fee'
         ).eq('id', restaurant_id).single().execute()
@@ -53,15 +48,10 @@ def calculate_delivery_fee():
         distance_km = 0.0
         delivery_fee = 0.0
 
-        # 2. Decidir qual cálculo de frete usar
         if delivery_type == 'own':
-            # Usa a taxa de entrega fixa definida pelo restaurante
-            print(f"INFO: Calculando frete com base na taxa própria do restaurante {restaurant_id}.")
             delivery_fee = float(restaurant_data.get('delivery_fee', 0.0))
         
         elif delivery_type == 'platform':
-            # Usa a lógica de cálculo dinâmico da plataforma
-            print(f"INFO: Calculando frete dinamicamente para o restaurante {restaurant_id}.")
             restaurant_latitude = restaurant_data.get('latitude')
             restaurant_longitude = restaurant_data.get('longitude')
 
@@ -73,16 +63,15 @@ def calculate_delivery_fee():
                 float(client_latitude), float(client_longitude)
             )
 
-            fee = FIXED_DELIVERY_FEE
-            if distance_km > FREE_DELIVERY_THRESHOLD_KM:
-                additional_km_cost = (distance_km - FREE_DELIVERY_THRESHOLD_KM) * PER_KM_DELIVERY_FEE
+            # <<< MUDANÇA: Usando a configuração carregada na aplicação
+            fee = current_app.config['FIXED_DELIVERY_FEE']
+            if distance_km > current_app.config['FREE_DELIVERY_THRESHOLD_KM']:
+                additional_km_cost = (distance_km - current_app.config['FREE_DELIVERY_THRESHOLD_KM']) * current_app.config['PER_KM_DELIVERY_FEE']
                 fee += additional_km_cost
             delivery_fee = fee
         
-        # Arredondamentos
         delivery_fee = round(delivery_fee, 2)
         distance_km = round(distance_km, 2)
-        # --- FIM DA LÓGICA ALTERADA ---
 
         return jsonify({
             "delivery_fee": delivery_fee,
