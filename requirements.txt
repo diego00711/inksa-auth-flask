@@ -1,9 +1,14 @@
 # requirements.txt
 
-Flask==2.2.2
-python-dotenv==0.21.0
-psycopg2
-Flask-Cors==3.0.10
-PyJWT==2.6.0
-bcrypt==4.0.1
-requests==2.28.1
+Flask==3.0.0
+Flask-Cors==4.0.0
+python-dotenv==1.0.0
+PyJWT==2.8.0
+bcrypt==4.1.2
+requests==2.31.0
+psycopg2-binary==2.9.9
+Werkzeug==3.0.1
+click==8.1.7
+itsdangerous==2.1.2
+Jinja2==3.1.2
+MarkupSafe==2.1.3
