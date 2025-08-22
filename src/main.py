@@ -11,7 +11,7 @@ import mercadopago
 import logging
 
 # Configuração do caminho para imports
-current_dir = Path(__file__ ).parent
+current_dir = Path(__file__).parent
 project_root = current_dir.parent
 sys.path.insert(0, str(project_root))
 
@@ -72,10 +72,10 @@ app.register_blueprint(analytics_bp, url_prefix='/api/analytics') # 2. Registra 
 CORS(app, 
      resources={r"/api/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://localhost:5174"]}},
      supports_credentials=True
-  )
+   )
 
 # Configuração do SocketIO
-socketio = SocketIO(app, cors_allowed_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://localhost:5174"] )
+socketio = SocketIO(app, cors_allowed_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://localhost:5174"]  )
 
 # Configuração do Mercado Pago
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
@@ -98,6 +98,5 @@ def handle_connect():
 def handle_disconnect():
     logging.info('Cliente desconectado')
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+# O bloco if __name__ == '__main__' foi removido.
+# O Gunicorn irá gerenciar a inicialização do servidor.
