@@ -1,5 +1,10 @@
 # src/main.py
 
+# APLICA O PATCH DO EVENTLET ANTES DE QUALQUER OUTRO IMPORT
+import eventlet
+eventlet.monkey_patch()
+
+# Imports padrão do projeto continuam aqui
 import os
 import sys
 from pathlib import Path
@@ -37,15 +42,13 @@ try:
     from src.utils.helpers import supabase
     from src.routes.gamification_routes import gamification_bp
     from src.routes.categories import categories_bp
-    # <<< CORREÇÃO FINAL ADICIONADA AQUI >>>
-    from src.routes.analytics import analytics_bp # 1. Importa o blueprint de analytics
+    from src.routes.analytics import analytics_bp
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
 
 app = Flask(__name__)
-# <<< CORREÇÃO DAS BARRAS ADICIONADA AQUI >>>
-app.url_map.strict_slashes = False # Trata /rota e /rota/ como a mesma coisa
+app.url_map.strict_slashes = False
 
 # Configuração do ficheiro de config
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
@@ -65,8 +68,7 @@ app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin') 
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
-# <<< CORREÇÃO FINAL ADICIONADA AQUI >>>
-app.register_blueprint(analytics_bp, url_prefix='/api/analytics') # 2. Registra o blueprint de analytics
+app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 
 # Configuração do CORS
 CORS(app, 
@@ -75,7 +77,8 @@ CORS(app,
    )
 
 # Configuração do SocketIO
-socketio = SocketIO(app, cors_allowed_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://localhost:5174"]  )
+# Adicionamos async_mode='eventlet' para ser explícito
+socketio = SocketIO(app, cors_allowed_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://localhost:5174"], async_mode='eventlet' )
 
 # Configuração do Mercado Pago
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
@@ -97,6 +100,3 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     logging.info('Cliente desconectado')
-
-# O bloco if __name__ == '__main__' foi removido.
-# O Gunicorn irá gerenciar a inicialização do servidor.
