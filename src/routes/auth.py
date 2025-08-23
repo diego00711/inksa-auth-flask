@@ -1,4 +1,4 @@
-# src/routes/auth.py
+# src/routes/auth.py (VERSÃO COMPLETA E ATUALIZADA)
 
 import os
 import traceback
@@ -12,6 +12,10 @@ auth_bp = Blueprint('auth_bp', __name__)
 
 @auth_bp.route('/register', methods=['POST'])
 def register():
+    """
+    Registra um novo usuário. Suporta os tipos 'client', 'restaurant' e 'delivery'.
+    Para 'delivery', é obrigatório fornecer um 'restaurantId' nos dados do perfil.
+    """
     data = request.get_json()
     if not data:
         return jsonify({"status": "error", "error": "Nenhum dado fornecido"}), 400
@@ -25,14 +29,19 @@ def register():
     if not all([email, password, full_name, user_type]):
         return jsonify({"status": "error", "error": "Dados incompletos para o registo."}), 400
 
+    # Valida os tipos de usuário permitidos
+    if user_type not in ['client', 'restaurant', 'delivery']:
+        return jsonify({"status": "error", "error": "Tipo de usuário inválido."}), 400
+
     user_id = None
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "error": "Falha na conexão com a base de dados."}), 500
 
     try:
+        # 1. Cria o usuário no serviço de autenticação do Supabase
         user_response = supabase.auth.sign_up({
-            "email": email,
+            "email": email, 
             "password": password,
             "options": {
                 "data": {
@@ -43,39 +52,59 @@ def register():
         })
         
         user = user_response.user
-        if not user:
+        if not user: 
             raise Exception("Falha ao criar utilizador no Supabase Auth.")
         
-        user_id = user.id
+        user_id = str(user.id)
         
-        with conn:
-            with conn.cursor() as cur:
+        # 2. Insere os dados nas tabelas locais (users e a tabela de perfil específica)
+        with conn.cursor() as cur:
+            # Insere na tabela 'users'
+            cur.execute(
+                "INSERT INTO users (id, email, user_type) VALUES (%s, %s, %s)",
+                (user_id, email, user_type)
+            )
+            
+            # Cria o perfil correspondente ao tipo de usuário
+            if user_type == 'client':
                 cur.execute(
-                    "INSERT INTO users (id, email, user_type) VALUES (%s, %s, %s)",
-                    (str(user_id), email, user_type)
+                    "INSERT INTO client_profiles (user_id, first_name) VALUES (%s, %s)",
+                    (user_id, full_name.split(' ')[0])
                 )
+            elif user_type == 'restaurant':
+                restaurant_name = profile_data.get('restaurantName')
+                if not restaurant_name: 
+                    raise ValueError("Nome do restaurante é obrigatório.")
+                # Assumindo que o ID do perfil do restaurante é o mesmo do user_id
+                cur.execute(
+                    "INSERT INTO restaurant_profiles (id, user_id, restaurant_name) VALUES (%s, %s, %s)",
+                    (user_id, user_id, restaurant_name)
+                )
+            elif user_type == 'delivery':
+                restaurant_id = profile_data.get('restaurantId')
+                if not restaurant_id: 
+                    raise ValueError("ID do restaurante é obrigatório para o entregador.")
                 
-                if user_type == 'client':
-                    cur.execute(
-                        "INSERT INTO client_profiles (user_id, first_name) VALUES (%s, %s)",
-                        (str(user_id), full_name.split(' ')[0])
-                    )
-                elif user_type == 'restaurant':
-                    restaurant_name = profile_data.get('restaurantName')
-                    if not restaurant_name:
-                        raise ValueError("Nome do restaurante é obrigatório.")
-                    
-                    cur.execute(
-                        "INSERT INTO restaurant_profiles (id, restaurant_name) VALUES (%s, %s)",
-                        (str(user_id), restaurant_name)
-                    )
+                # Verifica se o restaurante associado existe antes de criar o entregador
+                cur.execute("SELECT id FROM restaurant_profiles WHERE id = %s", (restaurant_id,))
+                if cur.fetchone() is None:
+                    raise ValueError("Restaurante associado não encontrado.")
+
+                # Insere na sua tabela existente `delivery_profiles`
+                cur.execute(
+                    """
+                    INSERT INTO delivery_profiles (id, user_id, restaurant_id, first_name, last_name)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (user_id, user_id, restaurant_id, full_name.split(' ')[0], ' '.join(full_name.split(' ')[1:]))
+                )
         
-        return jsonify({
-            "status": "success",
-            "message": f"Conta de {user_type} criada com sucesso!"
-        }), 201
+        conn.commit()
+        return jsonify({"status": "success", "message": f"Conta de {user_type} criada com sucesso!"}), 201
 
     except (AuthApiError, ValueError, psycopg2.Error) as e:
+        if conn: conn.rollback()
+        # Se a criação do usuário falhou, tenta reverter no Supabase Auth
         if user_id:
             try:
                 supabase.auth.admin.delete_user(user_id)
@@ -83,16 +112,14 @@ def register():
                 print(f"AVISO: Falha ao reverter criação do utilizador no Auth: {delete_e}")
         
         error_message = getattr(e, 'message', str(e))
-        
         if "User already registered" in error_message or "duplicate key value" in error_message:
             return jsonify({"status": "error", "error": "Este e-mail já está em uso."}), 409
             
         traceback.print_exc()
-        return jsonify({
-            "status": "error",
-            "error": "Ocorreu uma falha interna.",
-            "detail": error_message
-        }), 500
+        return jsonify({"status": "error", "error": "Ocorreu uma falha interna.", "detail": error_message}), 500
+    finally:
+        if conn: conn.close()
+
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
@@ -144,6 +171,7 @@ def login():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "error": "Ocorreu um erro inesperado."}), 500
+
 
 @auth_bp.route('/profile', methods=['GET', 'PUT'])
 def handle_client_profile():
@@ -208,6 +236,7 @@ def handle_client_profile():
     finally:
         if conn:
             conn.close()
+
 
 @auth_bp.route('/avatar', methods=['POST'])
 def upload_avatar():
