@@ -12,7 +12,23 @@ load_dotenv()
 # --- Configuração do Supabase ---
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_KEY")
-supabase: Client = create_client(url, key)
+
+# Debug: Verifique se as variáveis estão sendo carregadas
+print("=== DEBUG: Variáveis de ambiente ===")
+print(f"SUPABASE_URL: {'✅' if url else '❌'} {url}")
+print(f"SUPABASE_KEY: {'✅' if key else '❌'} {key[:20]}...{key[-20:] if key and len(key) > 40 else ''}")
+print(f"DATABASE_URL: {'✅' if os.environ.get('DATABASE_URL') else '❌'}")
+print("===================================")
+
+if not url or not key:
+    raise ValueError("Variáveis de ambiente SUPABASE_URL e SUPABASE_KEY são necessárias")
+
+try:
+    supabase: Client = create_client(url, key)
+    print("✅ Cliente Supabase inicializado com sucesso")
+except Exception as e:
+    print(f"❌ Erro ao inicializar Supabase: {e}")
+    supabase = None
 
 # --- Conexão com o Banco de Dados ---
 def get_db_connection():
@@ -28,6 +44,9 @@ def get_db_connection():
         return conn
     except psycopg2.OperationalError as e:
         print(f"Erro de conexão com o banco de dados: {e}")
+        return None
+    except Exception as e:
+        print(f"Erro inesperado na conexão com o banco: {e}")
         return None
 
 # --- Função de Autenticação ---
@@ -75,8 +94,68 @@ def get_user_id_from_token(auth_header):
         user_type = db_user['user_type']
         
         # 3. Retorna os dados validados
-        return user_id, user_type, None, None  # Corrigido para retornar 4 valores
+        return user_id, user_type, None, None
 
     except Exception as e:
         print(f"Erro na validação do token: {e}")
         return None, None, jsonify({"error": "Token inválido ou expirado"}), 401
+
+# --- Função auxiliar para verificar se o usuário é admin ---
+def is_admin(user_id):
+    """Verifica se o usuário é administrador."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+            
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+            db_user = cur.fetchone()
+        
+        conn.close()
+
+        return db_user and db_user['user_type'] == 'admin'
+        
+    except Exception as e:
+        print(f"Erro ao verificar se usuário é admin: {e}")
+        return False
+
+# --- Função auxiliar para verificar se o usuário é estabelecimento ---
+def is_establishment(user_id):
+    """Verifica se o usuário é estabelecimento."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+            
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+            db_user = cur.fetchone()
+        
+        conn.close()
+
+        return db_user and db_user['user_type'] == 'establishment'
+        
+    except Exception as e:
+        print(f"Erro ao verificar se usuário é estabelecimento: {e}")
+        return False
+
+# --- Função auxiliar para verificar se o usuário é cliente ---
+def is_client(user_id):
+    """Verifica se o usuário é cliente."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+            
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+            db_user = cur.fetchone()
+        
+        conn.close()
+
+        return db_user and db_user['user_type'] == 'client'
+        
+    except Exception as e:
+        print(f"Erro ao verificar se usuário é cliente: {e}")
+        return False
