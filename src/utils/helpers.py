@@ -1,101 +1,78 @@
-# src/utils/helpers.py
+# src/utils/helpers.py (VERSÃO ATUALIZADA)
 
 import os
-from flask import jsonify
 import psycopg2
 import psycopg2.extras
+from flask import jsonify
 from supabase import create_client, Client
-from typing import Tuple, Optional, Union
+from dotenv import load_dotenv
 
-# Configuração centralizada
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-DATABASE_URL = os.environ.get("DATABASE_URL")
+load_dotenv()
 
-# Cliente Supabase
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# --- Configuração do Supabase ---
+url: str = os.environ.get("SUPABASE_URL")
+key: str = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(url, key)
 
+# --- Conexão com o Banco de Dados ---
 def get_db_connection():
-    """Estabelece conexão com o banco de dados PostgreSQL"""
+    """Estabelece e retorna uma conexão com o banco de dados PostgreSQL."""
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = False
+        conn = psycopg2.connect(
+            host=os.environ.get("DB_HOST"),
+            database=os.environ.get("DB_NAME"),
+            user=os.environ.get("DB_USER"),
+            password=os.environ.get("DB_PASSWORD"),
+            port=os.environ.get("DB_PORT")
+        )
         return conn
-    except Exception as e:
-        print(f"Erro na conexão com o banco de dados: {str(e)}")
+    except psycopg2.OperationalError as e:
+        print(f"Erro de conexão com o banco de dados: {e}")
         return None
 
-def get_user_id_from_token(auth_header: str) -> Tuple[Optional[str], Optional[str], Optional[tuple]]:
+# --- Função de Autenticação ---
+def get_user_id_from_token(auth_header):
     """
-    Validação robusta de token JWT com Supabase
-    
-    Retorna:
-        Tuple (user_id, user_type, error_response)
-    
-    Exemplo de uso:
-        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+    ✅ MODIFICADO: Valida o token JWT, extrai o ID do usuário e busca o tipo de usuário
+    diretamente do banco de dados para maior segurança.
     """
-    # Verificação básica do header
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return None, None, (jsonify({
-            "status": "error",
-            "error": "Cabeçalho de autorização ausente ou mal formatado",
-            "solution": "Inclua 'Bearer <token>' no header 'Authorization'"
-        }), 401)
-
-    token = auth_header.split(' ')[1].strip()
-    if not token:
-        return None, None, (jsonify({
-            "error": "Token vazio",
-            "details": "O token não pode ser uma string vazia"
-        }), 401)
-
-    try:
-        # Validação com Supabase (versão mais recente da biblioteca)
-        user_data = supabase.auth.get_user(token)
+    if not auth_header:
+        return None, None, jsonify({"error": "Token de autorização ausente"}), 401
+    
+    parts = auth_header.split()
+    if parts[0].lower() != 'bearer' or len(parts) != 2:
+        return None, None, jsonify({"error": "Formato do token inválido"}), 401
         
-        if not user_data or not hasattr(user_data, 'user'):
-            return None, None, (jsonify({
-                "error": "Credenciais inválidas",
-                "details": "O token não corresponde a nenhum usuário ativo"
-            }), 403)
-
-        user = user_data.user
+    jwt_token = parts[1]
+    
+    try:
+        # 1. Valida o token com o Supabase
+        user_response = supabase.auth.get_user(jwt_token)
+        user = user_response.user
+        if not user:
+            raise ValueError("Token inválido ou expirado")
+            
         user_id = str(user.id)
-        user_type = user.user_metadata.get('user_type')
 
-        # Verificação adicional no banco local (opcional)
+        # 2. Busca o tipo de usuário no nosso banco de dados (fonte da verdade)
         conn = get_db_connection()
-        if conn:
-            try:
-                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                    cur.execute(
-                        "SELECT user_type FROM users WHERE id = %s",
-                        (user_id,)
-                    )
-                    db_user = cur.fetchone()
-                    if db_user:
-                        user_type = db_user['user_type'] or user_type
-            except Exception as db_error:
-                print(f"Aviso: Erro ao verificar banco local - {str(db_error)}")
-            finally:
-                conn.close()
+        if not conn:
+            return None, None, jsonify({"error": "Falha na conexão com o banco de dados"}), 500
+            
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+            db_user = cur.fetchone()
+        
+        conn.close()
 
-        if not user_type:
-            return None, None, (jsonify({
-                "error": "Perfil incompleto",
-                "details": "O tipo de usuário não está definido",
-                "solution": "Complete seu cadastro no sistema"
-            }), 403)
-
+        if not db_user:
+            return None, None, jsonify({"error": "Usuário não encontrado no banco de dados local"}), 404
+            
+        user_type = db_user['user_type']
+        
+        # 3. Retorna os dados validados
         return user_id, user_type, None
 
     except Exception as e:
-        return None, None, (jsonify({
-            "status": "error",
-            "error": "Falha na autenticação",
-            "details": str(e),
-            "solution": "Tente novamente ou redefina seu token"
-        }), 401)
+        print(f"Erro na validação do token: {e}")
+        return None, None, jsonify({"error": "Token inválido ou expirado"}), 401
