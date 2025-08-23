@@ -43,7 +43,7 @@ def get_user_id_from_token(auth_header):
     if parts[0].lower() != 'bearer' or len(parts) != 2:
         return None, None, jsonify({"error": "Formato do token inválido"}), 401
         
-jwt_token = parts[1]
+    jwt_token = parts[1]
     
     try:
         # 1. Valida o token com o Supabase
@@ -75,9 +75,8 @@ jwt_token = parts[1]
         user_type = db_user['user_type']
         
         # 3. Retorna os dados validados
-        return user_id, user_type, None
+        return user_id, user_type, None, None  # Corrigido para retornar 4 valores
 
     except Exception as e:
         print(f"Erro na validação do token: {e}")
         return None, None, jsonify({"error": "Token inválido ou expirado"}), 401
-
