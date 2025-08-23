@@ -81,4 +81,3 @@ jwt_token = parts[1]
         print(f"Erro na validação do token: {e}")
         return None, None, jsonify({"error": "Token inválido ou expirado"}), 401
 
-
