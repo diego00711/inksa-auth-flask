@@ -1,4 +1,4 @@
-# src/utils/helpers.py (VERSÃO ATUALIZADA)
+# src/utils/helpers.py
 
 import os
 import psycopg2
@@ -16,15 +16,18 @@ supabase: Client = create_client(url, key)
 
 # --- Conexão com o Banco de Dados ---
 def get_db_connection():
-    """Estabelece e retorna uma conexão com o banco de dados PostgreSQL."""
+    """Estabelece e retorna uma conexão com o banco de dados PostgreSQL usando DATABASE_URL."""
     try:
-        conn = psycopg2.connect(
-            host=os.environ.get("DB_HOST"),
-            database=os.environ.get("DB_NAME"),
-            user=os.environ.get("DB_USER"),
-            password=os.environ.get("DB_PASSWORD"),
-            port=os.environ.get("DB_PORT")
-        )
+        # --- INÍCIO DA CORREÇÃO ---
+        # Obtém a URL de conexão completa do Supabase
+        database_url = os.environ.get("DATABASE_URL")
+        
+        if not database_url:
+            print("Erro: Variável de ambiente DATABASE_URL não encontrada.")
+            return None
+
+        conn = psycopg2.connect(database_url)
+        # --- FIM DA CORREÇÃO ---
         return conn
     except psycopg2.OperationalError as e:
         print(f"Erro de conexão com o banco de dados: {e}")
@@ -43,7 +46,7 @@ def get_user_id_from_token(auth_header):
     if parts[0].lower() != 'bearer' or len(parts) != 2:
         return None, None, jsonify({"error": "Formato do token inválido"}), 401
         
-    jwt_token = parts[1]
+jwt_token = parts[1]
     
     try:
         # 1. Valida o token com o Supabase
@@ -76,3 +79,4 @@ def get_user_id_from_token(auth_header):
     except Exception as e:
         print(f"Erro na validação do token: {e}")
         return None, None, jsonify({"error": "Token inválido ou expirado"}), 401
+
