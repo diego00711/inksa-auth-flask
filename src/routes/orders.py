@@ -1,6 +1,8 @@
 # src/routes/orders.py
 import uuid
 import json
+import random
+import string
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
 import psycopg2
@@ -21,8 +23,6 @@ orders_bp = Blueprint('orders', __name__)
 
 DEFAULT_DELIVERY_FEE = 5.0
 
-# Mapeamento de status (Frontend em Português -> Backend em Inglês)
-# Centraliza a "tradução" para manter o código consistente.
 VALID_STATUSES = {
     'Pendente': 'pending',
     'Aceito': 'accepted', 
@@ -33,30 +33,29 @@ VALID_STATUSES = {
     'Cancelado': 'cancelled'
 }
 
-# Mapeamento reverso para exibição (Backend em Inglês -> Frontend em Português)
-# Usado para enviar dados de volta ao frontend no formato que ele espera.
 STATUS_DISPLAY = {v: k for k, v in VALID_STATUSES.items()}
 
+# --- Funções Auxiliares ---
+
+def generate_verification_code(length=4):
+    """Gera um código alfanumérico aleatório de 4 dígitos (ex: 'A4B8')."""
+    chars = string.ascii_uppercase.replace('I', '').replace('O', '') + string.digits.replace('0', '').replace('1', '')
+    return ''.join(random.choice(chars) for _ in range(length))
 
 def is_valid_status_transition(current_status, new_status):
-    """
-    ✅ FUNÇÃO CENTRAL PARA A CORREÇÃO: Valida as transições de status permitidas.
-    Define o fluxo de trabalho dos pedidos e resolve o erro original.
-    """
+    """Valida as transições de status permitidas (sem considerar os códigos)."""
     valid_transitions = {
-        'pending': ['accepted', 'cancelled'],      # De Pendente, pode Aceitar ou Cancelar.
-        'accepted': ['preparing', 'cancelled'],    # De Aceito, pode Preparar ou Cancelar.
-        'preparing': ['ready', 'cancelled'],       # De Preparando, pode marcar como Pronto ou Cancelar.
-        'ready': ['delivering', 'cancelled'],      # De Pronto, pode sair para Entrega ou Cancelar.
-        'delivering': ['delivered'],               # De Em Entrega, só pode marcar como Entregue.
-        'delivered': [],                           # Estado final, não pode ser alterado.
-        'cancelled': []                            # Estado final, não pode ser alterado.
+        'pending': ['accepted', 'cancelled'],
+        'accepted': ['preparing', 'cancelled'],
+        'preparing': ['ready', 'cancelled'],
+        'ready': ['delivering', 'cancelled'], # A transição para 'delivering' será controlada pelo endpoint /pickup
+        'delivering': ['delivered'],          # A transição para 'delivered' será controlada pelo endpoint /complete
+        'delivered': [],
+        'cancelled': []
     }
-    
-    # Retorna True se a transição `new_status` estiver na lista de transições
-    # permitidas para o `current_status`.
     return new_status in valid_transitions.get(current_status, [])
 
+# --- Rotas da API ---
 
 @orders_bp.route('/', methods=['GET', 'POST'])
 def handle_orders():
@@ -89,7 +88,8 @@ def handle_orders():
             if sort_order.upper() not in {'ASC', 'DESC'}:
                 return jsonify({"error": "Direção de ordenação inválida. Use 'asc' ou 'desc'"}), 400
 
-            query = "SELECT o.*, rp.restaurant_name, rp.logo_url as restaurant_logo, cp.first_name as client_first_name, cp.last_name as client_last_name FROM orders o LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id LEFT JOIN client_profiles cp ON o.client_id = cp.id WHERE 1=1"
+            # Oculta códigos de verificação na listagem geral por segurança
+            query = "SELECT o.id, o.client_id, o.restaurant_id, o.items, o.delivery_address, o.total_amount_items, o.delivery_fee, o.total_amount, o.status, o.created_at, o.updated_at, rp.restaurant_name, rp.logo_url as restaurant_logo, cp.first_name as client_first_name, cp.last_name as client_last_name FROM orders o LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id LEFT JOIN client_profiles cp ON o.client_id = cp.id WHERE 1=1"
             params = []
 
             if user_type == 'restaurant':
@@ -110,7 +110,7 @@ def handle_orders():
             query += f" ORDER BY o.{sort_by} {sort_order}"
 
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute(query, params)
+                cur.execute(query, tuple(params))
                 orders = []
                 for row in cur.fetchall():
                     order_dict = dict(row)
@@ -144,13 +144,15 @@ def handle_orders():
                     'client_id': client_profile['id'],
                     'restaurant_id': data['restaurant_id'],
                     'items': json.dumps(data['items']),
-                    'delivery_address': data['delivery_address'],
+                    'delivery_address': json.dumps(data['delivery_address']),
                     'total_amount_items': total_items,
                     'delivery_fee': delivery_fee,
                     'total_amount': total_items + delivery_fee,
                     'status': 'pending',
                     'created_at': datetime.now(),
-                    'updated_at': datetime.now()
+                    'updated_at': datetime.now(),
+                    'pickup_code': generate_verification_code(),
+                    'delivery_code': generate_verification_code()
                 }
                 
                 columns = ', '.join(order_data.keys())
@@ -160,6 +162,9 @@ def handle_orders():
                 conn.commit()
 
                 order_dict = dict(new_order)
+                # Ocultar códigos na resposta ao cliente por segurança
+                order_dict.pop('pickup_code', None)
+                order_dict.pop('delivery_code', None)
                 order_dict['status_display'] = STATUS_DISPLAY.get(order_dict['status'], order_dict['status'])
                 
                 return jsonify({"status": "success", "message": "Pedido criado com sucesso", "data": order_dict}), 201
@@ -176,111 +181,152 @@ def handle_orders():
 
 @orders_bp.route('/<uuid:order_id>/status', methods=['PUT'])
 def update_order_status(order_id):
-    """Atualiza o status de um pedido específico."""
-    logger.info("=== INÍCIO UPDATE_ORDER_STATUS ===")
-    logger.info(f"Order ID recebido: {order_id}")
+    """Atualiza o status de um pedido (exceto para 'delivering' e 'delivered', que usam rotas próprias)."""
+    logger.info(f"=== INÍCIO UPDATE_ORDER_STATUS para {order_id} ===")
     conn = None
     
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
 
         if user_type != 'restaurant':
-            logger.warning(f"Acesso negado para tipo de usuário: {user_type}")
             return jsonify({"error": "Apenas restaurantes podem alterar o status de um pedido"}), 403
 
         data = request.get_json()
         if not data or 'status' not in data:
-            logger.error(f"Payload JSON inválido ou campo 'status' ausente. Recebido: {data}")
-            return jsonify({"error": "Campo 'status' é obrigatório no corpo da requisição"}), 400
+            return jsonify({"error": "Campo 'status' é obrigatório"}), 400
 
         new_status_display = data['status']
         if new_status_display not in VALID_STATUSES:
-            logger.error(f"Status inválido recebido: '{new_status_display}'")
             return jsonify({"error": f"Status inválido. Válidos: {list(VALID_STATUSES.keys())}"}), 400
         
         new_status_internal = VALID_STATUSES[new_status_display]
-        logger.info(f"Status solicitado: '{new_status_display}' -> Convertido para: '{new_status_internal}'")
+        
+        # Impede que esta rota seja usada para as transições controladas por código
+        if new_status_internal in ['delivering', 'delivered']:
+            return jsonify({"error": f"Para mudar o status para '{new_status_display}', use o endpoint de verificação de código apropriado."}), 400
 
         conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
-
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("""
-                SELECT o.id, o.status, o.restaurant_id 
-                FROM orders o
-                JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.id = %s AND rp.user_id = %s
-            """, (str(order_id), user_auth_id))
+            cur.execute("SELECT o.status FROM orders o JOIN restaurant_profiles rp ON o.restaurant_id = rp.id WHERE o.id = %s AND rp.user_id = %s", (str(order_id), user_auth_id))
             order = cur.fetchone()
             
             if not order:
-                logger.warning(f"Pedido {order_id} não encontrado ou não pertence ao restaurante do usuário {user_auth_id}")
                 return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
 
             current_status = order['status']
-            logger.info(f"Status atual do pedido: '{current_status}'")
-
             if not is_valid_status_transition(current_status, new_status_internal):
-                logger.warning(f"Transição de status inválida: de '{current_status}' para '{new_status_internal}'")
-                return jsonify({
-                    "error": "Transição de status não permitida",
-                    "from": STATUS_DISPLAY.get(current_status, current_status),
-                    "to": new_status_display
-                }), 400
+                return jsonify({"error": "Transição de status não permitida"}), 400
 
-            logger.info(f"Atualizando status de '{current_status}' para '{new_status_internal}'")
-            cur.execute(
-                "UPDATE orders SET status = %s, updated_at = %s WHERE id = %s RETURNING *",
-                (new_status_internal, datetime.now(), str(order_id))
-            )
+            cur.execute("UPDATE orders SET status = %s, updated_at = %s WHERE id = %s RETURNING *", (new_status_internal, datetime.now(), str(order_id)))
             updated_order = cur.fetchone()
             conn.commit()
 
             order_dict = dict(updated_order)
+            order_dict.pop('pickup_code', None)
+            order_dict.pop('delivery_code', None)
             order_dict['status_display'] = STATUS_DISPLAY.get(order_dict['status'], order_dict['status'])
 
-            logger.info(f"Status do pedido {order_id} atualizado com sucesso.")
-            return jsonify({
-                "status": "success",
-                "message": f"Status atualizado para '{new_status_display}'",
-                "data": order_dict
-            }), 200
+            return jsonify({"status": "success", "message": f"Status atualizado para '{new_status_display}'", "data": order_dict}), 200
 
     except Exception as e:
-        logger.error(f"Erro inesperado em update_order_status: {e}", exc_info=True)
+        logger.error(f"Erro em update_order_status: {e}", exc_info=True)
         if conn: conn.rollback()
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
-            logger.info("Conexão com banco fechada em update_order_status")
-        logger.info("=== FIM UPDATE_ORDER_STATUS ===")
+        if conn: conn.close()
+
+
+@orders_bp.route('/<uuid:order_id>/pickup', methods=['POST'])
+def pickup_order(order_id):
+    """Endpoint para o entregador usar o código de retirada e mover o status para 'delivering'."""
+    logger.info(f"=== INÍCIO PICKUP_ORDER para {order_id} ===")
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error: return error
+        if user_type not in ['restaurant', 'driver']: # Futuramente, pode ser apenas 'driver'
+            return jsonify({"error": "Acesso não autorizado para retirada"}), 403
+
+        data = request.get_json()
+        if not data or 'pickup_code' not in data:
+            return jsonify({"error": "Código de retirada (pickup_code) é obrigatório"}), 400
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT status, pickup_code FROM orders WHERE id = %s", (str(order_id),))
+            order = cur.fetchone()
+
+            if not order: return jsonify({"error": "Pedido não encontrado"}), 404
+            if order['status'] != 'ready': return jsonify({"error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY.get(order['status'])}"}), 400
+            if order['pickup_code'] != data['pickup_code'].upper(): return jsonify({"error": "Código de retirada inválido"}), 403
+
+            cur.execute("UPDATE orders SET status = 'delivering', updated_at = %s WHERE id = %s", (datetime.now(), str(order_id)))
+            conn.commit()
+            logger.info(f"Pedido {order_id} retirado com sucesso.")
+            return jsonify({"status": "success", "message": "Pedido retirado e em rota de entrega."}), 200
+
+    except Exception as e:
+        logger.error(f"Erro em pickup_order: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn: conn.close()
+
+
+@orders_bp.route('/<uuid:order_id>/complete', methods=['POST'])
+def complete_order(order_id):
+    """Endpoint para o entregador usar o código de entrega e mover o status para 'delivered'."""
+    logger.info(f"=== INÍCIO COMPLETE_ORDER para {order_id} ===")
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error: return error
+        if user_type not in ['restaurant', 'driver']:
+            return jsonify({"error": "Acesso não autorizado para completar a entrega"}), 403
+
+        data = request.get_json()
+        if not data or 'delivery_code' not in data:
+            return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT status, delivery_code FROM orders WHERE id = %s", (str(order_id),))
+            order = cur.fetchone()
+
+            if not order: return jsonify({"error": "Pedido não encontrado"}), 404
+            if order['status'] != 'delivering': return jsonify({"error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY.get(order['status'])}"}), 400
+            if order['delivery_code'] != data['delivery_code'].upper(): return jsonify({"error": "Código de entrega inválido"}), 403
+
+            cur.execute("UPDATE orders SET status = 'delivered', updated_at = %s WHERE id = %s", (datetime.now(), str(order_id)))
+            conn.commit()
+            logger.info(f"Pedido {order_id} entregue com sucesso.")
+            return jsonify({"status": "success", "message": "Pedido entregue com sucesso!"}), 200
+
+    except Exception as e:
+        logger.error(f"Erro em complete_order: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn: conn.close()
 
 
 @orders_bp.route('/valid-statuses', methods=['GET'])
 def get_valid_statuses():
-    """✅ NOVO ENDPOINT: Retorna os status válidos para o tipo de usuário."""
+    """Retorna os status válidos para o tipo de usuário."""
     logger.info("=== INÍCIO get_valid_statuses ===")
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
         
-        # Define quais status cada tipo de usuário pode ver/usar
         if user_type == 'restaurant':
-            available_statuses = list(VALID_STATUSES.keys())
+            available_statuses = ['Aceito', 'Preparando', 'Pronto', 'Cancelado']
         elif user_type == 'client':
-            available_statuses = ['Cancelado'] # Exemplo: cliente só pode cancelar
+            available_statuses = ['Cancelado']
         else:
             available_statuses = []
         
-        return jsonify({
-            "status": "success",
-            "valid_statuses": available_statuses
-        }), 200
+        return jsonify({"status": "success", "valid_statuses": available_statuses}), 200
         
     except Exception as e:
         logger.error(f"Erro ao obter status válidos: {e}", exc_info=True)
@@ -289,20 +335,15 @@ def get_valid_statuses():
 
 @orders_bp.route('/<uuid:order_id>/status-history', methods=['GET'])
 def get_order_status_history(order_id):
-    """✅ NOVO ENDPOINT: Retorna o histórico de status de um pedido."""
+    """Retorna o histórico de status de um pedido."""
     logger.info("=== INÍCIO get_order_status_history ===")
     conn = None
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
         
         conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
-            
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Verifica se o usuário (restaurante ou cliente) tem permissão para ver o pedido
             if user_type == 'restaurant':
                 cur.execute("SELECT o.* FROM orders o JOIN restaurant_profiles rp ON o.restaurant_id = rp.id WHERE o.id = %s AND rp.user_id = %s", (str(order_id), user_auth_id))
             elif user_type == 'client':
@@ -314,26 +355,17 @@ def get_order_status_history(order_id):
             if not order:
                 return jsonify({"error": "Pedido não encontrado ou acesso negado"}), 404
             
-            # NOTA: Esta é uma implementação simplificada.
-            # Uma implementação completa teria uma tabela `order_status_history`
-            # para registrar cada mudança de status.
+            # NOTA: Implementação simplificada. Idealmente, haveria uma tabela `order_status_history`.
             history = [{
                 "status": STATUS_DISPLAY.get(order['status'], order['status']),
                 "timestamp": order['updated_at'].isoformat(),
-                "changed_by": "system" # Simplificado
+                "changed_by": "system"
             }]
             
-            return jsonify({
-                "status": "success",
-                "order_id": str(order_id),
-                "history": history
-            }), 200
+            return jsonify({"status": "success", "order_id": str(order_id), "history": history}), 200
             
     except Exception as e:
         logger.error(f"Erro ao obter histórico do pedido: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
     finally:
-        if conn:
-            conn.close()
-            logger.info("Conexão com banco fechada em get_order_status_history")
-
+        if conn: conn.close()
