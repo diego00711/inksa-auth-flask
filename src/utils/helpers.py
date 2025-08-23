@@ -18,8 +18,6 @@ supabase: Client = create_client(url, key)
 def get_db_connection():
     """Estabelece e retorna uma conexão com o banco de dados PostgreSQL usando DATABASE_URL."""
     try:
-        # --- INÍCIO DA CORREÇÃO ---
-        # Obtém a URL de conexão completa do Supabase
         database_url = os.environ.get("DATABASE_URL")
         
         if not database_url:
@@ -27,7 +25,6 @@ def get_db_connection():
             return None
 
         conn = psycopg2.connect(database_url)
-        # --- FIM DA CORREÇÃO ---
         return conn
     except psycopg2.OperationalError as e:
         print(f"Erro de conexão com o banco de dados: {e}")
@@ -36,7 +33,7 @@ def get_db_connection():
 # --- Função de Autenticação ---
 def get_user_id_from_token(auth_header):
     """
-    ✅ MODIFICADO: Valida o token JWT, extrai o ID do usuário e busca o tipo de usuário
+    Valida o token JWT, extrai o ID do usuário e busca o tipo de usuário
     diretamente do banco de dados para maior segurança.
     """
     if not auth_header:
@@ -50,6 +47,10 @@ jwt_token = parts[1]
     
     try:
         # 1. Valida o token com o Supabase
+        if not supabase:
+            print("Erro: Cliente Supabase não inicializado. Verifique as variáveis de ambiente SUPABASE_URL e SUPABASE_KEY.")
+            return None, None, jsonify({"error": "Configuração do servidor incompleta"}), 500
+
         user_response = supabase.auth.get_user(jwt_token)
         user = user_response.user
         if not user:
@@ -79,4 +80,5 @@ jwt_token = parts[1]
     except Exception as e:
         print(f"Erro na validação do token: {e}")
         return None, None, jsonify({"error": "Token inválido ou expirado"}), 401
+
 
