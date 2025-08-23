@@ -2,7 +2,7 @@
 
 # APLICA O PATCH DO EVENTLET ANTES DE QUALQUER OUTRO IMPORT
 import eventlet
-eventlet.monkey_patch()
+eventlet.monkey_patch( )
 
 # Imports padrão do projeto continuam aqui
 import os
@@ -54,6 +54,34 @@ app.url_map.strict_slashes = False
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
 app.config.from_pyfile(config_path)
 
+# --- INÍCIO DA CORREÇÃO ---
+
+# Lista de todas as origens permitidas para CORS (desenvolvimento e produção)
+allowed_origins = [
+    # Origens de Desenvolvimento
+    "http://localhost:5173", 
+    "http://127.0.0.1:5173", 
+    "http://localhost:3000", 
+    "http://localhost:5174",
+    
+    # Origens de Produção
+    "https://clientes.inksadelivery.com.br",
+    "https://admin.inksadelivery.com.br", # Adicionei caso você tenha um painel de admin
+    "https://entregador.inksadelivery.com.br" # Adicionei para o app de entregador
+]
+
+# Configuração do CORS para permitir as origens listadas em todas as rotas /api/*
+CORS(app, 
+     resources={r"/api/*": {"origins": allowed_origins}},
+     supports_credentials=True
+ )
+
+# Configuração do SocketIO para usar a mesma lista de origens permitidas
+# Adicionamos async_mode='eventlet' para ser explícito
+socketio = SocketIO(app, cors_allowed_origins=allowed_origins, async_mode='eventlet')
+
+# --- FIM DA CORREÇÃO ---
+
 # Registro de blueprints
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
@@ -69,16 +97,6 @@ app.register_blueprint(payouts_bp, url_prefix='/api/admin')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
-
-# Configuração do CORS
-CORS(app, 
-     resources={r"/api/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://localhost:5174"]}},
-     supports_credentials=True
-   )
-
-# Configuração do SocketIO
-# Adicionamos async_mode='eventlet' para ser explícito
-socketio = SocketIO(app, cors_allowed_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://localhost:5174"], async_mode='eventlet' )
 
 # Configuração do Mercado Pago
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
@@ -100,3 +118,4 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     logging.info('Cliente desconectado')
+
