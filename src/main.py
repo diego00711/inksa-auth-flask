@@ -1,14 +1,14 @@
 # src/main.py
 
-# APLICA O PATCH DO EVENTLET ANTES DE QUALQUER OUTRO IMPORT
-import eventlet
-eventlet.monkey_patch()
+# REMOVA o monkey patch do eventlet - está causando conflito com Gunicorn no Render
+# import eventlet
+# eventlet.monkey_patch()
 
 # Imports padrão do projeto continuam aqui
 import os
 import sys
 from pathlib import Path
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_socketio import SocketIO
@@ -22,6 +22,7 @@ sys.path.insert(0, str(project_root))
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Carrega as variáveis de ambiente
 load_dotenv()
@@ -67,26 +68,37 @@ allowed_origins = [
     "http://127.0.0.1:5173", 
     "http://localhost:3000", 
     "http://localhost:5174",
+    "http://localhost:5175",
     
-    # Origens de Produção
+    # Origens de Produção - TODOS OS SUBDOMÍNIOS
     "https://clientes.inksadelivery.com.br",
+    "https://restaurante.inksadelivery.com.br",  # ✅ FRONTEND RESTAURANTE
     "https://admin.inksadelivery.com.br",
     "https://entregador.inksadelivery.com.br",
-    "https://www.inksadelivery.com.br"  # Adicionei o domínio principal também
+    "https://app.inksadelivery.com.br",
+    "https://*.inksadelivery.com.br",  # ✅ TODOS OS SUBDOMÍNIOS
+    "https://inksadelivery.com.br"
 ]
 
-# Configuração do CORS para permitir as origens listadas em todas as rotas /api/*
+# Configuração do CORS para permitir todas as origens
 CORS(app, 
-     resources={r"/api/*": {"origins": allowed_origins}},
+     resources={r"/api/*": {
+         "origins": allowed_origins,
+         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+         "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+         "expose_headers": ["Content-Type", "Authorization"],
+         "supports_credentials": True,
+         "max_age": 600
+     }},
      supports_credentials=True
 )
 
 # Configuração do SocketIO para usar a mesma lista de origens permitidas
 socketio = SocketIO(app, 
-                   cors_allowed_origins=allowed_origins, 
-                   async_mode='eventlet',
-                   logger=True,
-                   engineio_logger=True)
+                   cors_allowed_origins=allowed_origins,
+                   async_mode='gevent',  # ✅ Alterado para gevent para evitar conflitos
+                   logger=False,         # ✅ Desativado logs em produção
+                   engineio_logger=False)
 
 # Registro de blueprints
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
@@ -113,12 +125,46 @@ else:
     app.mp_sdk = None
     logging.warning("MERCADO_PAGO_ACCESS_TOKEN não encontrado!")
 
+# Middleware para logging de requests
+@app.before_request
+def before_request():
+    logger.info(f"{request.method} {request.path} - Origin: {request.headers.get('Origin')}")
+
+# Middleware para headers CORS em todas as respostas
+@app.after_request
+def after_request(response):
+    """Adiciona headers CORS em todas as respostas"""
+    origin = request.headers.get('Origin')
+    if origin and origin in allowed_origins:
+        response.headers.add('Access-Control-Allow-Origin', origin)
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    response.headers.add('Access-Control-Max-Age', '600')
+    return response
+
+# Handler para requisições OPTIONS (preflight)
+@app.before_request
+def handle_preflight():
+    """Manipula requisições OPTIONS (preflight)"""
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "preflight_ok"})
+        origin = request.headers.get('Origin')
+        if origin and origin in allowed_origins:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Max-Age', '600')
+        return response
+
 @app.route('/')
 def index():
     return jsonify({
         "status": "online",
         "message": "Servidor Inksa funcionando!",
         "version": "1.0.0",
+        "cors_allowed_origins": allowed_origins,
         "endpoints": {
             "auth": "/api/auth",
             "orders": "/api/orders",
@@ -126,7 +172,8 @@ def index():
             "restaurant": "/api/restaurant",
             "payment": "/api/payment",
             "admin": "/api/admin",
-            "delivery": "/api/delivery"
+            "delivery": "/api/delivery",
+            "health": "/api/health"
         }
     })
 
@@ -135,36 +182,54 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "database": "connected" if supabase else "disconnected",
-        "mercado_pago": "configured" if app.mp_sdk else "not_configured"
+        "mercado_pago": "configured" if app.mp_sdk else "not_configured",
+        "cors_enabled": True,
+        "allowed_origins_count": len(allowed_origins)
+    })
+
+@app.route('/api/cors-test')
+def cors_test():
+    """Endpoint para testar CORS"""
+    return jsonify({
+        "message": "CORS test successful",
+        "your_origin": request.headers.get('Origin'),
+        "allowed": request.headers.get('Origin') in allowed_origins
     })
 
 @socketio.on('connect')
 def handle_connect():
-    logging.info('Cliente conectado via WebSocket')
-    return {'status': 'connected'}
+    logger.info(f'Cliente conectado via WebSocket: {request.sid}')
+    return {'status': 'connected', 'sid': request.sid}
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    logging.info('Cliente desconectado')
+    logger.info(f'Cliente desconectado: {request.sid}')
 
 @socketio.on('ping')
 def handle_ping(data):
-    logging.info(f'Ping recebido: {data}')
-    return {'response': 'pong'}
+    logger.info(f'Ping recebido de {request.sid}: {data}')
+    return {'response': 'pong', 'sid': request.sid}
 
 # Error handlers
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({"error": "Endpoint não encontrado"}), 404
+    return jsonify({"error": "Endpoint não encontrado", "path": request.path}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
+    logger.error(f"Erro interno: {error}")
     return jsonify({"error": "Erro interno do servidor"}), 500
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({"error": "Método não permitido", "method": request.method}), 405
 
 if __name__ == '__main__':
     # Para desenvolvimento local
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
     
-    logging.info(f"Iniciando servidor na porta {port} (debug: {debug})")
+    logger.info(f"Iniciando servidor na porta {port} (debug: {debug})")
+    logger.info(f"Origens CORS permitidas: {allowed_origins}")
+    
     socketio.run(app, host='0.0.0.0', port=port, debug=debug, use_reloader=debug)
