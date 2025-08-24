@@ -1,6 +1,6 @@
 # src/main.py
 
-# REMOVA o monkey patch do eventlet - está causando conflito com Gunicorn no Render
+# REMOVA o monkey patch do eventlet
 # import eventlet
 # eventlet.monkey_patch()
 
@@ -72,32 +72,30 @@ allowed_origins = [
     
     # Origens de Produção - TODOS OS SUBDOMÍNIOS
     "https://clientes.inksadelivery.com.br",
-    "https://restaurante.inksadelivery.com.br",  # ✅ FRONTEND RESTAURANTE
+    "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
     "https://entregador.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
-    "https://*.inksadelivery.com.br",  # ✅ TODOS OS SUBDOMÍNIOS
     "https://inksadelivery.com.br"
 ]
 
-# Configuração do CORS para permitir todas as origens
+# Configuração do CORS - SIMPLIFICADA (sem middleware duplicado)
 CORS(app, 
      resources={r"/api/*": {
          "origins": allowed_origins,
          "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
          "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
-         "expose_headers": ["Content-Type", "Authorization"],
          "supports_credentials": True,
          "max_age": 600
      }},
      supports_credentials=True
 )
 
-# Configuração do SocketIO para usar a mesma lista de origens permitidas
+# Configuração do SocketIO
 socketio = SocketIO(app, 
                    cors_allowed_origins=allowed_origins,
-                   async_mode='gevent',  # ✅ Alterado para gevent para evitar conflitos
-                   logger=False,         # ✅ Desativado logs em produção
+                   async_mode='eventlet',
+                   logger=False,
                    engineio_logger=False)
 
 # Registro de blueprints
@@ -125,38 +123,10 @@ else:
     app.mp_sdk = None
     logging.warning("MERCADO_PAGO_ACCESS_TOKEN não encontrado!")
 
-# Middleware para logging de requests
+# Middleware para logging de requests (APENAS LOGGING)
 @app.before_request
 def before_request():
     logger.info(f"{request.method} {request.path} - Origin: {request.headers.get('Origin')}")
-
-# Middleware para headers CORS em todas as respostas
-@app.after_request
-def after_request(response):
-    """Adiciona headers CORS em todas as respostas"""
-    origin = request.headers.get('Origin')
-    if origin and origin in allowed_origins:
-        response.headers.add('Access-Control-Allow-Origin', origin)
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    response.headers.add('Access-Control-Max-Age', '600')
-    return response
-
-# Handler para requisições OPTIONS (preflight)
-@app.before_request
-def handle_preflight():
-    """Manipula requisições OPTIONS (preflight)"""
-    if request.method == "OPTIONS":
-        response = jsonify({"status": "preflight_ok"})
-        origin = request.headers.get('Origin')
-        if origin and origin in allowed_origins:
-            response.headers.add('Access-Control-Allow-Origin', origin)
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Max-Age', '600')
-        return response
 
 @app.route('/')
 def index():
