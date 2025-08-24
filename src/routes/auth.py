@@ -1,5 +1,14 @@
 # src/routes/auth.py
 
+from flask import Blueprint, request, jsonify
+import logging
+from src.utils.helpers import get_db_connection, supabase, get_user_info
+
+# DEFINIR O BLUEPRINT PRIMEIRO!
+auth_bp = Blueprint('auth', __name__)
+logger = logging.getLogger(__name__)
+
+# AGORA SIM USAR O BLUEPRINT NAS ROTAS
 @auth_bp.route('/login', methods=['POST'])
 def login():
     try:
@@ -67,3 +76,46 @@ def login():
     except Exception as e:
         logger.error(f"Erro no login: {str(e)}")
         return jsonify({"error": "Erro interno no servidor"}), 500
+
+@auth_bp.route('/profile', methods=['GET'])
+def handle_client_profile():
+    """Obtém o perfil do usuário autenticado."""
+    try:
+        from src.utils.helpers import get_user_id_from_token
+        
+        # A função retorna 4 valores
+        user_id, user_type, error, status_code = get_user_id_from_token(request.headers.get('Authorization'))
+        
+        if error:
+            return error, status_code
+            
+        # Buscar informações completas do usuário
+        user_info = get_user_info(user_id)
+        if not user_info:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+            
+        return jsonify({
+            "user": {
+                "id": user_info['id'],
+                "email": user_info['email'],
+                "name": user_info['email'].split('@')[0],  # Nome do email
+                "user_type": user_info['user_type'],
+                "created_at": user_info['created_at'].isoformat() if user_info['created_at'] else None
+            }
+        }), 200
+            
+    except Exception as e:
+        logger.error(f"Erro ao obter perfil: {str(e)}")
+        return jsonify({"error": "Erro interno ao obter perfil"}), 500
+
+@auth_bp.route('/register', methods=['POST'])
+def register():
+    try:
+        data = request.get_json()
+        # ... implementação do registro
+        return jsonify({"message": "Implementar registro"}), 200
+    except Exception as e:
+        logger.error(f"Erro no registro: {str(e)}")
+        return jsonify({"error": "Erro interno no servidor"}), 500
+
+# Outras rotas de auth...
