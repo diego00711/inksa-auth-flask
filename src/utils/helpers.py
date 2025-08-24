@@ -77,7 +77,7 @@ def get_user_id_from_token(auth_header):
     try:
         # 1. Valida o token com o Supabase
         if not supabase:
-            logger.error("Erro: Cliente Supabase não inicializado. Verifique as variáveis de ambiente SUPABASE_URL e SUPABASE_KEY.")
+            logger.error("Erro: Cliente Supabase não inicializado. Verifique as variáveis de ambiente SUPABASE_URL and SUPABASE_KEY.")
             return None, None, jsonify({"error": "Configuração do servidor incompleta"}), 500
 
         user_response = supabase.auth.get_user(jwt_token)
@@ -87,14 +87,15 @@ def get_user_id_from_token(auth_header):
             
         user_id = str(user.id)
 
-        # 2. Busca o tipo de usuário no nosso banco de dados (fonte da verdade)
+        # 2. Busca o tipo de usuário na tabela public.users (sua tabela personalizada)
         conn = get_db_connection()
         if not conn:
             return None, None, jsonify({"error": "Falha na conexão com o banco de dados"}), 500
             
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+                # CORREÇÃO: Buscar da tabela public.users
+                cur.execute("SELECT user_type FROM public.users WHERE id = %s", (user_id,))
                 db_user = cur.fetchone()
             
             if not db_user:
@@ -124,7 +125,8 @@ def is_admin(user_id):
             return False
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+            # CORREÇÃO: Buscar da tabela public.users
+            cur.execute("SELECT user_type FROM public.users WHERE id = %s", (user_id,))
             db_user = cur.fetchone()
         
         conn.close()
@@ -144,7 +146,8 @@ def is_establishment(user_id):
             return False
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+            # CORREÇÃO: Buscar da tabela public.users
+            cur.execute("SELECT user_type FROM public.users WHERE id = %s", (user_id,))
             db_user = cur.fetchone()
         
         conn.close()
@@ -164,7 +167,8 @@ def is_client(user_id):
             return False
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+            # CORREÇÃO: Buscar da tabela public.users
+            cur.execute("SELECT user_type FROM public.users WHERE id = %s", (user_id,))
             db_user = cur.fetchone()
         
         conn.close()
@@ -175,18 +179,40 @@ def is_client(user_id):
         logger.error(f"❌ Erro ao verificar se usuário é cliente: {e}")
         return False
 
+# --- Função auxiliar para verificar se o usuário é entregador ---
+def is_delivery(user_id):
+    """Verifica se o usuário é entregador."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+            
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # CORREÇÃO: Buscar da tabela public.users
+            cur.execute("SELECT user_type FROM public.users WHERE id = %s", (user_id,))
+            db_user = cur.fetchone()
+        
+        conn.close()
+
+        return db_user and db_user['user_type'] == 'delivery'
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao verificar se usuário é entregador: {e}")
+        return False
+
 # --- Função para obter informações completas do usuário ---
 def get_user_info(user_id):
-    """Obtém informações completas do usuário."""
+    """Obtém informações completas do usuário da tabela public.users."""
     try:
         conn = get_db_connection()
         if not conn:
             return None
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # CORREÇÃO: Buscar da tabela public.users com colunas existentes
             cur.execute("""
-                SELECT id, email, name, user_type, restaurant_id, created_at 
-                FROM users WHERE id = %s
+                SELECT id, email, user_type, created_at, updated_at, last_login
+                FROM public.users WHERE id = %s
             """, (user_id,))
             user_info = cur.fetchone()
         
@@ -195,4 +221,24 @@ def get_user_info(user_id):
         
     except Exception as e:
         logger.error(f"❌ Erro ao obter informações do usuário: {e}")
+        return None
+
+# --- Função para obter tipo de usuário ---
+def get_user_type(user_id):
+    """Obtém apenas o tipo de usuário."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+            
+        with conn.cursor() as cur:
+            # CORREÇÃO: Buscar da tabela public.users
+            cur.execute("SELECT user_type FROM public.users WHERE id = %s", (user_id,))
+            result = cur.fetchone()
+        
+        conn.close()
+        return result[0] if result else None
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao obter tipo de usuário: {e}")
         return None
