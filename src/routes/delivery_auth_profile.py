@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINALMENTE CORRETA)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINAL E CORRIGIDA)
 
 import os
 import uuid
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (LÓGICA INVERTIDA E CORRIGIDA)
+# DECORATOR DE AUTENTICAÇÃO (CORREÇÃO FINAL DA LÓGICA)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
@@ -31,29 +31,28 @@ def delivery_token_required(f):
         if not auth_header:
             return jsonify({"error": "Token de autorização ausente"}), 401
 
-        # --- LÓGICA CORRIGIDA ---
-        token_data = get_user_id_from_token(auth_header)
+        # --- CORREÇÃO FINAL APLICADA AQUI ---
+        # Sempre desempacota 3 valores, pois get_user_id_from_token parece sempre retornar 3.
+        # O terceiro valor será a resposta de erro (se houver) ou None (se sucesso).
+        user_auth_id, user_type, error_response = get_user_id_from_token(auth_header)
 
-        # A função retorna 3 valores em caso de SUCESSO (user_id, user_type, None)
-        if len(token_data) == 3:
-            user_auth_id, user_type, _ = token_data # O terceiro valor (erro) é None, podemos ignorar
-
-            # Verifique se o user_type é 'entregador'
-            if user_type != 'entregador':
-                return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
-            
-            # Armazena o ID do usuário no contexto 'g' para uso na rota
-            g.user_auth_id = str(user_auth_id)
-            
-            # Continua para a função da rota
-            return f(*args, **kwargs)
-        
-        # Se o tamanho não for 3, significa que houve um erro e a função retornou 2 valores
-        else:
-            _, error_response = token_data
-            # O erro já vem formatado como uma resposta JSON
+        # Se error_response não for None, significa que houve um erro.
+        if error_response:
+            # error_response já é um objeto de resposta JSON.
             return error_response
+        
+        # Se chegou aqui, o token é válido e não houve erro.
+        # user_auth_id e user_type contêm os valores corretos.
 
+        # Verifica se o usuário é um entregador.
+        if user_type != 'entregador':
+            return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
+        
+        # Armazena o ID do usuário no contexto 'g' do Flask.
+        g.user_auth_id = str(user_auth_id)
+        
+        # Continua para a função da rota.
+        return f(*args, **kwargs)
     return decorated_function
 
 # ==============================================
