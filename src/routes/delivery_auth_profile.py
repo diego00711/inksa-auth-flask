@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO CORRIGIDA E FINAL)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINALMENTE CORRETA)
 
 import os
 import uuid
@@ -16,14 +16,13 @@ from flask_cors import cross_origin
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
-# Configuração de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (CORRIGIDO)
+# DECORATOR DE AUTENTICAÇÃO (LÓGICA INVERTIDA E CORRIGIDA)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
@@ -32,31 +31,29 @@ def delivery_token_required(f):
         if not auth_header:
             return jsonify({"error": "Token de autorização ausente"}), 401
 
-        # --- CORREÇÃO APLICADA AQUI ---
-        # Captura o retorno da função em uma única variável.
+        # --- LÓGICA CORRIGIDA ---
         token_data = get_user_id_from_token(auth_header)
 
-        # Verifica o tamanho do retorno para saber se foi sucesso ou erro.
+        # A função retorna 3 valores em caso de SUCESSO (user_id, user_type, None)
         if len(token_data) == 3:
-            # Se o tamanho é 3, significa que houve um erro.
-            _, _, error_response = token_data
-            # O erro já vem formatado como uma resposta JSON.
+            user_auth_id, user_type, _ = token_data # O terceiro valor (erro) é None, podemos ignorar
+
+            # Verifique se o user_type é 'entregador'
+            if user_type != 'entregador':
+                return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
+            
+            # Armazena o ID do usuário no contexto 'g' para uso na rota
+            g.user_auth_id = str(user_auth_id)
+            
+            # Continua para a função da rota
+            return f(*args, **kwargs)
+        
+        # Se o tamanho não for 3, significa que houve um erro e a função retornou 2 valores
+        else:
+            _, error_response = token_data
+            # O erro já vem formatado como uma resposta JSON
             return error_response
 
-        # Se chegou aqui, o token é válido e temos 2 valores.
-        user_auth_id, user_type = token_data
-
-        # Verifica se o usuário é um entregador.
-        # A sua função get_user_id_from_token provavelmente retorna 'entregador', não 'delivery'.
-        # Ajuste se necessário.
-        if user_type != 'entregador':
-            return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
-
-        # Armazena os dados no contexto global 'g' do Flask para uso nas rotas.
-        g.user_auth_id = str(user_auth_id)
-        
-        # Passa para a próxima função na cadeia.
-        return f(*args, **kwargs)
     return decorated_function
 
 # ==============================================
@@ -64,62 +61,60 @@ def delivery_token_required(f):
 # ==============================================
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, Decimal):
-            return float(obj)
-        if isinstance(obj, (datetime, date, time, timedelta)):
-            return obj.isoformat()
-        if isinstance(obj, uuid.UUID):
-            return str(obj)
+        if isinstance(obj, Decimal): return float(obj)
+        if isinstance(obj, (datetime, date, time, timedelta)): return obj.isoformat()
+        if isinstance(obj, uuid.UUID): return str(obj)
         return super().default(obj)
 
 def serialize_data(data):
     return json.loads(json.dumps(data, cls=CustomJSONEncoder))
 
 def sanitize_text(text):
-    if not text:
-        return text
+    if not text: return text
     return re.sub(r'[\x00-\x1F\x7F]', '', text.strip())
 
 # ==============================================
-# ROTAS DE PERFIL
+# ROTAS DE PERFIL (Estrutura mantida)
 # ==============================================
 @delivery_auth_profile_bp.route('/profile', methods=['GET', 'PUT'])
 @delivery_token_required
 def handle_profile():
     conn = None
     try:
-        # O user_auth_id agora vem do contexto 'g'
         user_id = g.user_auth_id
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Busca o perfil usando o user_id do token
             cur.execute("SELECT * FROM delivery_profiles WHERE user_id = %s", (user_id,))
             profile = cur.fetchone()
 
             if not profile:
-                return jsonify({"error": "Perfil de entregador não encontrado"}), 404
-            
+                # Se o perfil não existe, cria um perfil mínimo
+                cur.execute(
+                    """INSERT INTO delivery_profiles (user_id, first_name, phone) 
+                       VALUES (%s, 'Novo Entregador', '00000000000') RETURNING *""",
+                    (user_id,)
+                )
+                profile = cur.fetchone()
+                conn.commit()
+                logger.info(f"Novo perfil de entregador criado para user_id: {user_id}")
+
             profile_id = profile['id']
 
-            # --- MÉTODO GET ---
             if request.method == 'GET':
                 return jsonify({"data": serialize_data(dict(profile))}), 200
 
-            # --- MÉTODO PUT ---
             elif request.method == 'PUT':
                 if not request.is_json:
                     return jsonify({"error": "Content-Type deve ser application/json"}), 400
                 
                 data = request.get_json()
-                
                 allowed_fields = [
-                    'first_name', 'last_name', 'phone', 'cpf', 'birth_date',
-                    'vehicle_type', 'address_street', 'address_number',
-                    'address_complement', 'address_neighborhood', 'address_city',
-                    'address_state', 'address_zipcode', 'is_available'
+                    'first_name', 'last_name', 'phone', 'cpf', 'birth_date', 'vehicle_type', 
+                    'address_street', 'address_number', 'address_complement', 'address_neighborhood', 
+                    'address_city', 'address_state', 'address_zipcode', 'is_available'
                 ]
                 
                 update_data = {
@@ -128,42 +123,29 @@ def handle_profile():
                 }
 
                 if not update_data:
-                    return jsonify({"error": "Nenhum campo válido para atualização fornecido"}), 400
+                    return jsonify({"error": "Nenhum campo válido para atualização"}), 400
 
                 set_clauses = [f'"{field}" = %s' for field in update_data.keys()]
                 params = list(update_data.values())
                 params.append(profile_id)
 
-                query = f"""
-                    UPDATE delivery_profiles
-                    SET {', '.join(set_clauses)}, updated_at = NOW()
-                    WHERE id = %s
-                    RETURNING *
-                """
+                query = f"UPDATE delivery_profiles SET {', '.join(set_clauses)}, updated_at = NOW() WHERE id = %s RETURNING *"
                 
                 cur.execute(query, params)
                 updated_profile = cur.fetchone()
                 conn.commit()
 
-                if not updated_profile:
-                    return jsonify({"error": "Falha ao atualizar o perfil"}), 404
-                
-                return jsonify({
-                    "message": "Perfil atualizado com sucesso",
-                    "data": serialize_data(dict(updated_profile))
-                }), 200
+                return jsonify({"data": serialize_data(dict(updated_profile))}), 200
 
     except Exception as e:
         logger.error(f"Erro em handle_profile: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         return jsonify({"error": "Erro interno do servidor"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 # ==============================================
-# ROTA DE UPLOAD DE AVATAR (Simplificada para usar o mesmo padrão)
+# ROTA DE UPLOAD DE AVATAR (Estrutura mantida)
 # ==============================================
 @delivery_auth_profile_bp.route('/upload-avatar', methods=['POST'])
 @cross_origin()
@@ -174,10 +156,8 @@ def upload_avatar():
 
     avatar_file = request.files['avatar']
     file_ext = avatar_file.filename.rsplit('.', 1)[1].lower()
-    allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-
-    if file_ext not in allowed_extensions:
-        return jsonify({"error": f"Tipo de arquivo não permitido. Permitidos: {list(allowed_extensions)}"}), 400
+    if file_ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
+        return jsonify({"error": "Tipo de arquivo não permitido"}), 400
 
     conn = None
     try:
@@ -187,7 +167,7 @@ def upload_avatar():
             cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
             profile = cur.fetchone()
             if not profile:
-                return jsonify({"error": "Perfil de entregador não encontrado para associar o avatar"}), 404
+                return jsonify({"error": "Perfil não encontrado"}), 404
             profile_id = profile['id']
 
         bucket_name = "delivery-avatars"
@@ -195,30 +175,20 @@ def upload_avatar():
         file_content = avatar_file.read()
 
         supabase.storage.from_(bucket_name).upload(
-            path=file_path,
-            file=file_content,
+            path=file_path, file=file_content, 
             options={"content-type": avatar_file.content_type, "upsert": True}
         )
-        
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
 
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE delivery_profiles SET avatar_url = %s WHERE id = %s",
-                (public_url, profile_id)
-            )
+            cur.execute("UPDATE delivery_profiles SET avatar_url = %s WHERE id = %s", (public_url, profile_id))
             conn.commit()
 
-        return jsonify({
-            "message": "Avatar atualizado com sucesso",
-            "avatar_url": public_url
-        }), 200
+        return jsonify({"avatar_url": public_url}), 200
 
     except Exception as e:
         logger.error(f"Erro no upload de avatar: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return jsonify({"error": "Erro interno durante o upload do avatar"}), 500
+        if conn: conn.rollback()
+        return jsonify({"error": "Erro interno durante o upload"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
