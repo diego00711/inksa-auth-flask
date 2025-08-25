@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINALMENTE CORRETA E ROBUSTA)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM O RETURN CORRIGIDO)
 
 import os
 import uuid
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (CORREÇÃO ROBUSTA)
+# DECORATOR DE AUTENTICAÇÃO (COM O RETURN CORRIGIDO)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
@@ -31,26 +31,20 @@ def delivery_token_required(f):
         if not auth_header:
             return jsonify({"error": "Token de autorização ausente"}), 401
 
-        # --- CORREÇÃO ROBUSTA APLICADA AQUI ---
-        # A função get_user_id_from_token retorna ou (user_id, user_type) em sucesso,
-        # ou um objeto de resposta JSON em caso de erro.
         token_result = get_user_id_from_token(auth_header)
 
-        # Verifica se o resultado é uma tupla (sucesso) ou um objeto de resposta (erro)
         if isinstance(token_result, tuple) and len(token_result) == 2:
             user_auth_id, user_type = token_result
             
-            # Verifica se o usuário é um entregador.
             if user_type != 'entregador':
                 return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
             
-            # Armazena o ID do usuário no contexto 'g' do Flask.
             g.user_auth_id = str(user_auth_id)
             
-            # Continua para a função da rota.
+            # --- CORREÇÃO FINAL APLICADA AQUI ---
+            # Adiciona o "return" para que a resposta da função da rota seja enviada ao Flask.
             return f(*args, **kwargs)
         else:
-            # Se não for uma tupla de 2 elementos, é a resposta de erro.
             return token_result
 
     return decorated_function
@@ -90,7 +84,6 @@ def handle_profile():
             profile = cur.fetchone()
 
             if not profile:
-                # Se o perfil não existe, cria um perfil mínimo
                 cur.execute(
                     """INSERT INTO delivery_profiles (user_id, first_name, phone) 
                        VALUES (%s, 'Novo Entregador', '00000000000') RETURNING *""",
