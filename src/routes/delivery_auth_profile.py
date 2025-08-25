@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINAL E CORRIGIDA)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINALMENTE CORRETA E ROBUSTA)
 
 import os
 import uuid
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (CORREÇÃO FINAL DA LÓGICA)
+# DECORATOR DE AUTENTICAÇÃO (CORREÇÃO ROBUSTA)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
@@ -31,28 +31,28 @@ def delivery_token_required(f):
         if not auth_header:
             return jsonify({"error": "Token de autorização ausente"}), 401
 
-        # --- CORREÇÃO FINAL APLICADA AQUI ---
-        # Sempre desempacota 3 valores, pois get_user_id_from_token parece sempre retornar 3.
-        # O terceiro valor será a resposta de erro (se houver) ou None (se sucesso).
-        user_auth_id, user_type, error_response = get_user_id_from_token(auth_header)
+        # --- CORREÇÃO ROBUSTA APLICADA AQUI ---
+        # A função get_user_id_from_token retorna ou (user_id, user_type) em sucesso,
+        # ou um objeto de resposta JSON em caso de erro.
+        token_result = get_user_id_from_token(auth_header)
 
-        # Se error_response não for None, significa que houve um erro.
-        if error_response:
-            # error_response já é um objeto de resposta JSON.
-            return error_response
-        
-        # Se chegou aqui, o token é válido e não houve erro.
-        # user_auth_id e user_type contêm os valores corretos.
+        # Verifica se o resultado é uma tupla (sucesso) ou um objeto de resposta (erro)
+        if isinstance(token_result, tuple) and len(token_result) == 2:
+            user_auth_id, user_type = token_result
+            
+            # Verifica se o usuário é um entregador.
+            if user_type != 'entregador':
+                return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
+            
+            # Armazena o ID do usuário no contexto 'g' do Flask.
+            g.user_auth_id = str(user_auth_id)
+            
+            # Continua para a função da rota.
+            return f(*args, **kwargs)
+        else:
+            # Se não for uma tupla de 2 elementos, é a resposta de erro.
+            return token_result
 
-        # Verifica se o usuário é um entregador.
-        if user_type != 'entregador':
-            return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
-        
-        # Armazena o ID do usuário no contexto 'g' do Flask.
-        g.user_auth_id = str(user_auth_id)
-        
-        # Continua para a função da rota.
-        return f(*args, **kwargs)
     return decorated_function
 
 # ==============================================
