@@ -31,10 +31,10 @@ def get_db_connection():
 def get_user_id_from_token(auth_header):
     """
     Valida o token JWT, pega o user_id via Supabase, 
-    e confere se está na tabela delivery_profiles.
+    e confere se está na tabela users.
     """
     if not auth_header or not auth_header.startswith('Bearer '):
-        return jsonify({"error": "Cabeçalho de autorização inválido"}), 401
+        return None, None, (jsonify({"error": "Cabeçalho de autorização inválido"}), 401)
 
     token = auth_header.split(' ')[1]
     
@@ -44,29 +44,30 @@ def get_user_id_from_token(auth_header):
         user = user_response.user
         
         if not user:
-            return jsonify({"error": "Token inválido ou expirado"}), 401
+            return None, None, (jsonify({"error": "Token inválido ou expirado"}), 401)
 
         user_id = user.id
 
-        # Conferir se user_id está na tabela delivery_profiles (é entregador)
+        # Conferir se user_id está na tabela users e pegar user_type
         conn = get_db_connection()
         if not conn:
-            return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
+            return None, None, (jsonify({"error": "Erro de conexão com o banco de dados"}), 500)
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM delivery_profiles WHERE user_id = %s", (user_id,))
-                exists = cur.fetchone()
-                if not exists:
-                    return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
+                cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
+                result = cur.fetchone()
+                if not result:
+                    return None, None, (jsonify({"error": "Acesso não autorizado."}), 403)
+                user_type = result[0]
         finally:
             conn.close()
 
-        # Se passou, retorna user_id e tipo "entregador"
-        return user_id, 'entregador'
+        # Se passou, retorna user_id, tipo e None de erro
+        return user_id, user_type, None
 
     except Exception as e:
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
-        return jsonify({"error": "Erro interno ao processar o token"}), 500
+        return None, None, (jsonify({"error": "Erro interno ao processar o token"}), 500)
 
 def get_user_info():
     """
