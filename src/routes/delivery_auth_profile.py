@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINALMENTE CORRETA E ROBUSTA)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINAL E ROBUSTA)
 
 import os
 import uuid
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (CORREÇÃO ROBUSTA)
+# DECORATOR DE AUTENTICAÇÃO (LÓGICA FINAL E SEGURA)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
@@ -31,27 +31,29 @@ def delivery_token_required(f):
         if not auth_header:
             return jsonify({"error": "Token de autorização ausente"}), 401
 
-        # --- CORREÇÃO ROBUSTA APLICADA AQUI ---
-        # A função get_user_id_from_token retorna ou (user_id, user_type) em sucesso,
-        # ou um objeto de resposta JSON em caso de erro.
-        token_result = get_user_id_from_token(auth_header)
-
-        # Verifica se o resultado é uma tupla (sucesso) ou um objeto de resposta (erro)
-        if isinstance(token_result, tuple) and len(token_result) == 2:
-            user_auth_id, user_type = token_result
+        try:
+            # --- CORREÇÃO FINAL APLICADA AQUI ---
+            # Tenta desempacotar o resultado da função.
+            # Se funcionar, é sucesso. Se der erro (ValueError), é falha.
+            user_auth_id, user_type = get_user_id_from_token(auth_header)
             
-            # Verifica se o usuário é um entregador.
+            # Se o desempacotamento funcionou, prosseguimos com a validação.
             if user_type != 'entregador':
                 return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
             
-            # Armazena o ID do usuário no contexto 'g' do Flask.
             g.user_auth_id = str(user_auth_id)
             
-            # Continua para a função da rota.
+            # Retorna a execução da função da rota (ex: handle_profile)
             return f(*args, **kwargs)
-        else:
-            # Se não for uma tupla de 2 elementos, é a resposta de erro.
-            return token_result
+
+        except ValueError:
+            # Se o desempacotamento falhou, significa que a função retornou um erro.
+            # Chamamos a função novamente para obter a resposta de erro formatada.
+            error_response = get_user_id_from_token(auth_header)
+            return error_response
+        except Exception as e:
+            logger.error(f"Erro inesperado no decorador: {e}", exc_info=True)
+            return jsonify({"error": "Erro interno no processamento do token"}), 500
 
     return decorated_function
 
@@ -90,7 +92,6 @@ def handle_profile():
             profile = cur.fetchone()
 
             if not profile:
-                # Se o perfil não existe, cria um perfil mínimo
                 cur.execute(
                     """INSERT INTO delivery_profiles (user_id, first_name, phone) 
                        VALUES (%s, 'Novo Entregador', '00000000000') RETURNING *""",
