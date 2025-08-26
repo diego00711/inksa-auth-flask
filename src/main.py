@@ -38,6 +38,7 @@ try:
     from src.routes.gamification_routes import gamification_bp
     from src.routes.categories import categories_bp
     from src.routes.analytics import analytics_bp
+    from src.routes.admin_logs import admin_logs_bp  # IMPORTANTE: novo blueprint de logs
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
@@ -56,7 +57,6 @@ else:
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'fallback-secret-key-change-in-production')
 
 # ----------- CORS: Usando regex para permitir todos os domínios autorizados -----------
-
 ALLOWED_ORIGIN_REGEX = (
     r"^https:\/\/admin\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-admin-v0\.vercel\.app$|"
@@ -101,6 +101,7 @@ app.register_blueprint(payouts_bp, url_prefix='/api/admin')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
+app.register_blueprint(admin_logs_bp)  # BLUEPRINT DE LOGS, sem url_prefix para endpoint /api/logs
 
 # Configuração do Mercado Pago
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
@@ -131,7 +132,8 @@ def index():
             "payment": "/api/payment",
             "admin": "/api/admin",
             "delivery": "/api/delivery",
-            "health": "/api/health"
+            "health": "/api/health",
+            "logs": "/api/logs"
         }
     })
 
