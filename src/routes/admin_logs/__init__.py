@@ -7,6 +7,38 @@ from src.utils.helpers import supabase
 
 admin_logs_bp = Blueprint("admin_logs", __name__)
 
+"""
+Admin Logs API Query Parameters Documentation:
+
+GET /api/logs:
+- search: Text search in log details (case-insensitive)
+- action: Exact match for action field
+- admin: Exact match for admin field  
+- start: Start date filter (>= timestamp) - accepts YYYY-MM-DD or ISO datetime
+- end: End date filter (<= timestamp) - accepts YYYY-MM-DD or ISO datetime, automatically sets end-of-day for date-only
+- sort: Sorting field - use "timestamp" for ascending, "-timestamp" for descending (default: -timestamp)
+- page: Page number for pagination (default: 1, minimum: 1)
+- page_size: Number of items per page (default: 20, minimum: 1, maximum: 100)
+
+Response format:
+{
+  "items": [...],
+  "page": <number>,
+  "page_size": <number>, 
+  "total": <number>,
+  "has_next": <boolean>
+}
+
+HEAD /api/logs:
+- Returns 200 for health/uptime checks
+
+GET /api/logs/export:
+- Accepts same filters as GET /api/logs (except pagination)
+- limit: Maximum number of records to export (default: 5000, maximum: 20000)
+- Returns CSV file with BOM for Excel compatibility
+- Columns: id, timestamp, admin, action, details
+"""
+
 def parse_iso_date(value: str):
     if not value:
         return None
