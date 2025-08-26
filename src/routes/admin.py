@@ -1,5 +1,3 @@
-# Local: src/routes/admin.py
-
 import os
 import traceback
 from flask import Blueprint, request, jsonify
@@ -8,7 +6,6 @@ from gotrue.errors import AuthApiError
 from datetime import datetime, timedelta
 from functools import wraps
 
-# Importa as nossas funções de ajuda centralizadas
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
 admin_bp = Blueprint('admin_bp', __name__, url_prefix='/admin')
@@ -28,7 +25,6 @@ def admin_required(f):
         
         return f(*args, **kwargs)
     return decorated_function
-
 
 @admin_bp.route('/login', methods=['POST'])
 def admin_login():
@@ -76,12 +72,11 @@ def admin_login():
         if 'conn' in locals() and conn:
             conn.close()
 
-
 @admin_bp.route('/users', methods=['GET'])
 @admin_required
 def get_all_users():
     filter_user_type = request.args.get('user_type', None)
-    filter_city = request.args.get('city', None) # <--- NOVO: Obtém o parâmetro 'city' da requisição
+    filter_city = request.args.get('city', None)
 
     conn = get_db_connection()
     if not conn:
@@ -98,29 +93,24 @@ def get_all_users():
                         rp.restaurant_name, 
                         dp.first_name || ' ' || dp.last_name
                     ) AS full_name,
-                    COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city -- <--- NOVO: Adiciona a coluna 'city'
+                    COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city
                 FROM users u
                 LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
                 LEFT JOIN restaurant_profiles rp ON u.id = rp.id AND u.user_type = 'restaurant'
                 LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
             """
             
-            where_clauses = [] # Lista para armazenar as condições WHERE
-
+            where_clauses = []
             if filter_user_type and filter_user_type.lower() != 'todos':
                 where_clauses.append("u.user_type = %s")
                 params.append(filter_user_type)
-
-            if filter_city: # <--- NOVO: Adiciona condição WHERE para filtrar por cidade
-                # Usando ILIKE para busca case-insensitive e % para correspondência parcial
+            if filter_city:
                 where_clauses.append("COALESCE(cp.address_city, rp.address_city, dp.address_city) ILIKE %s")
                 params.append(f'%{filter_city}%')
-
-            if where_clauses: # Se houver qualquer condição na lista, adicione 'WHERE' e junte-as com 'AND'
+            if where_clauses:
                 sql_query += " WHERE " + " AND ".join(where_clauses)
 
             sql_query += " ORDER BY u.created_at DESC;"
-            
             cur.execute(sql_query, tuple(params))
             users = [dict(row) for row in cur.fetchall()]
 
@@ -132,7 +122,6 @@ def get_all_users():
     finally:
         if conn:
             conn.close()
-
 
 @admin_bp.route('/restaurants', methods=['GET'])
 @admin_required
@@ -160,7 +149,6 @@ def get_all_restaurants():
     finally:
         if conn:
             conn.close()
-
 
 @admin_bp.route('/kpi-summary', methods=['GET'])
 @admin_required
@@ -199,7 +187,6 @@ def get_kpi_summary():
         if conn:
             conn.close()
 
-
 @admin_bp.route('/stats/revenue-chart', methods=['GET'])
 @admin_required
 def get_revenue_chart_data():
@@ -237,7 +224,6 @@ def get_revenue_chart_data():
         return jsonify({"status": "error", "message": "Erro interno ao buscar dados do gráfico.", "detail": str(e)}), 500
     finally:
         if conn: conn.close()
-
 
 @admin_bp.route('/orders/recent', methods=['GET'])
 @admin_required
@@ -278,7 +264,6 @@ def get_recent_orders():
         if conn:
             conn.close()
 
-
 # Endpoint para ATUALIZAR os dados de um restaurante
 @admin_bp.route('/restaurants/<uuid:restaurant_id>', methods=['PUT'])
 @admin_required
@@ -303,7 +288,6 @@ def update_restaurant(restaurant_id):
             if not set_parts:
                 return jsonify({"status": "error", "message": "Nenhum campo válido para atualização."}), 400
 
-            # CORREÇÃO: Converter o objeto UUID para uma string antes de o usar na query.
             values.append(str(restaurant_id))
             
             sql_query = f"""
@@ -326,6 +310,96 @@ def update_restaurant(restaurant_id):
             conn.rollback() 
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao atualizar o restaurante.", "detail": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+# NOVO ENDPOINT: DASHBOARD CONSOLIDADO
+@admin_bp.route('/dashboard', methods=['GET'])
+@admin_required
+def get_dashboard():
+    """
+    Retorna todos os dados necessários para o dashboard admin em uma única resposta:
+    KPIs, gráfico de faturamento e pedidos recentes.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    
+    try:
+        # KPIs
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status_pagamento = 'approved') AS totalRevenue,
+                    (SELECT COALESCE(AVG(total_amount), 0) FROM orders WHERE status_pagamento = 'approved') AS averageTicket,
+                    (SELECT COUNT(id) FROM orders WHERE DATE(created_at) = CURRENT_DATE) AS ordersToday,
+                    (SELECT COUNT(id) FROM users WHERE user_type = 'client') AS totalClients,
+                    (SELECT COUNT(id) FROM users WHERE user_type = 'client' AND DATE(created_at) = CURRENT_DATE) AS newClientsToday
+            """)
+            kpis_row = cur.fetchone()
+            kpis = {
+                "totalRevenue": float(kpis_row['totalrevenue']),
+                "averageTicket": float(kpis_row['averageticket']),
+                "ordersToday": kpis_row['orderstoday'],
+                "totalClients": kpis_row['totalclients'],
+                "newClientsToday": kpis_row['newclientstoday'],
+            }
+
+        # Gráfico de faturamento (últimos 7 dias)
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                WITH last_7_days AS (
+                    SELECT generate_series(
+                        current_date - interval '6 days',
+                        current_date,
+                        '1 day'
+                    )::date AS day
+                )
+                SELECT
+                    to_char(d.day, 'DD/MM') AS formatted_date,
+                    COALESCE(SUM(o.total_amount), 0) AS daily_revenue
+                FROM last_7_days d
+                LEFT JOIN orders o ON DATE(o.created_at) = d.day AND o.status_pagamento = 'approved'
+                GROUP BY d.day
+                ORDER BY d.day;
+            """)
+            chart_data = [dict(row) for row in cur.fetchall()]
+            for item in chart_data:
+                item['daily_revenue'] = float(item['daily_revenue'])
+
+        # Pedidos recentes
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT 
+                    o.id,
+                    o.total_amount,
+                    o.status,
+                    o.created_at,
+                    COALESCE(cp.first_name || ' ' || cp.last_name, 'Cliente Anônimo') AS client_name,
+                    COALESCE(rp.restaurant_name, 'Restaurante Desconhecido') AS restaurant_name
+                FROM orders o
+                LEFT JOIN client_profiles cp ON o.client_id = cp.user_id
+                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                ORDER BY o.created_at DESC
+                LIMIT 5;
+            """)
+            recent_orders = [dict(row) for row in cur.fetchall()]
+            for order in recent_orders:
+                order['total_amount'] = float(order['total_amount'])
+                order['created_at'] = order['created_at'].isoformat()
+
+        # Monta resposta unificada
+        return jsonify({
+            "status": "success",
+            "kpis": kpis,
+            "chartData": chart_data,
+            "recentOrders": recent_orders
+        }), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Erro interno ao buscar dados do dashboard.", "detail": str(e)}), 500
     finally:
         if conn:
             conn.close()
