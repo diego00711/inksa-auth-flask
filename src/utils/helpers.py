@@ -10,12 +10,21 @@ logger = logging.getLogger(__name__)
 # Inicialização do cliente Supabase
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
-    # Prefer SUPABASE_SERVICE_KEY over SUPABASE_KEY for admin operations
-    SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY")
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise ValueError("Variáveis de ambiente SUPABASE_URL e SUPABASE_SERVICE_KEY (ou SUPABASE_KEY) são obrigatórias.")
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    logger.info("✅ Cliente Supabase inicializado com sucesso")
+    SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+    SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+    if not SUPABASE_URL:
+        raise ValueError("Variável de ambiente SUPABASE_URL é obrigatória.")
+
+    # Prefer service role key; fallback to anon key
+    if SUPABASE_SERVICE_KEY:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        logger.info("✅ Cliente Supabase inicializado com sucesso usando Service Role Key")
+    elif SUPABASE_KEY:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("✅ Cliente Supabase inicializado com sucesso usando Anon Key")
+    else:
+        raise ValueError("Variável de ambiente SUPABASE_SERVICE_KEY ou SUPABASE_KEY é obrigatória.")
 except Exception as e:
     logger.error(f"❌ Falha ao inicializar o cliente Supabase: {e}")
     supabase = None
