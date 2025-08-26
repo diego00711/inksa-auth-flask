@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.audit import log_admin_action
 
 admin_bp = Blueprint('admin_bp', __name__, url_prefix='/admin')
 
@@ -50,6 +51,9 @@ def admin_login():
             supabase.auth.sign_out()
             return jsonify({"status": "error", "message": "Acesso não permitido. Apenas para administradores."}), 403
 
+        # Log successful admin login
+        log_admin_action(user.email, "Login", f"Admin login successful", request)
+
         return jsonify({
             "status": "success", 
             "message": "Login de administrador bem-sucedido", 
@@ -71,6 +75,30 @@ def admin_login():
     finally:
         if 'conn' in locals() and conn:
             conn.close()
+
+@admin_bp.route('/logout', methods=['POST'])
+@admin_required
+def admin_logout():
+    """Admin logout route with audit logging"""
+    try:
+        from ..utils.audit import log_admin_action_auto
+        
+        # Log logout action before signing out
+        log_admin_action_auto("Logout", "Admin logout")
+        
+        # Sign out from Supabase
+        supabase.auth.sign_out()
+        
+        return jsonify({
+            "status": "success",
+            "message": "Logout realizado com sucesso"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error", 
+            "message": f"Erro durante logout: {str(e)}"
+        }), 500
 
 @admin_bp.route('/users', methods=['GET'])
 @admin_required
@@ -302,6 +330,11 @@ def update_restaurant(restaurant_id):
                 return jsonify({"status": "error", "message": "Restaurante não encontrado."}), 404
 
             conn.commit()
+
+            # Log restaurant update action
+            from ..utils.audit import log_admin_action_auto
+            restaurant_fields = ', '.join(data.keys())
+            log_admin_action_auto("UpdateRestaurant", f"Updated restaurant {restaurant_id} fields: {restaurant_fields}")
 
         return jsonify({"status": "success", "message": "Restaurante atualizado com sucesso."}), 200
 

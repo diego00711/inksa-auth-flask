@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 import logging
 from src.utils.helpers import get_db_connection, supabase, get_user_info
+from src.utils.audit import log_admin_action
 
 auth_bp = Blueprint('auth', __name__)
 logger = logging.getLogger(__name__)
@@ -47,6 +48,10 @@ def login():
                 return jsonify({"error": "Usuário não encontrado no sistema"}), 404
 
             user_id, user_type, user_email, created_at = user_data
+
+            # Log admin logins (for non-admin logins, we skip audit logging)
+            if user_type == 'admin':
+                log_admin_action(user_email, "Login", f"Admin login via client endpoint", request)
 
             return jsonify({
                 "message": "Login realizado com sucesso",
