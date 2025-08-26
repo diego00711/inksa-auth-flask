@@ -12,6 +12,7 @@ AUDIT_DEBUG = os.environ.get("AUDIT_DEBUG", "false").lower() in ("true", "1", "y
 
 # Inicialização do cliente Supabase
 supabase_client_type = None  # Track which client type was initialized
+supabase_service = None  # Dedicated service role client for audit operations
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -27,7 +28,14 @@ try:
     if not SUPABASE_URL:
         raise ValueError("Variável de ambiente SUPABASE_URL é obrigatória.")
 
-    # Prefer service role key; fallback to anon key
+    # Initialize dedicated service role client for audit operations
+    if SUPABASE_SERVICE_KEY:
+        supabase_service: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        logger.info("✅ Cliente Supabase Service (dedicado para audit) inicializado com sucesso")
+        if AUDIT_DEBUG:
+            logger.info("[AUDIT_DEBUG] Dedicated service client initialized for audit operations")
+
+    # Initialize general client - prefer service role key; fallback to anon key
     if SUPABASE_SERVICE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         supabase_client_type = "service"
@@ -46,6 +54,7 @@ try:
 except Exception as e:
     logger.error(f"❌ Falha ao inicializar o cliente Supabase: {e}")
     supabase = None
+    supabase_service = None
     supabase_client_type = None
 
 def get_db_connection():

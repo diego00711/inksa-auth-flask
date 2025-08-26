@@ -67,10 +67,12 @@ def log_admin_action(admin: str, action: str, details: str, request: Optional[Re
     """
     try:
         # Import here to avoid circular dependency
-        from .helpers import supabase
+        from .helpers import supabase_service, supabase
         
-        if not supabase:
-            logger.warning("Audit logging skipped: Supabase client not available")
+        # Prefer dedicated service client for audit operations
+        audit_client = supabase_service if supabase_service else supabase
+        if not audit_client:
+            logger.warning("Audit logging skipped: No Supabase client available")
             return
             
         # Validate inputs
@@ -117,14 +119,19 @@ def log_admin_action(admin: str, action: str, details: str, request: Optional[Re
         
         # Insert into admin_logs table
         # Import here to avoid circular dependency and get debug setting
-        from .helpers import supabase_client_type, AUDIT_DEBUG
+        from .helpers import supabase_service, supabase_client_type, AUDIT_DEBUG
+        
+        # Determine which client to use and its type for debugging
+        if supabase_service:
+            client_type_debug = "service(dedicated)"
+        else:
+            client_type_debug = supabase_client_type or "unknown"
         
         # Debug logging before insert
         if AUDIT_DEBUG:
-            client_type = supabase_client_type or "unknown"
-            logger.info(f"[AUDIT] Using Supabase client: {client_type}")
+            logger.info(f"[AUDIT] Using Supabase client: {client_type_debug}")
         
-        result = supabase.table("admin_logs").insert(log_entry).execute()
+        result = audit_client.table("admin_logs").insert(log_entry).execute()
         
         # Debug logging after insert
         if AUDIT_DEBUG:
