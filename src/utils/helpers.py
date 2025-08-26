@@ -7,11 +7,25 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Read AUDIT_DEBUG setting
+AUDIT_DEBUG = os.environ.get("AUDIT_DEBUG", "false").lower() in ("true", "1", "yes")
+
+# Read AUDIT_DEBUG setting
+AUDIT_DEBUG = os.environ.get("AUDIT_DEBUG", "false").lower() in ("true", "1", "yes")
+
 # Inicialização do cliente Supabase
+supabase_client_type = None  # Track which client type was initialized
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
     SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+    # Debug logging for environment variables presence
+    if AUDIT_DEBUG:
+        logger.info(f"[AUDIT_DEBUG] Environment variables presence: "
+                   f"SUPABASE_URL={bool(SUPABASE_URL)}, "
+                   f"SUPABASE_SERVICE_KEY={bool(SUPABASE_SERVICE_KEY)}, "
+                   f"SUPABASE_KEY={bool(SUPABASE_KEY)}")
 
     if not SUPABASE_URL:
         raise ValueError("Variável de ambiente SUPABASE_URL é obrigatória.")
@@ -19,15 +33,23 @@ try:
     # Prefer service role key; fallback to anon key
     if SUPABASE_SERVICE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        supabase_client_type = "service"
         logger.info("✅ Cliente Supabase inicializado com sucesso usando Service Role Key")
     elif SUPABASE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        supabase_client_type = "default"
         logger.info("✅ Cliente Supabase inicializado com sucesso usando Anon Key")
     else:
         raise ValueError("Variável de ambiente SUPABASE_SERVICE_KEY ou SUPABASE_KEY é obrigatória.")
+    
+    # Debug logging for client initialization
+    if AUDIT_DEBUG:
+        logger.info(f"[AUDIT_DEBUG] Supabase client initialized: type={supabase_client_type}")
+        
 except Exception as e:
     logger.error(f"❌ Falha ao inicializar o cliente Supabase: {e}")
     supabase = None
+    supabase_client_type = None
 
 def get_db_connection():
     try:
