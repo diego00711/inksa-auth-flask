@@ -67,3 +67,25 @@ def get_user_id_from_token(auth_header):
     except Exception as e:
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
         return jsonify({"error": "Erro interno ao processar o token"}), 500
+
+def get_user_info():
+    """
+    Extrai informações do usuário a partir do token JWT no header Authorization
+    Retorna um dicionário com user_id, email e (opcionalmente) outros dados.
+    """
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return None
+        token = auth_header.split(' ')[1]
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user
+        if not user:
+            return None
+        return {
+            'user_id': user.id,
+            'email': user.email,
+        }
+    except Exception as e:
+        logger.error(f"Erro ao obter informações do usuário: {e}", exc_info=True)
+        return None
