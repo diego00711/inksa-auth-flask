@@ -1,149 +1,116 @@
-from flask import Blueprint, request, jsonify, Response
-from datetime import datetime
-from io import StringIO
-import csv
+from flask import Blueprint, request, jsonify
+import logging
+from src.utils.helpers import get_user_id_from_token, get_db_connection
 
-from src.utils.helpers import supabase, get_user_id_from_token
-from src.utils.audit import log_admin_action_auto
-from functools import wraps
+logger = logging.getLogger(__name__)
+admin_logs_bp = Blueprint("admin_logs", __name__, url_prefix="/api/logs")
 
-admin_logs_bp = Blueprint("admin_logs", __name__)
-
-def admin_required(f):
-    """Decorator to require admin authentication for logs endpoints"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        user_id, user_type, error_response = get_user_id_from_token(auth_header)
-        
-        if error_response:
-            return error_response
-        
-        if user_type != 'admin':
-            return jsonify({"error": "Acesso não autorizado. Rota exclusiva para administradores."}), 403
-        
-        return f(*args, **kwargs)
-    return decorated_function
-
-def parse_iso_date(value: str):
-    if not value:
-        return None
+def _get_pagination():
+    """
+    Lê query params limit e page, aplica defaults e limites seguros.
+    Retorna (limit, offset, page).
+    """
     try:
-        # aceita YYYY-MM-DD ou ISO completo
-        if len(value) == 10:
-            return datetime.fromisoformat(value + "T00:00:00")
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-def build_query(params):
-    search = params.get("search")
-    action = params.get("action")
-    admin = params.get("admin")
-    start = parse_iso_date(params.get("start"))
-    end = parse_iso_date(params.get("end"))
-    sort = params.get("sort", "-timestamp")  # -timestamp ou timestamp
-
-    query = supabase.table("admin_logs").select("*", count="exact")
-
-    # Filtros
-    if search:
-        # Busca textual em details; se quiser, inclua action/admin também
-        query = query.ilike("details", f"%{search}%")
-    if action:
-        query = query.eq("action", action)
-    if admin:
-        query = query.eq("admin", admin)
-    if start:
-        # timestamp >= start
-        query = query.gte("timestamp", start.isoformat())
-    if end:
-        # timestamp <= end fim do dia, se veio só data
-        if len(params.get("end", "")) == 10:
-            end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
-        query = query.lte("timestamp", end.isoformat())
-
-    # Ordenação
-    desc = False
-    field = "timestamp"
-    if sort.startswith("-"):
-        desc = True
-        field = sort[1:]
-    elif sort:
-        field = sort
-    query = query.order(field, desc=desc)
-
-    return query
-
-@admin_logs_bp.route("/api/logs", methods=["GET", "HEAD"])
-@admin_required
-def get_logs():
-    if request.method == "HEAD":
-        return ("", 200)
-
-    # Paginação
-    try:
-        page = int(request.args.get("page", "1"))
-        page_size = int(request.args.get("page_size", "20"))
+        limit = int(request.args.get("limit", 50))
     except ValueError:
-        return jsonify({"error": "Parâmetros de paginação inválidos"}), 400
+        limit = 50
+    try:
+        page = int(request.args.get("page", 1))
+    except ValueError:
+        page = 1
 
-    page = max(page, 1)
-    page_size = max(min(page_size, 100), 1)  # limite de 100/pg
+    # Limites razoáveis
+    if limit <= 0:
+        limit = 50
+    if limit > 200:
+        limit = 200
+    if page <= 0:
+        page = 1
 
-    start_idx = (page - 1) * page_size
-    end_idx = start_idx + page_size - 1
+    offset = (page - 1) * limit
+    return limit, offset, page
 
-    query = build_query(request.args)
+@admin_logs_bp.get("/")
+def list_admin_logs():
+    """
+    GET /api/logs
+    Lista logs de ações administrativas com paginação.
+    Requer Authorization: Bearer <token> e user_type == 'admin'.
+    Query params:
+      - limit: int (default 50, máx 200)
+      - page: int (default 1)
+    Resposta:
+      {
+        "data": [ { "id": ..., "actor_id": ..., "action": ..., "resource": ..., "metadata": {...}, "created_at": "..." }, ... ],
+        "pagination": { "page": 1, "per_page": 50, "total": 123 }
+      }
+    """
+    auth_header = request.headers.get("Authorization")
+    user_id, user_type, err = get_user_id_from_token(auth_header)
+    if err:
+        # err já é uma tupla (jsonify, status)
+        return err
+    if user_type != "admin":
+        return jsonify({"error": "Acesso restrito a administradores"}), 403
 
-    # Executa com paginação
-    res = query.range(start_idx, end_idx).execute()
-    data = res.data or []
-    total = res.count or 0
+    limit, offset, page = _get_pagination()
 
-    # Log list logs action
-    log_admin_action_auto("ListLogs", f"Listed logs page {page}, size {page_size}, total {total}")
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
-    return jsonify({
-        "items": data,
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "has_next": (start_idx + len(data)) < total
-    })
+    try:
+        with conn.cursor() as cur:
+            # Total de registros
+            cur.execute("SELECT COUNT(*) FROM admin_logs")
+            total = cur.fetchone()[0]
 
-@admin_logs_bp.route("/api/logs/export", methods=["GET"])
-@admin_required
-def export_logs_csv():
-    # Exporta com os mesmos filtros, sem paginação (limite de segurança)
-    limit = int(request.args.get("limit", "5000"))
-    limit = max(min(limit, 20000), 1)
+            # Lista paginada
+            cur.execute(
+                """
+                SELECT id, actor_id, action, resource, metadata, created_at
+                FROM admin_logs
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            rows = cur.fetchall()
 
-    query = build_query(request.args)
-    res = query.limit(limit).execute()
-    rows = res.data or []
+            # Normalizar resposta
+            columns = [desc[0] for desc in cur.description]
+            data = [dict(zip(columns, row)) for row in rows]
 
-    # Log export action
-    filter_params = {k: v for k, v in request.args.items() if k not in ['limit']}
-    filter_summary = f"filters: {filter_params}" if filter_params else "no filters"
-    log_admin_action_auto("ExportLogs", f"Exported {len(rows)} log entries, {filter_summary}")
+        return jsonify(
+            {
+                "data": data,
+                "pagination": {
+                    "page": page,
+                    "per_page": limit,
+                    "total": total,
+                },
+            }
+        ), 200
+    except Exception as e:
+        logger.exception("Erro ao consultar admin_logs: %s", e)
+        return jsonify({"error": "Erro ao consultar logs"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
-    # Gera CSV em memória
-    output = StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["id", "timestamp", "admin", "action", "details"])
-    for r in rows:
-        writer.writerow([
-            r.get("id", ""),
-            r.get("timestamp", ""),
-            r.get("admin", ""),
-            r.get("action", ""),
-            r.get("details", "")
-        ])
+@admin_logs_bp.get("/health")
+def logs_health():
+    """
+    Endpoint simples para verificação de saúde do módulo de logs.
+    Requer autenticação de admin (mantém a mesma política de acesso).
+    """
+    auth_header = request.headers.get("Authorization")
+    _, user_type, err = get_user_id_from_token(auth_header)
+    if err:
+        return err
+    if user_type != "admin":
+        return jsonify({"error": "Acesso restrito a administradores"}), 403
 
-    csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM p/ Excel
-    headers = {
-        "Content-Disposition": "attachment; filename=logs.csv",
-        "Content-Type": "text/csv; charset=utf-8"
-    }
-    return Response(csv_bytes, headers=headers)
+    return jsonify({"status": "ok"}), 200
