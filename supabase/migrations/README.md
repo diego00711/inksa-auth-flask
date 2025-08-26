@@ -57,6 +57,24 @@ Both should return 200 instead of 500 errors.
 
 ## Notes
 
+### Dual Supabase Client Setup
+
+The backend uses two separate Supabase clients to prevent RLS (Row Level Security) violations:
+
+1. **Primary Client (`supabase`)**: Used for user authentication and general operations
+   - Gets mutated when `auth.sign_in_with_password()` is called
+   - After authentication, uses the end-user session JWT
+   - Subject to RLS policies
+
+2. **Service Client (`supabase_service`)**: Dedicated for server-side administrative operations
+   - Initialized only with the Service Role key (`SUPABASE_SERVICE_KEY`)
+   - Never mutated by authentication operations
+   - Bypasses RLS for audit logging and other admin operations
+
+This dual-client approach ensures that admin audit inserts into `admin_logs` always succeed, even immediately after admin login calls that would otherwise cause the primary client to be bound to a user session.
+
+### Security Notes
+
 - The backend uses the Service Role key which bypasses RLS
 - Do NOT expose the Service Role key in frontend environments
 - The table supports all filtering and pagination features used by the admin_logs route

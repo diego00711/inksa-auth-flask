@@ -67,11 +67,18 @@ def log_admin_action(admin: str, action: str, details: str, request: Optional[Re
     """
     try:
         # Import here to avoid circular dependency
-        from .helpers import supabase
+        from .helpers import supabase, supabase_service
         
-        if not supabase:
-            logger.warning("Audit logging skipped: Supabase client not available")
+        # Prefer service client for server-side operations to bypass RLS
+        # Fall back to regular client if service client is not available
+        client = supabase_service or supabase
+        client_type = "service" if supabase_service else "regular"
+        
+        if not client:
+            logger.warning("Audit logging skipped: Nenhum cliente Supabase disponível")
             return
+            
+        logger.debug(f"Using {client_type} Supabase client for audit logging")
             
         # Validate inputs
         if not admin or not admin.strip():
@@ -115,8 +122,8 @@ def log_admin_action(admin: str, action: str, details: str, request: Optional[Re
             "details": details
         }
         
-        # Insert into admin_logs table
-        result = supabase.table("admin_logs").insert(log_entry).execute()
+        # Insert into admin_logs table using service client (bypasses RLS)
+        result = client.table("admin_logs").insert(log_entry).execute()
         
         if result.data:
             logger.info(f"Admin action logged: {action} by {admin}")
