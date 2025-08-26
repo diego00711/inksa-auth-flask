@@ -55,39 +55,33 @@ else:
 # Configuração da chave secreta
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'fallback-secret-key-change-in-production')
 
-# ----------- CORS: Função customizada para permitir todos os previews do Vercel e domínios de produção -----------
+# ----------- CORS: Usando regex para permitir todos os domínios autorizados -----------
 
-def custom_cors_origin(origin):
-    if not origin:
-        return False
-    allowed_patterns = [
-        r"^https:\/\/admin\.inksadelivery\.com\.br$",                       # produção admin
-        r"^https:\/\/inksa-admin-v0\.vercel\.app$",                         # domínio principal Vercel
-        r"^https:\/\/inksa-admin-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$",  # todos os previews do Vercel
-        r"^https:\/\/clientes\.inksadelivery\.com\.br$",
-        r"^https:\/\/restaurante\.inksadelivery\.com\.br$",
-        r"^https:\/\/entregadores\.inksadelivery\.com\.br$",
-        r"^https:\/\/app\.inksadelivery\.com\.br$",
-        r"^https:\/\/inksadelivery\.com\.br$"
-    ]
-    for pattern in allowed_patterns:
-        if re.match(pattern, origin):
-            return True
-    return False
+ALLOWED_ORIGIN_REGEX = (
+    r"^https:\/\/admin\.inksadelivery\.com\.br$|"
+    r"^https:\/\/inksa-admin-v0\.vercel\.app$|"
+    r"^https:\/\/inksa-admin-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+    r"^https:\/\/clientes\.inksadelivery\.com\.br$|"
+    r"^https:\/\/restaurante\.inksadelivery\.com\.br$|"
+    r"^https:\/\/entregadores\.inksadelivery\.com\.br$|"
+    r"^https:\/\/app\.inksadelivery\.com\.br$|"
+    r"^https:\/\/inksadelivery\.com\.br$"
+)
 
-CORS(app,
-    origins=custom_cors_origin,
+CORS(
+    app,
+    origins=re.compile(ALLOWED_ORIGIN_REGEX),
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    max_age=600
+    max_age=600,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
 
 # Configuração do SocketIO
 socketio = SocketIO(app, 
-                   cors_allowed_origins=custom_cors_origin,
+                   cors_allowed_origins=re.compile(ALLOWED_ORIGIN_REGEX),
                    async_mode='eventlet',
                    logger=False,
                    engineio_logger=False)
@@ -155,7 +149,7 @@ def cors_test():
     """Endpoint para testar CORS"""
     try:
         origin = request.headers.get('Origin')
-        allowed = custom_cors_origin(origin)
+        allowed = bool(re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
         logger.info(f"/api/cors-test | Origin: {origin} | Allowed: {allowed}")
         return jsonify({
             "message": "CORS test successful",
