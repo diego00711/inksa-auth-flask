@@ -10,9 +10,6 @@ logger = logging.getLogger(__name__)
 # Read AUDIT_DEBUG setting
 AUDIT_DEBUG = os.environ.get("AUDIT_DEBUG", "false").lower() in ("true", "1", "yes")
 
-# Read AUDIT_DEBUG setting
-AUDIT_DEBUG = os.environ.get("AUDIT_DEBUG", "false").lower() in ("true", "1", "yes")
-
 # Inicialização do cliente Supabase
 supabase_client_type = None  # Track which client type was initialized
 try:
