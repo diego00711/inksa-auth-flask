@@ -12,11 +12,11 @@ try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
     SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-    
+
     if not SUPABASE_URL:
         raise ValueError("Variável de ambiente SUPABASE_URL é obrigatória.")
-    
-    # Prefer service key for backend operations, fallback to anon key
+
+    # Prefer service role key; fallback to anon key
     if SUPABASE_SERVICE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         logger.info("✅ Cliente Supabase inicializado com sucesso usando Service Role Key")
