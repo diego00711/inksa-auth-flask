@@ -116,7 +116,22 @@ def log_admin_action(admin: str, action: str, details: str, request: Optional[Re
         }
         
         # Insert into admin_logs table
+        # Import here to avoid circular dependency and get debug setting
+        from .helpers import supabase_client_type, AUDIT_DEBUG
+        
+        # Debug logging before insert
+        if AUDIT_DEBUG:
+            client_type = supabase_client_type or "unknown"
+            logger.info(f"[AUDIT] Using Supabase client: {client_type}")
+        
         result = supabase.table("admin_logs").insert(log_entry).execute()
+        
+        # Debug logging after insert
+        if AUDIT_DEBUG:
+            if result.data:
+                logger.info(f"[AUDIT] Inserted admin_logs row: ok")
+            else:
+                logger.info(f"[AUDIT] Inserted admin_logs row: failed - no data returned")
         
         if result.data:
             logger.info(f"Admin action logged: {action} by {admin}")
