@@ -1,6 +1,29 @@
 """
 Admin action auditing helper module.
 Provides best-effort logging of admin actions to the admin_logs table.
+
+Usage:
+    from src.utils.audit import log_admin_action, log_admin_action_auto
+    
+    # Manual logging with explicit admin
+    log_admin_action("admin@example.com", "CreateUser", "Created user with email user@example.com", request)
+    
+    # Automatic logging that extracts current admin from request context
+    log_admin_action_auto("UpdateRole", "Updated user role to admin")
+
+Features:
+    - Best-effort: Never raises exceptions to avoid disrupting main request flow
+    - Automatic IP and User-Agent enrichment when request object is provided
+    - Input validation and truncation for safe database storage
+    - Supports both manual and automatic admin context extraction
+
+Instrumented routes:
+    - Admin login (/api/admin/login)
+    - Admin logout (/api/admin/logout) 
+    - Client login (/api/auth/login) - for admin users only
+    - Restaurant updates (/api/admin/restaurants/<id>)
+    - Logs listing (/api/logs)
+    - Logs export (/api/logs/export)
 """
 import logging
 from typing import Optional, Tuple
