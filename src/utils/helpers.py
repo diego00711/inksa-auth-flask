@@ -1,5 +1,3 @@
-# inksa-auth-flask/src/utils/helpers.py (VERSÃO CORRIGIDA E FINAL)
-
 import os
 import jwt
 import psycopg2
@@ -58,3 +56,34 @@ def get_user_id_from_token(auth_header):
     except Exception as e:
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
         return jsonify({"error": "Erro interno ao processar o token"}), 500
+
+def get_user_info():
+    """
+    Extrai informações do usuário a partir do token JWT no header Authorization
+    Retorna um dicionário com user_id, email e user_type ou None em caso de erro
+    """
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return None
+        
+        token = auth_header.split(' ')[1]
+        
+        # Usar o Supabase para obter informações do usuário
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user
+        
+        if not user:
+            return None
+        
+        user_metadata = user.user_metadata or {}
+        
+        return {
+            'user_id': user.id,
+            'email': user.email,
+            'user_type': user_metadata.get('user_type')
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao obter informações do usuário: {e}", exc_info=True)
+        return None
