@@ -153,12 +153,18 @@ def health_check():
 @app.route('/api/cors-test')
 def cors_test():
     """Endpoint para testar CORS"""
-    origin = request.headers.get('Origin')
-    return jsonify({
-        "message": "CORS test successful",
-        "your_origin": origin,
-        "allowed": custom_cors_origin(origin)
-    })
+    try:
+        origin = request.headers.get('Origin')
+        allowed = custom_cors_origin(origin)
+        logger.info(f"/api/cors-test | Origin: {origin} | Allowed: {allowed}")
+        return jsonify({
+            "message": "CORS test successful",
+            "your_origin": origin,
+            "allowed": allowed
+        })
+    except Exception as e:
+        logger.error(f"Erro em /api/cors-test: {e}")
+        return jsonify({"error": "Erro interno no /api/cors-test", "details": str(e)}), 500
 
 @socketio.on('connect')
 def handle_connect():
