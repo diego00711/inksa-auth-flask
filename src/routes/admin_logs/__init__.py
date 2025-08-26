@@ -7,11 +7,12 @@ admin_logs_bp = Blueprint("admin_logs", __name__, url_prefix="/api/logs")
 
 def _get_pagination():
     """
-    Lê query params limit e page, aplica defaults e limites seguros.
+    Lê query params limit/page_size e page, aplica defaults e limites seguros.
     Retorna (limit, offset, page).
     """
     try:
-        limit = int(request.args.get("limit", 50))
+        # Support both 'limit' and 'page_size' as aliases
+        limit = int(request.args.get("limit") or request.args.get("page_size", 50))
     except ValueError:
         limit = 50
     try:
@@ -30,6 +31,21 @@ def _get_pagination():
     offset = (page - 1) * limit
     return limit, offset, page
 
+def _get_sort_order():
+    """
+    Lê query param sort, retorna ORDER BY clause segura.
+    Suporta: timestamp, -timestamp (DESC default).
+    """
+    sort_param = request.args.get("sort", "-timestamp").strip()
+    
+    if sort_param == "timestamp":
+        return "ORDER BY timestamp ASC"
+    elif sort_param == "-timestamp" or sort_param == "timestamp_desc":
+        return "ORDER BY timestamp DESC"
+    else:
+        # Default to timestamp DESC for any invalid sort
+        return "ORDER BY timestamp DESC"
+
 @admin_logs_bp.get("/")
 def list_admin_logs():
     """
@@ -37,11 +53,12 @@ def list_admin_logs():
     Lista logs de ações administrativas com paginação.
     Requer Authorization: Bearer <token> e user_type == 'admin'.
     Query params:
-      - limit: int (default 50, máx 200)
+      - limit/page_size: int (default 50, máx 200)
       - page: int (default 1)
+      - sort: string ('timestamp' for ASC, '-timestamp' for DESC default)
     Resposta:
       {
-        "data": [ { "id": ..., "actor_id": ..., "action": ..., "resource": ..., "metadata": {...}, "created_at": "..." }, ... ],
+        "data": [ { "id": ..., "timestamp": ..., "admin": ..., "action": ..., "details": ... }, ... ],
         "pagination": { "page": 1, "per_page": 50, "total": 123 }
       }
     """
@@ -54,6 +71,7 @@ def list_admin_logs():
         return jsonify({"error": "Acesso restrito a administradores"}), 403
 
     limit, offset, page = _get_pagination()
+    sort_order = _get_sort_order()
 
     conn = get_db_connection()
     if not conn:
@@ -65,16 +83,14 @@ def list_admin_logs():
             cur.execute("SELECT COUNT(*) FROM admin_logs")
             total = cur.fetchone()[0]
 
-            # Lista paginada
-            cur.execute(
-                """
-                SELECT id, actor_id, action, resource, metadata, created_at
+            # Lista paginada com colunas corretas
+            query = f"""
+                SELECT id, timestamp, admin, action, details
                 FROM admin_logs
-                ORDER BY created_at DESC
+                {sort_order}
                 LIMIT %s OFFSET %s
-                """,
-                (limit, offset),
-            )
+            """
+            cur.execute(query, (limit, offset))
             rows = cur.fetchall()
 
             # Normalizar resposta

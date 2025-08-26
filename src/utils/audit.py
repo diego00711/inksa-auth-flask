@@ -67,9 +67,11 @@ def log_admin_action(admin: str, action: str, details: str, request: Optional[Re
     """
     try:
         # Import here to avoid circular dependency
-        from .helpers import supabase
+        from .helpers import supabase, supabase_service
         
-        if not supabase:
+        # Prefer service role client for audit logging (bypasses RLS)
+        client = supabase_service or supabase
+        if not client:
             logger.warning("Audit logging skipped: Supabase client not available")
             return
             
@@ -116,7 +118,7 @@ def log_admin_action(admin: str, action: str, details: str, request: Optional[Re
         }
         
         # Insert into admin_logs table
-        result = supabase.table("admin_logs").insert(log_entry).execute()
+        result = client.table("admin_logs").insert(log_entry).execute()
         
         if result.data:
             logger.info(f"Admin action logged: {action} by {admin}")

@@ -2,12 +2,13 @@ import os
 import psycopg2
 from flask import request, jsonify
 from supabase import create_client, Client
+from typing import Optional
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Inicialização do cliente Supabase
+# Inicialização dos clientes Supabase
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -16,7 +17,7 @@ try:
     if not SUPABASE_URL:
         raise ValueError("Variável de ambiente SUPABASE_URL é obrigatória.")
 
-    # Prefer service role key; fallback to anon key
+    # Initialize primary supabase client (prefer service role key; fallback to anon key)
     if SUPABASE_SERVICE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         logger.info("✅ Cliente Supabase inicializado com sucesso usando Service Role Key")
@@ -25,9 +26,17 @@ try:
         logger.info("✅ Cliente Supabase inicializado com sucesso usando Anon Key")
     else:
         raise ValueError("Variável de ambiente SUPABASE_SERVICE_KEY ou SUPABASE_KEY é obrigatória.")
+
+    # Initialize dedicated service role client for audit logging (bypasses RLS)
+    supabase_service: Optional[Client] = None
+    if SUPABASE_SERVICE_KEY:
+        supabase_service = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        logger.info("✅ Cliente Supabase Service Role dedicado inicializado com sucesso")
+        
 except Exception as e:
     logger.error(f"❌ Falha ao inicializar o cliente Supabase: {e}")
     supabase = None
+    supabase_service: Optional[Client] = None
 
 def get_db_connection():
     try:
