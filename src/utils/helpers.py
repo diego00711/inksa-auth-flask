@@ -1,7 +1,5 @@
 import os
-import jwt
 import psycopg2
-import psycopg2.extras
 from flask import request, jsonify
 from supabase import create_client, Client
 import logging
@@ -9,6 +7,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Inicialização do cliente Supabase
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -30,12 +29,17 @@ def get_db_connection():
         return None
 
 def get_user_id_from_token(auth_header):
+    """
+    Valida o token JWT, pega o user_id via Supabase, 
+    e confere se está na tabela delivery_profiles.
+    """
     if not auth_header or not auth_header.startswith('Bearer '):
         return jsonify({"error": "Cabeçalho de autorização inválido"}), 401
 
     token = auth_header.split(' ')[1]
     
     try:
+        # Obter usuário do Supabase pelo token
         user_response = supabase.auth.get_user(token)
         user = user_response.user
         
@@ -43,47 +47,23 @@ def get_user_id_from_token(auth_header):
             return jsonify({"error": "Token inválido ou expirado"}), 401
 
         user_id = user.id
-        user_metadata = user.user_metadata or {}
-        user_type = user_metadata.get('user_type')
 
-        if not user_type:
-            logger.error(f"user_type não encontrado nos metadados para o usuário {user_id}")
-            return jsonify({"error": "Tipo de usuário não definido no token"}), 401
-        
-        # Retorna uma tupla com 2 valores em caso de sucesso
-        return user_id, user_type
+        # Conferir se user_id está na tabela delivery_profiles (é entregador)
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM delivery_profiles WHERE user_id = %s", (user_id,))
+                exists = cur.fetchone()
+                if not exists:
+                    return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
+        finally:
+            conn.close()
+
+        # Se passou, retorna user_id e tipo "entregador"
+        return user_id, 'entregador'
 
     except Exception as e:
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
         return jsonify({"error": "Erro interno ao processar o token"}), 500
-
-def get_user_info():
-    """
-    Extrai informações do usuário a partir do token JWT no header Authorization
-    Retorna um dicionário com user_id, email e user_type ou None em caso de erro
-    """
-    try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return None
-        
-        token = auth_header.split(' ')[1]
-        
-        # Usar o Supabase para obter informações do usuário
-        user_response = supabase.auth.get_user(token)
-        user = user_response.user
-        
-        if not user:
-            return None
-        
-        user_metadata = user.user_metadata or {}
-        
-        return {
-            'user_id': user.id,
-            'email': user.email,
-            'user_type': user_metadata.get('user_type')
-        }
-        
-    except Exception as e:
-        logger.error(f"Erro ao obter informações do usuário: {e}", exc_info=True)
-        return None
