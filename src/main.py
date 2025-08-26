@@ -75,6 +75,7 @@ allowed_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
     "https://inksa-admin-v0.vercel.app",
+    "https://inksa-admin-v0-5b7haddf8-inksas-projects.vercel.app",
     "https://entregadores.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
     "https://inksadelivery.com.br"
