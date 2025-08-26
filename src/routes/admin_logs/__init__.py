@@ -7,19 +7,19 @@ admin_logs_bp = Blueprint("admin_logs", __name__, url_prefix="/api/logs")
 
 def _get_pagination():
     """
-    Lê query params limit e page, aplica defaults e limites seguros.
-    Retorna (limit, offset, page).
+    Read query params for pagination with safe defaults and bounds.
+    Supports both limit and page_size (page_size has priority for backward compat).
+    Returns (limit, offset, page).
     """
     try:
-        limit = int(request.args.get("limit", 50))
-    except ValueError:
+        limit = int(request.args.get("page_size", request.args.get("limit", 50)))
+    except (TypeError, ValueError):
         limit = 50
     try:
         page = int(request.args.get("page", 1))
-    except ValueError:
+    except (TypeError, ValueError):
         page = 1
 
-    # Limites razoáveis
     if limit <= 0:
         limit = 50
     if limit > 200:
@@ -30,30 +30,45 @@ def _get_pagination():
     offset = (page - 1) * limit
     return limit, offset, page
 
+
+def _get_sort_direction():
+    """
+    Parse sort parameter. Accepted values:
+      - "-timestamp" => DESC (default)
+      - "timestamp"  => ASC
+    """
+    sort = request.args.get("sort", "-timestamp")
+    if sort == "timestamp":
+        return "ASC"
+    return "DESC"
+
 @admin_logs_bp.get("/")
 def list_admin_logs():
     """
     GET /api/logs
-    Lista logs de ações administrativas com paginação.
-    Requer Authorization: Bearer <token> e user_type == 'admin'.
+    Lists admin audit logs with pagination.
+    Requires Authorization: Bearer <token> and user_type == 'admin'.
+
     Query params:
-      - limit: int (default 50, máx 200)
       - page: int (default 1)
-    Resposta:
+      - limit | page_size: int (default 50, max 200)
+      - sort: "-timestamp" (default) or "timestamp"
+
+    Response:
       {
-        "data": [ { "id": ..., "actor_id": ..., "action": ..., "resource": ..., "metadata": {...}, "created_at": "..." }, ... ],
+        "data": [ { "id": ..., "timestamp": "...", "admin": "...", "action": "...", "details": "..." }, ... ],
         "pagination": { "page": 1, "per_page": 50, "total": 123 }
       }
     """
     auth_header = request.headers.get("Authorization")
     user_id, user_type, err = get_user_id_from_token(auth_header)
     if err:
-        # err já é uma tupla (jsonify, status)
         return err
     if user_type != "admin":
         return jsonify({"error": "Acesso restrito a administradores"}), 403
 
     limit, offset, page = _get_pagination()
+    order_dir = _get_sort_direction()
 
     conn = get_db_connection()
     if not conn:
@@ -61,23 +76,21 @@ def list_admin_logs():
 
     try:
         with conn.cursor() as cur:
-            # Total de registros
+            # Count total
             cur.execute("SELECT COUNT(*) FROM admin_logs")
             total = cur.fetchone()[0]
 
-            # Lista paginada
+            # Paged list matching the migration schema
             cur.execute(
-                """
-                SELECT id, actor_id, action, resource, metadata, created_at
+                f"""
+                SELECT id, timestamp, admin, action, details
                 FROM admin_logs
-                ORDER BY created_at DESC
+                ORDER BY timestamp {order_dir}
                 LIMIT %s OFFSET %s
                 """,
                 (limit, offset),
             )
             rows = cur.fetchall()
-
-            # Normalizar resposta
             columns = [desc[0] for desc in cur.description]
             data = [dict(zip(columns, row)) for row in rows]
 
@@ -103,8 +116,7 @@ def list_admin_logs():
 @admin_logs_bp.get("/health")
 def logs_health():
     """
-    Endpoint simples para verificação de saúde do módulo de logs.
-    Requer autenticação de admin (mantém a mesma política de acesso).
+    Simple health check for logs module. Requires admin authentication.
     """
     auth_header = request.headers.get("Authorization")
     _, user_type, err = get_user_id_from_token(auth_header)
