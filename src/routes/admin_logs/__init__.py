@@ -3,9 +3,27 @@ from datetime import datetime
 from io import StringIO
 import csv
 
-from src.utils.helpers import supabase
+from src.utils.helpers import supabase, get_user_id_from_token
+from src.utils.audit import log_admin_action_auto
+from functools import wraps
 
 admin_logs_bp = Blueprint("admin_logs", __name__)
+
+def admin_required(f):
+    """Decorator to require admin authentication for logs endpoints"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        user_id, user_type, error_response = get_user_id_from_token(auth_header)
+        
+        if error_response:
+            return error_response
+        
+        if user_type != 'admin':
+            return jsonify({"error": "Acesso não autorizado. Rota exclusiva para administradores."}), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
 
 def parse_iso_date(value: str):
     if not value:
@@ -58,6 +76,7 @@ def build_query(params):
     return query
 
 @admin_logs_bp.route("/api/logs", methods=["GET", "HEAD"])
+@admin_required
 def get_logs():
     if request.method == "HEAD":
         return ("", 200)
@@ -82,6 +101,9 @@ def get_logs():
     data = res.data or []
     total = res.count or 0
 
+    # Log list logs action
+    log_admin_action_auto("ListLogs", f"Listed logs page {page}, size {page_size}, total {total}")
+
     return jsonify({
         "items": data,
         "page": page,
@@ -91,6 +113,7 @@ def get_logs():
     })
 
 @admin_logs_bp.route("/api/logs/export", methods=["GET"])
+@admin_required
 def export_logs_csv():
     # Exporta com os mesmos filtros, sem paginação (limite de segurança)
     limit = int(request.args.get("limit", "5000"))
@@ -99,6 +122,11 @@ def export_logs_csv():
     query = build_query(request.args)
     res = query.limit(limit).execute()
     rows = res.data or []
+
+    # Log export action
+    filter_params = {k: v for k, v in request.args.items() if k not in ['limit']}
+    filter_summary = f"filters: {filter_params}" if filter_params else "no filters"
+    log_admin_action_auto("ExportLogs", f"Exported {len(rows)} log entries, {filter_summary}")
 
     # Gera CSV em memória
     output = StringIO()

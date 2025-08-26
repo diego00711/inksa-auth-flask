@@ -1,8 +1,12 @@
-# Python
+# Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
+
+# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -16,31 +20,102 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# Environment variables
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Flask/Django
+instance/
+.webassets-cache
+
+# Sphinx
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# PDM/PEP 582
+__pypackages__/
+
+# Environments
 .env
-.venv
-env/
+.env.*
+.venv/
 venv/
 ENV/
+env/
 env.bak/
 venv.bak/
 
-# IDE
+# IDE / Editor
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+.history
 
-# OS
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
 # Logs
 *.log
 
-# Node modules (for any frontend tooling)
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Node (if any)
 node_modules/
+npm-debug.log*
+
+# Supabase
+supabase/.temp/
+# Do NOT ignore migrations:
+# supabase/migrations/ (keep tracked)
