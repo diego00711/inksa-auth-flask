@@ -1,12 +1,6 @@
-# src/main.py
-
-# REMOVA o monkey patch do eventlet
-# import eventlet
-# eventlet.monkey_patch()
-
-# Imports padrão do projeto continuam aqui
 import os
 import sys
+import re
 from pathlib import Path
 from flask import Flask, jsonify, request
 from dotenv import load_dotenv
@@ -61,41 +55,39 @@ else:
 # Configuração da chave secreta
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'fallback-secret-key-change-in-production')
 
-# Lista de todas as origens permitidas para CORS (desenvolvimento e produção)
-allowed_origins = [
-    # Origens de Desenvolvimento
-    "http://localhost:5173", 
-    "http://127.0.0.1:5173", 
-    "http://localhost:3000", 
-    "http://localhost:5174",
-    "http://localhost:5175",
-    
-    # Origens de Produção - TODOS OS SUBDOMÍNIOS
-    "https://clientes.inksadelivery.com.br",
-    "https://restaurante.inksadelivery.com.br",
-    "https://admin.inksadelivery.com.br",
-    "https://inksa-admin-v0.vercel.app",
-    "https://inksa-admin-v0-5b7haddf8-inksas-projects.vercel.app",
-    "https://entregadores.inksadelivery.com.br",
-    "https://app.inksadelivery.com.br",
-    "https://inksadelivery.com.br"
-]
+# ----------- CORS: Função customizada para permitir todos os previews do Vercel e domínios de produção -----------
 
-# Configuração do CORS - SIMPLIFICADA (sem middleware duplicado)
-CORS(app, 
-     resources={r"/api/*": {
-         "origins": allowed_origins,
-         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-         "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
-         "supports_credentials": True,
-         "max_age": 600
-     }},
-     supports_credentials=True
+def custom_cors_origin(origin):
+    if not origin:
+        return False
+    allowed_patterns = [
+        r"^https:\/\/admin\.inksadelivery\.com\.br$",                       # produção admin
+        r"^https:\/\/inksa-admin-v0\.vercel\.app$",                         # domínio principal Vercel
+        r"^https:\/\/inksa-admin-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$",  # todos os previews do Vercel
+        r"^https:\/\/clientes\.inksadelivery\.com\.br$",
+        r"^https:\/\/restaurante\.inksadelivery\.com\.br$",
+        r"^https:\/\/entregadores\.inksadelivery\.com\.br$",
+        r"^https:\/\/app\.inksadelivery\.com\.br$",
+        r"^https:\/\/inksadelivery\.com\.br$"
+    ]
+    for pattern in allowed_patterns:
+        if re.match(pattern, origin):
+            return True
+    return False
+
+CORS(app,
+    origins=custom_cors_origin,
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    max_age=600
 )
+
+# ---------------------------------------------------------------------------------------------------------------
 
 # Configuração do SocketIO
 socketio = SocketIO(app, 
-                   cors_allowed_origins=allowed_origins,
+                   cors_allowed_origins=custom_cors_origin,
                    async_mode='eventlet',
                    logger=False,
                    engineio_logger=False)
@@ -136,7 +128,7 @@ def index():
         "status": "online",
         "message": "Servidor Inksa funcionando!",
         "version": "1.0.0",
-        "cors_allowed_origins": allowed_origins,
+        "cors_allowed": True,
         "endpoints": {
             "auth": "/api/auth",
             "orders": "/api/orders",
@@ -155,17 +147,17 @@ def health_check():
         "status": "healthy",
         "database": "connected" if supabase else "disconnected",
         "mercado_pago": "configured" if app.mp_sdk else "not_configured",
-        "cors_enabled": True,
-        "allowed_origins_count": len(allowed_origins)
+        "cors_enabled": True
     })
 
 @app.route('/api/cors-test')
 def cors_test():
     """Endpoint para testar CORS"""
+    origin = request.headers.get('Origin')
     return jsonify({
         "message": "CORS test successful",
-        "your_origin": request.headers.get('Origin'),
-        "allowed": request.headers.get('Origin') in allowed_origins
+        "your_origin": origin,
+        "allowed": custom_cors_origin(origin)
     })
 
 @socketio.on('connect')
@@ -202,6 +194,4 @@ if __name__ == '__main__':
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
     
     logger.info(f"Iniciando servidor na porta {port} (debug: {debug})")
-    logger.info(f"Origens CORS permitidas: {allowed_origins}")
-    
     socketio.run(app, host='0.0.0.0', port=port, debug=debug, use_reloader=debug)
