@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO FINAL E ROBUSTA)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM O RETURN CORRIGIDO)
 
 import os
 import uuid
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (LÓGICA FINAL E SEGURA)
+# DECORATOR DE AUTENTICAÇÃO (COM O RETURN CORRIGIDO)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
@@ -31,29 +31,21 @@ def delivery_token_required(f):
         if not auth_header:
             return jsonify({"error": "Token de autorização ausente"}), 401
 
-        try:
-            # --- CORREÇÃO FINAL APLICADA AQUI ---
-            # Tenta desempacotar o resultado da função.
-            # Se funcionar, é sucesso. Se der erro (ValueError), é falha.
-            user_auth_id, user_type = get_user_id_from_token(auth_header)
+        token_result = get_user_id_from_token(auth_header)
+
+        if isinstance(token_result, tuple) and len(token_result) == 2:
+            user_auth_id, user_type = token_result
             
-            # Se o desempacotamento funcionou, prosseguimos com a validação.
             if user_type != 'entregador':
                 return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
             
             g.user_auth_id = str(user_auth_id)
             
-            # Retorna a execução da função da rota (ex: handle_profile)
+            # --- CORREÇÃO FINAL APLICADA AQUI ---
+            # Adiciona o "return" para que a resposta da função da rota seja enviada ao Flask.
             return f(*args, **kwargs)
-
-        except ValueError:
-            # Se o desempacotamento falhou, significa que a função retornou um erro.
-            # Chamamos a função novamente para obter a resposta de erro formatada.
-            error_response = get_user_id_from_token(auth_header)
-            return error_response
-        except Exception as e:
-            logger.error(f"Erro inesperado no decorador: {e}", exc_info=True)
-            return jsonify({"error": "Erro interno no processamento do token"}), 500
+        else:
+            return token_result
 
     return decorated_function
 
