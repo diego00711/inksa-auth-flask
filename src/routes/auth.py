@@ -3,9 +3,8 @@ import logging
 from src.utils.helpers import get_db_connection, supabase
 from src.utils.audit import log_admin_action
 
-# Observação:
-# Este blueprint cuida apenas de autenticação (login/registro).
-# O endpoint de perfil do cliente (/api/auth/profile) está em src/routes/client.py.
+# Este blueprint cuida somente de autenticação (login/registro).
+# O endpoint de perfil do cliente está em src/routes/client.py (GET/PUT /api/auth/profile).
 auth_bp = Blueprint('auth', __name__)
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,6 @@ def login():
 
             user_id, user_type, user_email, created_at = user_data
 
-            # Log admin logins (para admin)
             if user_type == 'admin':
                 log_admin_action(user_email, "Login", "Admin login via client endpoint", request)
 
@@ -81,7 +79,6 @@ def login():
         logger.error(f"Erro no login: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno no servidor"}), 500
 
-# Mantido aqui apenas como placeholder; implemente seu fluxo de registro ou remova se não usar.
 @auth_bp.route('/register', methods=['POST'])
 def register():
     try:
