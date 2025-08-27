@@ -38,8 +38,10 @@ try:
     from src.routes.gamification_routes import gamification_bp
     from src.routes.categories import categories_bp
     from src.routes.analytics import analytics_bp
-    from src.routes.admin_logs import admin_logs_bp  # IMPORTANTE: novo blueprint de logs
-    from src.routes.admin_users import admin_users_bp  # Blueprint for admin users API endpoints
+    from src.routes.admin_logs import admin_logs_bp  # BLUEPRINT de logs
+    from src.routes.admin_users import admin_users_bp  # BLUEPRINT de admin users
+    # CORREÇÃO: registrar o blueprint do perfil do cliente (já define url_prefix='/auth')
+    from src.routes.client import client_bp
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
@@ -91,14 +93,17 @@ CORS(
 # ---------------------------------------------------------------------------------------------------------------
 
 # Configuração do SocketIO
-socketio = SocketIO(app, 
-                   cors_allowed_origins=re.compile(ALLOWED_ORIGIN_REGEX),
-                   async_mode='eventlet',
-                   logger=False,
-                   engineio_logger=False)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=re.compile(ALLOWED_ORIGIN_REGEX),
+    async_mode='eventlet',
+    logger=False,
+    engineio_logger=False
+)
 
 # Registro de blueprints
-app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(auth_bp, url_prefix='/api/auth')          # login/registro
+app.register_blueprint(client_bp, url_prefix='/api')             # -> /api/auth/profile (GET/PUT, upload-avatar)
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
@@ -108,12 +113,12 @@ app.register_blueprint(delivery_auth_profile_bp, url_prefix='/api/delivery')
 app.register_blueprint(delivery_orders_bp, url_prefix='/api/delivery')
 app.register_blueprint(delivery_stats_earnings_bp, url_prefix='/api/delivery')
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
-app.register_blueprint(payouts_bp, url_prefix='/api/admin') 
+app.register_blueprint(payouts_bp, url_prefix='/api/admin')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
-app.register_blueprint(admin_logs_bp)  # BLUEPRINT DE LOGS, sem url_prefix para endpoint /api/logs
-app.register_blueprint(admin_users_bp)  # BLUEPRINT DE ADMIN USERS, sem url_prefix para endpoints /api/users
+app.register_blueprint(admin_logs_bp)   # endpoints devem começar com /api/logs dentro do blueprint
+app.register_blueprint(admin_users_bp)  # endpoints devem começar com /api/users dentro do blueprint
 
 # Configuração do Mercado Pago
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
@@ -206,6 +211,6 @@ if __name__ == '__main__':
     # Para desenvolvimento local
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    
+
     logger.info(f"Iniciando servidor na porta {port} (debug: {debug})")
     socketio.run(app, host='0.0.0.0', port=port, debug=debug, use_reloader=debug)
