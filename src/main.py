@@ -39,6 +39,7 @@ try:
     from src.routes.categories import categories_bp
     from src.routes.analytics import analytics_bp
     from src.routes.admin_logs import admin_logs_bp  # IMPORTANTE: novo blueprint de logs
+    from src.routes.admin_users import admin_users_bp  # Blueprint for admin users API endpoints
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
@@ -102,6 +103,7 @@ app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(admin_logs_bp)  # BLUEPRINT DE LOGS, sem url_prefix para endpoint /api/logs
+app.register_blueprint(admin_users_bp)  # BLUEPRINT DE ADMIN USERS, sem url_prefix para endpoints /api/users
 
 # Configuração do Mercado Pago
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
