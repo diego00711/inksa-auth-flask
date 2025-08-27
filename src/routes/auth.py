@@ -3,8 +3,7 @@ import logging
 from src.utils.helpers import get_db_connection, supabase
 from src.utils.audit import log_admin_action
 
-# Este blueprint cuida somente de autenticação (login/registro).
-# O endpoint de perfil do cliente está em src/routes/client.py (GET/PUT /api/auth/profile).
+# Mantemos este blueprint apenas para login/registro.
 auth_bp = Blueprint('auth', __name__)
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,6 @@ def login():
         if not email or not password:
             return jsonify({"error": "Email e senha são obrigatórios"}), 400
 
-        # Autentica com Supabase
         auth_response = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
@@ -33,7 +31,6 @@ def login():
         if not user or not session:
             return jsonify({"error": "Falha na autenticação"}), 401
 
-        # Busca dados adicionais do usuário na tabela personalizada
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Erro de conexão com o banco"}), 500
