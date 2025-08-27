@@ -62,9 +62,19 @@ ALLOWED_ORIGIN_REGEX = (
     r"^https:\/\/admin\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-admin-v0\.vercel\.app$|"
     r"^https:\/\/inksa-admin-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+
     r"^https:\/\/clientes\.inksadelivery\.com\.br$|"
+    r"^https:\/\/inksa-clientes-v0\.vercel\.app$|"
+    r"^https:\/\/inksa-clientes-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+
     r"^https:\/\/restaurante\.inksadelivery\.com\.br$|"
+    r"^https:\/\/inksa-restaurante-v0\.vercel\.app$|"
+    r"^https:\/\/inksa-restaurante-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+
     r"^https:\/\/entregadores\.inksadelivery\.com\.br$|"
+    r"^https:\/\/inksa-entregadores-v0\.vercel\.app$|"
+    r"^https:\/\/inksa-entregadores-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+
     r"^https:\/\/app\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksadelivery\.com\.br$"
 )
