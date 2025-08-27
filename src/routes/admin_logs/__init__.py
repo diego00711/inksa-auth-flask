@@ -5,6 +5,7 @@ from src.utils.helpers import get_user_id_from_token, get_db_connection
 logger = logging.getLogger(__name__)
 admin_logs_bp = Blueprint("admin_logs", __name__, url_prefix="/api/logs")
 
+
 def _get_pagination():
     """
     Lê query params limit e page, aplica defaults e limites seguros.
@@ -29,6 +30,7 @@ def _get_pagination():
 
     offset = (page - 1) * limit
     return limit, offset, page
+
 
 @admin_logs_bp.get("/")
 def list_admin_logs():
@@ -81,16 +83,19 @@ def list_admin_logs():
             columns = [desc[0] for desc in cur.description]
             data = [dict(zip(columns, row)) for row in rows]
 
-        return jsonify(
-            {
-                "data": data,
-                "pagination": {
-                    "page": page,
-                    "per_page": limit,
-                    "total": total,
-                },
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "data": data,
+                    "pagination": {
+                        "page": page,
+                        "per_page": limit,
+                        "total": total,
+                    },
+                }
+            ),
+            200,
+        )
     except Exception as e:
         logger.exception("Erro ao consultar admin_logs: %s", e)
         return jsonify({"error": "Erro ao consultar logs"}), 500
@@ -99,6 +104,7 @@ def list_admin_logs():
             conn.close()
         except Exception:
             pass
+
 
 @admin_logs_bp.get("/health")
 def logs_health():

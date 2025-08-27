@@ -8,13 +8,16 @@ import logging
 import hmac
 import hashlib
 import time
+
 # from src import config  # <<< MUDANÇA: REMOVIDA a importação problemática
 
 # Configuração do logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # Criação do Blueprint
-mp_payment_bp = Blueprint('mp_payment_bp', __name__)
+mp_payment_bp = Blueprint("mp_payment_bp", __name__)
 
 # Inicialização do Cliente Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -30,54 +33,60 @@ else:
     except Exception as e:
         logging.error(f"ERRO ao inicializar cliente Supabase: {e}")
 
+
 # Função de verificação de assinatura do Webhook (mantida, está ótima)
 def verify_mp_signature(req, secret):
     """Verifica a assinatura da notificação de webhook do Mercado Pago."""
-    signature_header = req.headers.get('X-Signature')
+    signature_header = req.headers.get("X-Signature")
     if not signature_header:
         logging.warning("Webhook recebido sem o cabeçalho X-Signature.")
         return False
 
-    parts = {p.split('=')[0]: p.split('=')[1] for p in signature_header.split(',')}
-    ts = parts.get('ts')
-    signature_hash = parts.get('v1')
+    parts = {p.split("=")[0]: p.split("=")[1] for p in signature_header.split(",")}
+    ts = parts.get("ts")
+    signature_hash = parts.get("v1")
 
     if not ts or not signature_hash:
         logging.warning("Cabeçalho X-Signature com formato inválido.")
         return False
-        
-    notification_id = req.args.get('id')
+
+    notification_id = req.args.get("id")
     if not notification_id:
         json_data = req.get_json(silent=True)
-        if json_data and 'data' in json_data and 'id' in json_data['data']:
-             notification_id = json_data['data']['id']
+        if json_data and "data" in json_data and "id" in json_data["data"]:
+            notification_id = json_data["data"]["id"]
         else:
-            notification_id = req.args.get('id', 'id_not_found')
+            notification_id = req.args.get("id", "id_not_found")
 
     manifest_string = f"id:{notification_id};ts:{ts};"
 
     local_signature = hmac.new(
-        secret.encode(),
-        msg=manifest_string.encode(),
-        digestmod=hashlib.sha256
+        secret.encode(), msg=manifest_string.encode(), digestmod=hashlib.sha256
     ).hexdigest()
 
     return hmac.compare_digest(local_signature, signature_hash)
 
 
-@mp_payment_bp.route('/pagamentos/criar_preferencia', methods=['POST'])
+@mp_payment_bp.route("/pagamentos/criar_preferencia", methods=["POST"])
 def criar_preferencia_mercado_pago():
     try:
         sdk = current_app.mp_sdk
         if sdk is None:
-            return jsonify({"erro": "Serviço de pagamento indisponível. Credenciais do Mercado Pago ausentes."}), 503
+            return (
+                jsonify(
+                    {
+                        "erro": "Serviço de pagamento indisponível. Credenciais do Mercado Pago ausentes."
+                    }
+                ),
+                503,
+            )
         dados_pedido = request.json
         if not dados_pedido:
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
         items_mp = []
-        items_from_request = dados_pedido.get('itens', [])
+        items_from_request = dados_pedido.get("itens", [])
         for item in items_from_request:
-            preco = item.get('unit_price')
+            preco = item.get("unit_price")
             if preco is not None:
                 try:
                     if float(preco) > 0:
@@ -85,104 +94,184 @@ def criar_preferencia_mercado_pago():
                 except (ValueError, TypeError):
                     pass
         if not items_mp:
-            return jsonify({"erro": "A lista de itens está vazia ou todos os itens têm valor zero."}), 400
-        urls_retorno = dados_pedido.get('urls_retorno', {})
+            return (
+                jsonify(
+                    {
+                        "erro": "A lista de itens está vazia ou todos os itens têm valor zero."
+                    }
+                ),
+                400,
+            )
+        urls_retorno = dados_pedido.get("urls_retorno", {})
         FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
         notification_url_mp_base = os.environ.get("MERCADO_PAGO_WEBHOOK_URL")
         if not notification_url_mp_base:
-            return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
+            return (
+                jsonify(
+                    {"erro": "URL de notificação do Mercado Pago não configurada."}
+                ),
+                500,
+            )
         preference_data = {
             "items": items_mp,
-            "payer": {"email": dados_pedido.get('cliente_email', 'comprador@exemplo.com.br')},
+            "payer": {
+                "email": dados_pedido.get("cliente_email", "comprador@exemplo.com.br")
+            },
             "back_urls": {
-                "success": urls_retorno.get('sucesso', f"{FRONTEND_URL}/pagamento/sucesso"),
-                "failure": urls_retorno.get('falha', f"{FRONTEND_URL}/pagamento/falha"),
-                "pending": urls_retorno.get('pendente', f"{FRONTEND_URL}/pagamento/pendente")
+                "success": urls_retorno.get(
+                    "sucesso", f"{FRONTEND_URL}/pagamento/sucesso"
+                ),
+                "failure": urls_retorno.get("falha", f"{FRONTEND_URL}/pagamento/falha"),
+                "pending": urls_retorno.get(
+                    "pendente", f"{FRONTEND_URL}/pagamento/pendente"
+                ),
             },
             "auto_return": "approved",
-            "external_reference": dados_pedido.get('pedido_id', 'id_pedido_temp'),
-            "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp"
+            "external_reference": dados_pedido.get("pedido_id", "id_pedido_temp"),
+            "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp",
         }
         preference_response = sdk.preference().create(preference_data)
-        if "response" not in preference_response or preference_response.get("status", 200) >= 400:
-            return jsonify({
-                "erro": "O Mercado Pago recusou a criação do pagamento.", 
-                "detalhes": preference_response.get("response", {}).get("message", "Erro desconhecido do MP.")
-            }), 400
+        if (
+            "response" not in preference_response
+            or preference_response.get("status", 200) >= 400
+        ):
+            return (
+                jsonify(
+                    {
+                        "erro": "O Mercado Pago recusou a criação do pagamento.",
+                        "detalhes": preference_response.get("response", {}).get(
+                            "message", "Erro desconhecido do MP."
+                        ),
+                    }
+                ),
+                400,
+            )
         preference = preference_response["response"]
-        return jsonify({
-            "mensagem": "Preferência de pagamento criada com sucesso!",
-            "checkout_link": preference["init_point"],
-            "preference_id": preference["id"]
-        }), 200
+        return (
+            jsonify(
+                {
+                    "mensagem": "Preferência de pagamento criada com sucesso!",
+                    "checkout_link": preference["init_point"],
+                    "preference_id": preference["id"],
+                }
+            ),
+            200,
+        )
     except Exception as e:
-        logging.error(f"Erro CRÍTICO ao criar preferência de pagamento: {e}", exc_info=True)
+        logging.error(
+            f"Erro CRÍTICO ao criar preferência de pagamento: {e}", exc_info=True
+        )
         return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
 
 
-@mp_payment_bp.route('/pagamentos/webhook_mp', methods=['POST'])
+@mp_payment_bp.route("/pagamentos/webhook_mp", methods=["POST"])
 def mercadopago_webhook():
     webhook_secret = os.environ.get("MERCADO_PAGO_WEBHOOK_SECRET")
     if webhook_secret and not verify_mp_signature(request, webhook_secret):
         logging.error("FALHA NA VERIFICAÇÃO DA ASSINATURA DO WEBHOOK!")
         return jsonify({"status": "error", "message": "Assinatura inválida."}), 403
-    
-    logging.info("--- Webhook do Mercado Pago recebido e assinatura verificada! ---")
-    
-    request_data = request.get_json(silent=True) or request.args.to_dict()
-    topic = request_data.get('topic')
-    resource_id = request_data.get('id')
-    
-    if request_data.get('type') == 'payment' and request_data.get('data', {}).get('id'):
-        topic = 'payment'
-        resource_id = request_data['data']['id']
-    elif not topic and request.args.get('topic'):
-        topic = request.args.get('topic')
-        resource_id = request.args.get('id')
 
-    if topic == 'payment':
+    logging.info("--- Webhook do Mercado Pago recebido e assinatura verificada! ---")
+
+    request_data = request.get_json(silent=True) or request.args.to_dict()
+    topic = request_data.get("topic")
+    resource_id = request_data.get("id")
+
+    if request_data.get("type") == "payment" and request_data.get("data", {}).get("id"):
+        topic = "payment"
+        resource_id = request_data["data"]["id"]
+    elif not topic and request.args.get("topic"):
+        topic = request.args.get("topic")
+        resource_id = request.args.get("id")
+
+    if topic == "payment":
         if supabase_client is None:
-            return jsonify({"status": "error", "message": "Serviço de banco de dados indisponível."}), 500
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Serviço de banco de dados indisponível.",
+                    }
+                ),
+                500,
+            )
         try:
             sdk = current_app.mp_sdk
             if sdk is None:
-                return jsonify({"status": "error", "message": "Serviço de pagamento indisponível."}), 503
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Serviço de pagamento indisponível.",
+                        }
+                    ),
+                    503,
+                )
             payment_info = sdk.payment().get(resource_id)
             if not (payment_info and "response" in payment_info):
-                return jsonify({"status": "error", "message": "Detalhes do pagamento não encontrados"}), 404
-            
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Detalhes do pagamento não encontrados",
+                        }
+                    ),
+                    404,
+                )
+
             payment_data = payment_info["response"]
             status = payment_data.get("status")
             external_reference = payment_data.get("external_reference")
-            
-            if status == 'approved':
-                logging.info(f"Pagamento {resource_id} APROVADO. Iniciando cálculos de repasse.")
-                response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).single().execute()
+
+            if status == "approved":
+                logging.info(
+                    f"Pagamento {resource_id} APROVADO. Iniciando cálculos de repasse."
+                )
+                response_supabase = (
+                    supabase_client.table("orders")
+                    .select("*")
+                    .eq("id", external_reference)
+                    .single()
+                    .execute()
+                )
                 if response_supabase.data:
                     pedido_do_bd = response_supabase.data
-                    valor_total_itens = float(pedido_do_bd.get('total_amount_items', 0.0))
-                    
+                    valor_total_itens = float(
+                        pedido_do_bd.get("total_amount_items", 0.0)
+                    )
+
                     # <<< MUDANÇA: Usando a configuração carregada na aplicação
-                    comissao_plataforma = valor_total_itens * current_app.config['PLATFORM_COMMISSION_RATE']
-                    
+                    comissao_plataforma = (
+                        valor_total_itens
+                        * current_app.config["PLATFORM_COMMISSION_RATE"]
+                    )
+
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
-                    valor_para_entregador = float(pedido_do_bd.get('delivery_fee', 0.0))
+                    valor_para_entregador = float(pedido_do_bd.get("delivery_fee", 0.0))
                     update_data = {
-                        'status_pagamento': status,
-                        'comissao_plataforma': round(comissao_plataforma, 2),
-                        'valor_repassado_restaurante': round(valor_para_restaurante, 2),
-                        'valor_repassado_entregador': round(valor_para_entregador, 2),
-                        'id_transacao_mp': resource_id
+                        "status_pagamento": status,
+                        "comissao_plataforma": round(comissao_plataforma, 2),
+                        "valor_repassado_restaurante": round(valor_para_restaurante, 2),
+                        "valor_repassado_entregador": round(valor_para_entregador, 2),
+                        "id_transacao_mp": resource_id,
                     }
-                    supabase_client.table('orders').update(update_data).eq('id', external_reference).execute()
-                    logging.info(f"Pedido {external_reference} atualizado no Supabase com status e repasses.")
+                    supabase_client.table("orders").update(update_data).eq(
+                        "id", external_reference
+                    ).execute()
+                    logging.info(
+                        f"Pedido {external_reference} atualizado no Supabase com status e repasses."
+                    )
                 else:
-                    logging.warning("Não foi possível calcular repasses: Pedido não encontrado no Supabase.")
-            
-            elif status in ['pending', 'in_process', 'rejected']:
-                supabase_client.table('orders').update({'status_pagamento': status, 'id_transacao_mp': resource_id}).eq('id', external_reference).execute()
+                    logging.warning(
+                        "Não foi possível calcular repasses: Pedido não encontrado no Supabase."
+                    )
+
+            elif status in ["pending", "in_process", "rejected"]:
+                supabase_client.table("orders").update(
+                    {"status_pagamento": status, "id_transacao_mp": resource_id}
+                ).eq("id", external_reference).execute()
 
         except Exception as e:
             logging.error(f"Erro ao processar webhook de pagamento: {e}", exc_info=True)
-            
+
     return jsonify({"status": "ok"}), 200

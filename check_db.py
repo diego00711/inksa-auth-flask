@@ -7,10 +7,12 @@ print("--- INICIANDO TESTE DE CONEXÃO DIRETA ---")
 print("1. Carregando variáveis do arquivo .env...")
 load_dotenv()
 
-db_url = os.getenv('DATABASE_URL')
+db_url = os.getenv("DATABASE_URL")
 
 if not db_url:
-    print("❌ ERRO: A variável DATABASE_URL não foi encontrada ou está vazia no arquivo .env!")
+    print(
+        "❌ ERRO: A variável DATABASE_URL não foi encontrada ou está vazia no arquivo .env!"
+    )
 else:
     print("✅ Variável DATABASE_URL encontrada.")
     print("\n2. Tentando conectar ao banco de dados...")

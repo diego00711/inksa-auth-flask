@@ -19,10 +19,12 @@ try:
 
     # Debug logging for environment variables presence
     if AUDIT_DEBUG:
-        logger.info(f"[AUDIT_DEBUG] Environment variables presence: "
-                   f"SUPABASE_URL={bool(SUPABASE_URL)}, "
-                   f"SUPABASE_SERVICE_KEY={bool(SUPABASE_SERVICE_KEY)}, "
-                   f"SUPABASE_KEY={bool(SUPABASE_KEY)}")
+        logger.info(
+            f"[AUDIT_DEBUG] Environment variables presence: "
+            f"SUPABASE_URL={bool(SUPABASE_URL)}, "
+            f"SUPABASE_SERVICE_KEY={bool(SUPABASE_SERVICE_KEY)}, "
+            f"SUPABASE_KEY={bool(SUPABASE_KEY)}"
+        )
 
     if not SUPABASE_URL:
         raise ValueError("Variável de ambiente SUPABASE_URL é obrigatória.")
@@ -31,22 +33,29 @@ try:
     if SUPABASE_SERVICE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         supabase_client_type = "service"
-        logger.info("✅ Cliente Supabase inicializado com sucesso usando Service Role Key")
+        logger.info(
+            "✅ Cliente Supabase inicializado com sucesso usando Service Role Key"
+        )
     elif SUPABASE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         supabase_client_type = "default"
         logger.info("✅ Cliente Supabase inicializado com sucesso usando Anon Key")
     else:
-        raise ValueError("Variável de ambiente SUPABASE_SERVICE_KEY ou SUPABASE_KEY é obrigatória.")
-    
+        raise ValueError(
+            "Variável de ambiente SUPABASE_SERVICE_KEY ou SUPABASE_KEY é obrigatória."
+        )
+
     # Debug logging for client initialization
     if AUDIT_DEBUG:
-        logger.info(f"[AUDIT_DEBUG] Supabase client initialized: type={supabase_client_type}")
-        
+        logger.info(
+            f"[AUDIT_DEBUG] Supabase client initialized: type={supabase_client_type}"
+        )
+
 except Exception as e:
     logger.error(f"❌ Falha ao inicializar o cliente Supabase: {e}")
     supabase = None
     supabase_client_type = None
+
 
 def get_db_connection():
     try:
@@ -57,21 +66,26 @@ def get_db_connection():
         logger.error(f"❌ Falha na conexão com o banco de dados: {e}")
         return None
 
+
 def get_user_id_from_token(auth_header):
     """
-    Valida o token JWT, pega o user_id via Supabase, 
+    Valida o token JWT, pega o user_id via Supabase,
     e confere se está na tabela users.
     """
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return None, None, (jsonify({"error": "Cabeçalho de autorização inválido"}), 401)
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return (
+            None,
+            None,
+            (jsonify({"error": "Cabeçalho de autorização inválido"}), 401),
+        )
 
-    token = auth_header.split(' ')[1]
-    
+    token = auth_header.split(" ")[1]
+
     try:
         # Obter usuário do Supabase pelo token
         user_response = supabase.auth.get_user(token)
         user = user_response.user
-        
+
         if not user:
             return None, None, (jsonify({"error": "Token inválido ou expirado"}), 401)
 
@@ -80,13 +94,21 @@ def get_user_id_from_token(auth_header):
         # Conferir se user_id está na tabela users e pegar user_type
         conn = get_db_connection()
         if not conn:
-            return None, None, (jsonify({"error": "Erro de conexão com o banco de dados"}), 500)
+            return (
+                None,
+                None,
+                (jsonify({"error": "Erro de conexão com o banco de dados"}), 500),
+            )
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
                 result = cur.fetchone()
                 if not result:
-                    return None, None, (jsonify({"error": "Acesso não autorizado."}), 403)
+                    return (
+                        None,
+                        None,
+                        (jsonify({"error": "Acesso não autorizado."}), 403),
+                    )
                 user_type = result[0]
         finally:
             conn.close()
@@ -96,7 +118,12 @@ def get_user_id_from_token(auth_header):
 
     except Exception as e:
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
-        return None, None, (jsonify({"error": "Erro interno ao processar o token"}), 500)
+        return (
+            None,
+            None,
+            (jsonify({"error": "Erro interno ao processar o token"}), 500),
+        )
+
 
 def get_user_info():
     """
@@ -104,17 +131,17 @@ def get_user_info():
     Retorna um dicionário com user_id, email e (opcionalmente) outros dados.
     """
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
             return None
-        token = auth_header.split(' ')[1]
+        token = auth_header.split(" ")[1]
         user_response = supabase.auth.get_user(token)
         user = user_response.user
         if not user:
             return None
         return {
-            'user_id': user.id,
-            'email': user.email,
+            "user_id": user.id,
+            "email": user.email,
         }
     except Exception as e:
         logger.error(f"Erro ao obter informações do usuário: {e}", exc_info=True)

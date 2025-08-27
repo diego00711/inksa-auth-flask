@@ -7,20 +7,29 @@ import traceback
 from ..utils.helpers import get_db_connection
 from ..utils.delivery_helpers import delivery_token_required, serialize_delivery_data
 
-delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
+delivery_stats_earnings_bp = Blueprint("delivery_stats_earnings_bp", __name__)
 
-@delivery_stats_earnings_bp.route('/dashboard-stats/<string:profile_id>', methods=['GET'])
-@delivery_token_required 
-def get_dashboard_stats(profile_id): 
+
+@delivery_stats_earnings_bp.route(
+    "/dashboard-stats/<string:profile_id>", methods=["GET"]
+)
+@delivery_token_required
+def get_dashboard_stats(profile_id):
     conn = get_db_connection()
     if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-    
-    try: 
+        return (
+            jsonify(
+                {"status": "error", "message": "Erro de conexão com o banco de dados"}
+            ),
+            500,
+        )
+
+    try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             today = date.today()
-            
-            cur.execute("""
+
+            cur.execute(
+                """
                 WITH today_stats AS (
                     SELECT 
                         COALESCE(SUM(delivery_fee), 0) AS earnings,
@@ -64,47 +73,96 @@ def get_dashboard_stats(profile_id):
                 FROM delivery_profiles dp
                 CROSS JOIN today_stats ts
                 WHERE dp.id = %s
-            """, (profile_id, today, profile_id, profile_id))
-            
+            """,
+                (profile_id, today, profile_id, profile_id),
+            )
+
             stats = cur.fetchone()
-            
+
             if not stats:
-                return jsonify({"status": "error", "message": "Perfil de entregador não encontrado para este usuário."}), 404
-            
-            return jsonify({
-                "status": "success",
-                "data": {
-                    "todayDeliveries": stats['today_deliveries'] or 0,
-                    "todayEarnings": float(stats['today_earnings']) if stats['today_earnings'] is not None else 0.0,
-                    "avgRating": float(stats['rating']) if stats['rating'] is not None else 0.0,
-                    "totalDeliveries": stats['total_deliveries'] or 0, 
-                    "activeOrders": serialize_delivery_data(stats['active_orders'] or [])
-                }
-            }), 200
-            
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Perfil de entregador não encontrado para este usuário.",
+                        }
+                    ),
+                    404,
+                )
+
+            return (
+                jsonify(
+                    {
+                        "status": "success",
+                        "data": {
+                            "todayDeliveries": stats["today_deliveries"] or 0,
+                            "todayEarnings": (
+                                float(stats["today_earnings"])
+                                if stats["today_earnings"] is not None
+                                else 0.0
+                            ),
+                            "avgRating": (
+                                float(stats["rating"])
+                                if stats["rating"] is not None
+                                else 0.0
+                            ),
+                            "totalDeliveries": stats["total_deliveries"] or 0,
+                            "activeOrders": serialize_delivery_data(
+                                stats["active_orders"] or []
+                            ),
+                        },
+                    }
+                ),
+                200,
+            )
+
     except psycopg2.Error as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Erro de banco de dados",
+                    "detail": str(e),
+                }
+            ),
+            500,
+        )
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Erro interno do servidor",
+                    "detail": str(e),
+                }
+            ),
+            500,
+        )
     finally:
         if conn:
             conn.close()
 
-@delivery_stats_earnings_bp.route('/earnings-history', methods=['GET'])
+
+@delivery_stats_earnings_bp.route("/earnings-history", methods=["GET"])
 @delivery_token_required
 def get_earnings_history():
     profile_id = g.profile_id
     conn = get_db_connection()
     if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-    
+        return (
+            jsonify(
+                {"status": "error", "message": "Erro de conexão com o banco de dados"}
+            ),
+            500,
+        )
+
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             # Parâmetros de data
-            start_date_str = request.args.get('start_date')
-            end_date_str = request.args.get('end_date')
+            start_date_str = request.args.get("start_date")
+            end_date_str = request.args.get("end_date")
 
             end_date = date.today()
             start_date = end_date - timedelta(days=6)
@@ -115,13 +173,30 @@ def get_earnings_history():
                 if end_date_str:
                     end_date = date.fromisoformat(end_date_str)
             except ValueError:
-                return jsonify({"status": "error", "message": "Formato de data inválido. Use YYYY-MM-DD."}), 400
-            
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Formato de data inválido. Use YYYY-MM-DD.",
+                        }
+                    ),
+                    400,
+                )
+
             if start_date > end_date:
-                return jsonify({"status": "error", "message": "A data de início não pode ser posterior à data de fim."}), 400
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "A data de início não pode ser posterior à data de fim.",
+                        }
+                    ),
+                    400,
+                )
 
             # Consulta de ganhos diários
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT 
                     DATE(o.created_at) AS earning_date, 
                     COALESCE(SUM(o.delivery_fee), 0) AS total_earned_daily,
@@ -132,7 +207,9 @@ def get_earnings_history():
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 GROUP BY DATE(o.created_at)
                 ORDER BY earning_date ASC;
-            """, (profile_id, start_date, end_date))
+            """,
+                (profile_id, start_date, end_date),
+            )
             daily_earnings_data = cur.fetchall()
 
             # Preencher lacunas de dias sem entregas
@@ -141,27 +218,28 @@ def get_earnings_history():
             while current_day <= end_date:
                 full_period_earnings[current_day.isoformat()] = {
                     "total_earned_daily": 0.0,
-                    "total_deliveries_daily": 0
+                    "total_deliveries_daily": 0,
                 }
                 current_day += timedelta(days=1)
-            
+
             for row in daily_earnings_data:
-                full_period_earnings[row['earning_date'].isoformat()] = {
-                    "total_earned_daily": float(row['total_earned_daily']),
-                    "total_deliveries_daily": row['total_deliveries_daily']
+                full_period_earnings[row["earning_date"].isoformat()] = {
+                    "total_earned_daily": float(row["total_earned_daily"]),
+                    "total_deliveries_daily": row["total_deliveries_daily"],
                 }
-            
+
             ordered_daily_earnings = [
                 {
                     "earning_date": date_str,
                     "total_earned_daily": data["total_earned_daily"],
-                    "total_deliveries_daily": data["total_deliveries_daily"]
+                    "total_deliveries_daily": data["total_deliveries_daily"],
                 }
                 for date_str, data in sorted(full_period_earnings.items())
             ]
 
             # Consulta de entregas detalhadas
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT 
                     o.id, 
                     o.status, 
@@ -186,30 +264,56 @@ def get_earnings_history():
                   AND o.status = 'Entregue' 
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 ORDER BY o.created_at DESC;
-            """, (profile_id, start_date, end_date))
+            """,
+                (profile_id, start_date, end_date),
+            )
             detailed_deliveries = cur.fetchall()
 
             # Calcular totais do período
-            total_earnings_period = sum(d['total_earned_daily'] for d in ordered_daily_earnings)
-            total_deliveries_period = sum(d['total_deliveries_daily'] for d in ordered_daily_earnings)
-            
+            total_earnings_period = sum(
+                d["total_earned_daily"] for d in ordered_daily_earnings
+            )
+            total_deliveries_period = sum(
+                d["total_deliveries_daily"] for d in ordered_daily_earnings
+            )
+
             response_data = {
                 "periodStartDate": start_date.isoformat(),
                 "periodEndDate": end_date.isoformat(),
                 "totalEarningsPeriod": float(total_earnings_period),
                 "totalDeliveriesPeriod": total_deliveries_period,
-                "dailyEarnings": serialize_delivery_data(ordered_daily_earnings), 
-                "detailedDeliveries": serialize_delivery_data([dict(d) for d in detailed_deliveries])
+                "dailyEarnings": serialize_delivery_data(ordered_daily_earnings),
+                "detailedDeliveries": serialize_delivery_data(
+                    [dict(d) for d in detailed_deliveries]
+                ),
             }
-            
+
             return jsonify({"status": "success", "data": response_data}), 200
-            
+
     except psycopg2.Error as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Erro de banco de dados",
+                    "detail": str(e),
+                }
+            ),
+            500,
+        )
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Erro interno do servidor",
+                    "detail": str(e),
+                }
+            ),
+            500,
+        )
     finally:
         if conn:
             conn.close()
