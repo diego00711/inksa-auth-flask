@@ -1,8 +1,11 @@
 from flask import Blueprint, request, jsonify
 import logging
-from src.utils.helpers import get_db_connection, supabase, get_user_info
+from src.utils.helpers import get_db_connection, supabase
 from src.utils.audit import log_admin_action
 
+# Observação:
+# Este blueprint cuida apenas de autenticação (login/registro).
+# O endpoint de perfil do cliente (/api/auth/profile) está em src/routes/client.py.
 auth_bp = Blueprint('auth', __name__)
 logger = logging.getLogger(__name__)
 
@@ -49,13 +52,13 @@ def login():
 
             user_id, user_type, user_email, created_at = user_data
 
-            # Log admin logins (for non-admin logins, we skip audit logging)
+            # Log admin logins (para admin)
             if user_type == 'admin':
-                log_admin_action(user_email, "Login", f"Admin login via client endpoint", request)
+                log_admin_action(user_email, "Login", "Admin login via client endpoint", request)
 
             return jsonify({
                 "message": "Login realizado com sucesso",
-                "token": session.access_token,  # <-- esse campo é ESSENCIAL para o frontend
+                "token": session.access_token,
                 "refresh_token": session.refresh_token,
                 "user": {
                     "id": user_id,
@@ -75,47 +78,16 @@ def login():
             conn.close()
 
     except Exception as e:
-        logger.error(f"Erro no login: {str(e)}")
+        logger.error(f"Erro no login: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno no servidor"}), 500
 
-@auth_bp.route('/profile', methods=['GET'])
-def handle_client_profile():
-    """Obtém o perfil do usuário autenticado."""
-    try:
-        from src.utils.helpers import get_user_id_from_token
-
-        # Ajuste caso sua função retorne mais de 3 valores
-        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-
-        if error:
-            return error
-
-        user_info = get_user_info(user_id)
-        if not user_info:
-            return jsonify({"error": "Usuário não encontrado"}), 404
-
-        return jsonify({
-            "user": {
-                "id": user_info['id'],
-                "email": user_info['email'],
-                "name": user_info['email'].split('@')[0],
-                "user_type": user_info['user_type'],
-                "created_at": user_info['created_at'].isoformat() if user_info.get('created_at') else None
-            }
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Erro ao obter perfil: {str(e)}")
-        return jsonify({"error": "Erro interno ao obter perfil"}), 500
-
+# Mantido aqui apenas como placeholder; implemente seu fluxo de registro ou remova se não usar.
 @auth_bp.route('/register', methods=['POST'])
 def register():
     try:
-        data = request.get_json()
-        # ... implementação do registro ...
+        data = request.get_json() or {}
+        # TODO: implementar registro
         return jsonify({"message": "Implementar registro"}), 200
     except Exception as e:
-        logger.error(f"Erro no registro: {str(e)}")
+        logger.error(f"Erro no registro: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno no servidor"}), 500
-
-# Outras rotas de autenticação podem ser adicionadas aqui...
