@@ -1,5 +1,3 @@
-# vercel.json
-
 {
   "builds": [
     {
@@ -12,8 +10,5 @@
       "src": "/(.*)",
       "dest": "src/main.py"
     }
-  ],
-  "env": {
-    "FLASK_ENV": "production"
-  }
+  ]
 }

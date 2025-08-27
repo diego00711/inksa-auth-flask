@@ -1,14 +1,10 @@
--- Admin Logs schema for Inksa
--- This migration creates the admin_logs table and supporting indexes.
--- Notes:
--- - Keep RLS enabled. Backend uses the Service Role key and bypasses RLS.
--- - Do NOT expose the Service Role key in frontend environments.
+-- Admin Logs table for audit trail
 
--- Extensions
-create extension if not exists pgcrypto;  -- for gen_random_uuid()
-create extension if not exists pg_trgm;   -- for ILIKE performance on details
+-- Extensions (idempotente)
+create extension if not exists pgcrypto;
+create extension if not exists pg_trgm;
 
--- Table
+-- Tabela principal
 create table if not exists public.admin_logs (
   id uuid primary key default gen_random_uuid(),
   "timestamp" timestamptz not null default now(),
@@ -17,11 +13,11 @@ create table if not exists public.admin_logs (
   details text not null
 );
 
--- Indexes
-create index if not exists idx_admin_logs_timestamp on public.admin_logs ("timestamp");
+-- Índices para performance
+create index if not exists idx_admin_logs_timestamp on public.admin_logs ("timestamp" desc);
 create index if not exists idx_admin_logs_admin on public.admin_logs (admin);
 create index if not exists idx_admin_logs_action on public.admin_logs (action);
 create index if not exists idx_admin_logs_details_trgm on public.admin_logs using gin (details gin_trgm_ops);
 
--- Security
+-- Segurança
 alter table public.admin_logs enable row level security;

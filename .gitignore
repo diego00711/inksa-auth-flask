@@ -1,121 +1,43 @@
-# Python cache files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Unit test / coverage
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Translations
-*.mo
-*.pot
-
-# Flask/Django
-instance/
-.webassets-cache
-
-# Sphinx
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# PDM/PEP 582
-__pypackages__/
-
-# Environments
+# Envs
 .env
-.env.*
+.env.*.local
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual envs
 .venv/
 venv/
-ENV/
 env/
-env.bak/
-venv.bak/
 
-# IDE / Editor
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Tools
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# Editors/OS
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-.history
-
-# Type checking
-.mypy_cache/
-.dmypy.json
-dmypy.json
-.pyre/
-
-# OS generated files
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
 
 # Logs
 *.log
 
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Node (if any)
-node_modules/
-npm-debug.log*
-
-# Supabase
-supabase/.temp/
-# Do NOT ignore migrations:
-# supabase/migrations/ (keep tracked)
+# Vercel
+.vercel/
