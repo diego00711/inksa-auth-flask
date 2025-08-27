@@ -9,19 +9,15 @@ from flask_socketio import SocketIO
 import mercadopago
 import logging
 
-# Configuração do caminho para imports
 current_dir = Path(__file__).parent
 project_root = current_dir.parent
 sys.path.insert(0, str(project_root))
 
-# Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Carrega as variáveis de ambiente
 load_dotenv()
 
-# Importações de blueprints
 try:
     from src.routes.auth import auth_bp
     from src.routes.orders import orders_bp
@@ -38,9 +34,9 @@ try:
     from src.routes.gamification_routes import gamification_bp
     from src.routes.categories import categories_bp
     from src.routes.analytics import analytics_bp
-    from src.routes.admin_logs import admin_logs_bp  # BLUEPRINT de logs
-    from src.routes.admin_users import admin_users_bp  # BLUEPRINT de admin users
-    # CORREÇÃO: registrar o blueprint do perfil do cliente (já define url_prefix='/auth')
+    from src.routes.admin_logs import admin_logs_bp
+    from src.routes.admin_users import admin_users_bp
+    # IMPORTANTE: importar e registrar o blueprint do cliente
     from src.routes.client import client_bp
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
@@ -49,17 +45,14 @@ except ImportError as e:
 app = Flask(__name__)
 app.url_map.strict_slashes = False
 
-# Configuração do ficheiro de config
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
 if os.path.exists(config_path):
     app.config.from_pyfile(config_path)
 else:
     logging.warning("Arquivo config.py não encontrado. Usando configurações padrão.")
 
-# Configuração da chave secreta
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'fallback-secret-key-change-in-production')
 
-# ----------- CORS: Usando regex para permitir todos os domínios autorizados -----------
 ALLOWED_ORIGIN_REGEX = (
     r"^https:\/\/admin\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-admin-v0\.vercel\.app$|"
@@ -90,9 +83,6 @@ CORS(
     max_age=600,
 )
 
-# ---------------------------------------------------------------------------------------------------------------
-
-# Configuração do SocketIO
 socketio = SocketIO(
     app,
     cors_allowed_origins=re.compile(ALLOWED_ORIGIN_REGEX),
@@ -102,8 +92,8 @@ socketio = SocketIO(
 )
 
 # Registro de blueprints
-app.register_blueprint(auth_bp, url_prefix='/api/auth')          # login/registro
-app.register_blueprint(client_bp, url_prefix='/api')             # -> /api/auth/profile (GET/PUT, upload-avatar)
+app.register_blueprint(auth_bp, url_prefix='/api/auth')      # login/registro
+app.register_blueprint(client_bp, url_prefix='/api')         # -> /api/auth/profile, /api/auth/profile/upload-avatar
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
@@ -117,10 +107,9 @@ app.register_blueprint(payouts_bp, url_prefix='/api/admin')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
-app.register_blueprint(admin_logs_bp)   # endpoints devem começar com /api/logs dentro do blueprint
-app.register_blueprint(admin_users_bp)  # endpoints devem começar com /api/users dentro do blueprint
+app.register_blueprint(admin_logs_bp)
+app.register_blueprint(admin_users_bp)
 
-# Configuração do Mercado Pago
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
 if MERCADO_PAGO_ACCESS_TOKEN:
     app.mp_sdk = mercadopago.SDK(MERCADO_PAGO_ACCESS_TOKEN)
@@ -129,7 +118,6 @@ else:
     app.mp_sdk = None
     logging.warning("MERCADO_PAGO_ACCESS_TOKEN não encontrado!")
 
-# Middleware para logging de requests (APENAS LOGGING)
 @app.before_request
 def before_request():
     logger.info(f"{request.method} {request.path} - Origin: {request.headers.get('Origin')}")
@@ -165,10 +153,10 @@ def health_check():
 
 @app.route('/api/cors-test')
 def cors_test():
-    """Endpoint para testar CORS"""
     try:
+        import re as _re
         origin = request.headers.get('Origin')
-        allowed = bool(re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
+        allowed = bool(_re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
         logger.info(f"/api/cors-test | Origin: {origin} | Allowed: {allowed}")
         return jsonify({
             "message": "CORS test successful",
@@ -193,7 +181,6 @@ def handle_ping(data):
     logger.info(f'Ping recebido de {request.sid}: {data}')
     return {'response': 'pong', 'sid': request.sid}
 
-# Error handlers
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint não encontrado", "path": request.path}), 404
@@ -205,12 +192,10 @@ def internal_error(error):
 
 @app.errorhandler(405)
 def method_not_allowed(error):
-    return jsonify({"error": "Método não permitido", "method": request.method}), 405
+    return jsonify({"error": "Método não permitido", "method": {request.method}}), 405
 
 if __name__ == '__main__':
-    # Para desenvolvimento local
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-
     logger.info(f"Iniciando servidor na porta {port} (debug: {debug})")
     socketio.run(app, host='0.0.0.0', port=port, debug=debug, use_reloader=debug)
