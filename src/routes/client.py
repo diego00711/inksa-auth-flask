@@ -10,10 +10,13 @@ logger = logging.getLogger(__name__)
 
 client_bp = Blueprint('client_bp', __name__, url_prefix='/auth')
 
-@client_bp.route('/profile', methods=['GET', 'PUT'])
+@client_bp.route('/profile', methods=['GET', 'PUT', 'OPTIONS'])
 def handle_client_profile():
-    # Log simples para confirmar qual handler está atendendo
     logger.info('[client.py] handle_client_profile chamado (%s)', request.method)
+
+    # Responde preflight imediatamente
+    if request.method == 'OPTIONS':
+        return ('', 200)
 
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
     if error:
@@ -75,9 +78,14 @@ def handle_client_profile():
         if conn:
             conn.close()
 
-@client_bp.route('/profile/upload-avatar', methods=['POST'])
+@client_bp.route('/profile/upload-avatar', methods=['POST', 'OPTIONS'])
 def upload_avatar():
-    logger.info('[client.py] upload_avatar chamado')
+    logger.info('[client.py] upload_avatar chamado (%s)', request.method)
+
+    # Responde preflight imediatamente
+    if request.method == 'OPTIONS':
+        return ('', 200)
+
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
     if error:
         return error
