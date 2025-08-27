@@ -36,7 +36,7 @@ try:
     from src.routes.analytics import analytics_bp
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp
-    # IMPORTANTE: importar e registrar o blueprint do cliente
+    # IMPORTANTE: importar o blueprint do cliente
     from src.routes.client import client_bp
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
@@ -92,8 +92,8 @@ socketio = SocketIO(
 )
 
 # Registro de blueprints
-app.register_blueprint(auth_bp, url_prefix='/api/auth')      # login/registro
-app.register_blueprint(client_bp, url_prefix='/api')         # -> /api/auth/profile, /api/auth/profile/upload-avatar
+app.register_blueprint(auth_bp, url_prefix='/api/auth')   # login/registro
+app.register_blueprint(client_bp, url_prefix='/api')      # RESULTA: /api/auth/profile
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
@@ -142,6 +142,15 @@ def index():
         }
     })
 
+@app.route('/api/debug/routes')
+def debug_routes():
+    # Ajuda a confirmar se /api/auth/profile está registrado
+    rules = []
+    for rule in app.url_map.iter_rules():
+        methods = sorted(m for m in rule.methods if m not in ('HEAD',))
+        rules.append({"rule": str(rule), "methods": methods, "endpoint": rule.endpoint})
+    return jsonify({"routes": rules})
+
 @app.route('/api/health')
 def health_check():
     return jsonify({
@@ -154,9 +163,8 @@ def health_check():
 @app.route('/api/cors-test')
 def cors_test():
     try:
-        import re as _re
         origin = request.headers.get('Origin')
-        allowed = bool(_re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
+        allowed = bool(re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
         logger.info(f"/api/cors-test | Origin: {origin} | Allowed: {allowed}")
         return jsonify({
             "message": "CORS test successful",
@@ -192,7 +200,7 @@ def internal_error(error):
 
 @app.errorhandler(405)
 def method_not_allowed(error):
-    return jsonify({"error": "Método não permitido", "method": {request.method}}), 405
+    return jsonify({"error": "Método não permitido", "method": request.method}), 405
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
