@@ -52,7 +52,7 @@ def login():
             # Log admin logins (for non-admin logins, we skip audit logging)
             if user_type == "admin":
                 log_admin_action(
-                    user_email, "Login", f"Admin login via client endpoint", request
+                    user_email, "Login", "Admin login via client endpoint", request
                 )
 
             return (

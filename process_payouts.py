@@ -135,7 +135,7 @@ def process_all_payouts():
         )
 
         if not pix_key:
-            print(f"  -> ERRO: Parceiro não possui chave PIX cadastrada. Pulando.")
+            print("  -> ERRO: Parceiro não possui chave PIX cadastrada. Pulando.")
             continue
 
         try:
@@ -175,7 +175,7 @@ def process_all_payouts():
                         f"  -> ALERTA GRAVE: Payout realizado, mas FALHOU ao atualizar o status no banco de dados: {db_error}"
                     )
             else:
-                print(f"  -> FALHA: A API de Payouts retornou um erro.")
+                print("  -> FALHA: A API de Payouts retornou um erro.")
         except Exception as e:
             print(f"  -> ERRO CRÍTICO ao tentar processar a transferência: {e}")
 

@@ -1,10 +1,9 @@
 # inksa-auth-flask/src/routes/delivery_orders.py
 
-import os
 import uuid
 import traceback
 import json
-from flask import Blueprint, request, jsonify, g, current_app  # Adicionado current_app
+from flask import Blueprint, request, jsonify, g  # Adicionado current_app
 import psycopg2
 import psycopg2.extras
 from datetime import date, timedelta, datetime, time
@@ -13,11 +12,10 @@ from functools import wraps
 from flask_cors import cross_origin
 
 # Importa as funções e o cliente supabase do nosso helper centralizado
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token
 
 # Importa a nova função de gamificação
 # Certifique-se de que este caminho está correto para o seu gamification_routes.py
-from .gamification_routes import add_points_for_event
 
 
 # --- Decorator para Segurança (DUPLICADO - Idealmente, centralizar em um módulo de utilitários) ---

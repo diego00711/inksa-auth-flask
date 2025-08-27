@@ -1,6 +1,5 @@
 # Arquivo: src/utils/geocoding_utils.py
 import requests
-import os
 
 
 def geocode_address(street, number, neighborhood, city, state, zipcode):

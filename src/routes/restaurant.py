@@ -24,7 +24,7 @@ def handle_db_errors(f):
                     500,
                 )
             return f(conn, *args, **kwargs)
-        except psycopg2.Error as e:
+        except psycopg2.Error:
             traceback.print_exc()
             return (
                 jsonify({"status": "error", "error": "Database operation failed"}),

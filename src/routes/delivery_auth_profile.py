@@ -1,8 +1,6 @@
 # inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM O RETURN CORRIGIDO)
 
-import os
 import uuid
-import traceback
 import json
 import logging
 import re

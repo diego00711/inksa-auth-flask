@@ -27,7 +27,7 @@ Instrumented routes:
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 from datetime import datetime
 from flask import Request, request
 
@@ -138,10 +138,10 @@ def log_admin_action(
         # Debug logging after insert
         if AUDIT_DEBUG:
             if result.data:
-                logger.info(f"[AUDIT] Inserted admin_logs row: ok")
+                logger.info("[AUDIT] Inserted admin_logs row: ok")
             else:
                 logger.info(
-                    f"[AUDIT] Inserted admin_logs row: failed - no data returned"
+                    "[AUDIT] Inserted admin_logs row: failed - no data returned"
                 )
 
         if result.data:

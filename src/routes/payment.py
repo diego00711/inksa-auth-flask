@@ -1,13 +1,11 @@
 # src/routes/payment.py
 
 from flask import Blueprint, request, jsonify, current_app
-import mercadopago
 from supabase import create_client, Client
 import os
 import logging
 import hmac
 import hashlib
-import time
 
 # from src import config  # <<< MUDANÇA: REMOVIDA a importação problemática
 

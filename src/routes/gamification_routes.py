@@ -1,6 +1,5 @@
 # inksa-auth-flask/src/routes/gamification_routes.py
 
-import os
 import uuid
 import traceback
 import json
@@ -13,10 +12,9 @@ from functools import wraps
 
 # <<< CORREÇÃO: Removido o import do cross_origin, pois já é tratado globalmente >>>
 # from flask_cors import cross_origin
-import logging
 
 # Importa as funções e o cliente supabase do nosso helper centralizado
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token
 
 
 # --- Decorators e Encoders ---

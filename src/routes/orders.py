@@ -4,7 +4,7 @@ import json
 import random
 import string
 from datetime import datetime
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify
 import psycopg2
 import psycopg2.extras
 import logging

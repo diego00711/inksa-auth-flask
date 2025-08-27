@@ -9,7 +9,7 @@ from datetime import datetime, date, time
 import logging
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from functools import wraps
-from flask_cors import CORS, cross_origin
+from flask_cors import CORS
 
 logging.basicConfig(level=logging.INFO)
 menu_bp = Blueprint("menu_bp", __name__)
@@ -107,7 +107,7 @@ def add_menu_item(conn):
             new_item = make_serializable(dict(cur.fetchone()))
             conn.commit()
             return jsonify({"status": "success", "data": new_item}), 201
-    except psycopg2.Error as e:
+    except psycopg2.Error:
         conn.rollback()
         return jsonify({"status": "error", "error": "Database error"}), 500
 

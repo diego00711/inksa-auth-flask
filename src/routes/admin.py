@@ -1,9 +1,7 @@
-import os
 import traceback
 from flask import Blueprint, request, jsonify
 import psycopg2.extras
 from gotrue.errors import AuthApiError
-from datetime import datetime, timedelta
 from functools import wraps
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
@@ -85,7 +83,7 @@ def admin_login():
             )
 
         # Log successful admin login
-        log_admin_action(user.email, "Login", f"Admin login successful", request)
+        log_admin_action(user.email, "Login", "Admin login successful", request)
 
         return (
             jsonify(
