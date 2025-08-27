@@ -14,8 +14,8 @@ client_bp = Blueprint('client_bp', __name__, url_prefix='/auth')
 def handle_client_profile():
     logger.info('[client.py] handle_client_profile chamado (%s)', request.method)
 
-    # Responde preflight imediatamente
     if request.method == 'OPTIONS':
+        # Preflight OK — CORS global já adiciona cabeçalhos
         return ('', 200)
 
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
@@ -39,7 +39,6 @@ def handle_client_profile():
 
             return jsonify({"status": "success", "data": dict(profile_raw)}), 200
 
-        # PUT
         data = request.get_json()
         if not data:
             return jsonify({"error": "Nenhum dado fornecido"}), 400
@@ -51,7 +50,6 @@ def handle_client_profile():
             'address_state'
         ]
         update_fields = [f"{field} = %s" for field in allowed_fields if field in data]
-
         if not update_fields:
             return jsonify({"error": "Nenhum campo válido para atualizar"}), 400
 
@@ -82,7 +80,6 @@ def handle_client_profile():
 def upload_avatar():
     logger.info('[client.py] upload_avatar chamado (%s)', request.method)
 
-    # Responde preflight imediatamente
     if request.method == 'OPTIONS':
         return ('', 200)
 
@@ -103,14 +100,12 @@ def upload_avatar():
         file_ext = os.path.splitext(file.filename)[1] or ''
         unique_filename = f"avatar_{user_id}{file_ext}"
 
-        # Upload (permite overwrite com upsert)
         supabase.storage.from_("avatars").upload(
             file=file.read(),
             path=unique_filename,
             file_options={"content-type": file.mimetype, "upsert": "true"}
         )
 
-        # Obter URL pública (compatível com diferentes retornos do SDK)
         public_resp = supabase.storage.from_("avatars").get_public_url(unique_filename)
         if isinstance(public_resp, dict):
             public_url = (
@@ -124,7 +119,6 @@ def upload_avatar():
         if not public_url:
             return jsonify({"error": "Falha ao obter URL pública do avatar"}), 500
 
-        # Atualiza avatar no perfil
         supabase.table('client_profiles').update({'avatar_url': public_url}).eq('user_id', user_id).execute()
 
         return jsonify({"avatar_url": public_url}), 200
