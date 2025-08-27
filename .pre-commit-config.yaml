@@ -31,4 +31,4 @@ repos:
         name: Block committing .env files
         entry: .hooks/block-env-files.sh
         language: script
-        stages: [commit, push]
+        stages: [pre-commit, pre-push]
