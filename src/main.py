@@ -59,7 +59,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# Ajuste do regex: incluir 'restaurantes' (plural) e permitir múltiplos sufixos de preview do Vercel
+# Expressão regular atualizada para incluir mais padrões de URL da Vercel
 ALLOWED_ORIGIN_REGEX = (
     r"^https:\/\/admin\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-admin-v0\.vercel\.app$|"
@@ -75,14 +75,24 @@ ALLOWED_ORIGIN_REGEX = (
 
     # Vercel: aceitar tanto 'restaurante' quanto 'restaurantes'
     r"^https:\/\/inksa-restaurante(s)?-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-restaurante(s)?-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"  # previews do restaurante(s)
+    r"^https:\/\/inksa-restaurante(s)?-v0(?:-[a-z0-9-]+)*\.vercel\.app$|" 
+    
+    # ADICIONADO: Padrões específicos para capturar URLs atuais dos projetos Vercel
+    r"^https:\/\/inksa-restaurantes-v0-[a-z0-9]+-inksas-projects\.vercel\.app$|"
+    r"^https:\/\/inksa-restaurantes-v0(?:-[a-z0-9-]+)*(?:\.[-a-z0-9]+)*\.vercel\.app$|"
+    
+    # Padrão mais abrangente para diversos deploys de preview
+    r"^https:\/\/inksa-restaurantes-v\d(?:[-a-z0-9]+)*(?:\.[-a-z0-9]+)*\.vercel\.app$|"
 
     r"^https:\/\/entregadores\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-entregadores-v0\.vercel\.app$|"
     r"^https:\/\/inksa-entregadores-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"
 
     r"^https:\/\/app\.inksadelivery\.com\.br$|"
-    r"^https:\/\/inksadelivery\.com\.br$"
+    r"^https:\/\/inksadelivery\.com\.br$|"
+    
+    # Ambientes de desenvolvimento local
+    r"^http:\/\/localhost:[0-9]+$"
 )
 
 CORS(
@@ -182,7 +192,8 @@ def cors_test():
         return jsonify({
             "message": "CORS test successful",
             "your_origin": origin,
-            "allowed": allowed
+            "allowed": allowed,
+            "cors_regex": ALLOWED_ORIGIN_REGEX  # Retorna o regex para debug
         })
     except Exception as e:
         logger.error(f"Erro em /api/cors-test: {e}")
