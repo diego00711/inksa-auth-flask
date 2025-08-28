@@ -53,22 +53,33 @@ else:
 
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'fallback-secret-key-change-in-production')
 
+# Se usar cookies HttpOnly para autenticação, mantenha estes flags:
+app.config.update(
+    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True,
+)
+
+# Ajuste do regex: incluir 'restaurantes' (plural) e permitir múltiplos sufixos de preview do Vercel
 ALLOWED_ORIGIN_REGEX = (
     r"^https:\/\/admin\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-admin-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-admin-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+    r"^https:\/\/inksa-admin-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"  # previews do admin
 
     r"^https:\/\/clientes\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-clientes-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-clientes-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+    r"^https:\/\/inksa-clientes-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"  # previews dos clientes
 
+    # Produção/custom domain (singular e plural, por segurança)
     r"^https:\/\/restaurante\.inksadelivery\.com\.br$|"
-    r"^https:\/\/inksa-restaurante-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-restaurante-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+    r"^https:\/\/restaurantes\.inksadelivery\.com\.br$|"
+
+    # Vercel: aceitar tanto 'restaurante' quanto 'restaurantes'
+    r"^https:\/\/inksa-restaurante(s)?-v0\.vercel\.app$|"
+    r"^https:\/\/inksa-restaurante(s)?-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"  # previews do restaurante(s)
 
     r"^https:\/\/entregadores\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksa-entregadores-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-entregadores-v0\-[a-z0-9]+\-inksas-projects\.vercel\.app$|"
+    r"^https:\/\/inksa-entregadores-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"
 
     r"^https:\/\/app\.inksadelivery\.com\.br$|"
     r"^https:\/\/inksadelivery\.com\.br$"
@@ -120,7 +131,9 @@ else:
 
 @app.before_request
 def before_request():
-    logger.info(f"{request.method} {request.path} - Origin: {request.headers.get('Origin')}")
+    origin = request.headers.get('Origin')
+    allowed = bool(re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
+    logger.info(f"{request.method} {request.path} - Origin: {origin} - Allowed: {allowed}")
 
 @app.route('/')
 def index():
