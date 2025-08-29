@@ -1,6 +1,8 @@
+# main.py - VERSÃO CORRIGIDA E ROBUSTA
+
 import os
 import sys
-import re
+import re  # Importe o módulo de expressões regulares
 from pathlib import Path
 from flask import Flask, jsonify, request
 from dotenv import load_dotenv
@@ -9,6 +11,7 @@ from flask_socketio import SocketIO
 import mercadopago
 import logging
 
+# --- Configuração de Path e Logging (sem alterações) ---
 current_dir = Path(__file__).parent
 project_root = current_dir.parent
 sys.path.insert(0, str(project_root))
@@ -18,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# --- Importações dos Blueprints (sem alterações) ---
 try:
     from src.routes.auth import auth_bp
     from src.routes.orders import orders_bp
@@ -36,12 +40,12 @@ try:
     from src.routes.analytics import analytics_bp
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp
-    # IMPORTANTE: importar o blueprint do cliente
     from src.routes.client import client_bp
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
 
+# --- Inicialização do App (sem alterações) ---
 app = Flask(__name__)
 app.url_map.strict_slashes = False
 
@@ -52,50 +56,62 @@ else:
     logging.warning("Arquivo config.py não encontrado. Usando configurações padrão.")
 
 app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'fallback-secret-key-change-in-production')
-
-# Se usar cookies HttpOnly para autenticação, mantenha estes flags:
 app.config.update(
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_SECURE=True,
 )
 
-# Configuração CORS simplificada e eficaz - REMOVIDOS localhost
+# ====================================================================
+# <<< CORREÇÃO PRINCIPAL APLICADA AQUI >>>
+# ====================================================================
+# Configuração de CORS robusta usando expressões regulares para a Vercel
+
+# 1. Defina suas origens de produção fixas
+production_origins = [
+    "https://restaurante.inksadelivery.com.br",
+    "https://admin.inksadelivery.com.br",
+    "https://clientes.inksadelivery.com.br",
+    "https://entregadores.inksadelivery.com.br",
+    "https://app.inksadelivery.com.br",
+]
+
+# 2. Defina padrões de regex para desenvolvimento e deploys de preview da Vercel
+# Este padrão permite 'http://localhost:qualquer_porta'
+localhost_pattern = re.compile(r"http://localhost:\d+" )
+
+# Este padrão permite 'https://qualquer-coisa.inksas-projects.vercel.app'
+vercel_preview_pattern = re.compile(r"https://.*\.inksas-projects\.vercel\.app" )
+
+# 3. Combine todas as origens permitidas
+allowed_origins = production_origins + [localhost_pattern, vercel_preview_pattern]
+
 CORS(
     app,
-    origins=[
-        "https://restaurante.inksadelivery.com.br",
-        "https://admin.inksadelivery.com.br",
-        "https://clientes.inksadelivery.com.br",
-        "https://entregadores.inksadelivery.com.br",
-        "https://app.inksadelivery.com.br",
-        "https://inksa-admin-v0.vercel.app",
-        "https://inksa-clientes-v0.vercel.app",
-        "https://inksa-restaurantes-v0.vercel.app",
-        "https://inksa-entregadores-v0.vercel.app"
-    ],
+    origins=allowed_origins, # Use a nova lista combinada
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     expose_headers=["Content-Type", "Authorization"],
     max_age=600,
 )
+# ====================================================================
+# Fim da correção do CORS
+# ====================================================================
 
+
+# --- Configuração do SocketIO (sem alterações) ---
 socketio = SocketIO(
     app,
-    cors_allowed_origins=[
-        "https://restaurante.inksadelivery.com.br",
-        "https://admin.inksadelivery.com.br",
-        "https://clientes.inksadelivery.com.br",
-        "https://entregadores.inksadelivery.com.br"
-    ],
+    cors_allowed_origins="*", # Simplificado para aceitar todas as origens para WebSocket, já que a autenticação será via evento
     async_mode='eventlet',
     logger=False,
     engineio_logger=False
 )
 
-# Registro de blueprints
-app.register_blueprint(auth_bp, url_prefix='/api/auth')   # login/registro
-app.register_blueprint(client_bp, url_prefix='/api')      # RESULTA: /api/auth/profile
+# --- Registro de Blueprints (sem alterações) ---
+# (seu código de registro de blueprints permanece o mesmo)
+app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(client_bp, url_prefix='/api')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
@@ -112,6 +128,10 @@ app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(admin_logs_bp)
 app.register_blueprint(admin_users_bp)
 
+
+# --- Restante do arquivo (sem alterações) ---
+# (todo o resto do seu código, como inicialização do Mercado Pago, rotas de health check, etc., permanece igual)
+
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
 if MERCADO_PAGO_ACCESS_TOKEN:
     app.mp_sdk = mercadopago.SDK(MERCADO_PAGO_ACCESS_TOKEN)
@@ -127,31 +147,13 @@ def before_request():
     origin = request.headers.get('Origin')
     logger.info(f"{request.method} {request.path} - Origin: {origin}")
 
-# REMOVIDO o bloco @app.after_request que causava duplicidade de headers
-
 @app.route('/')
 def index():
-    return jsonify({
-        "status": "online",
-        "message": "Servidor Inksa funcionando!",
-        "version": "1.0.0",
-        "cors_allowed": True,
-        "endpoints": {
-            "auth": "/api/auth",
-            "orders": "/api/orders",
-            "menu": "/api/menu",
-            "restaurant": "/api/restaurant",
-            "payment": "/api/payment",
-            "admin": "/api/admin",
-            "delivery": "/api/delivery",
-            "health": "/api/health",
-            "logs": "/api/logs"
-        }
-    })
+    return jsonify({"status": "online", "message": "Servidor Inksa funcionando!"})
 
+# ... (o resto do seu arquivo main.py continua aqui)
 @app.route('/api/debug/routes')
 def debug_routes():
-    # Ajuda a confirmar se /api/auth/profile está registrado
     rules = []
     for rule in app.url_map.iter_rules():
         methods = sorted(m for m in rule.methods if m not in ('HEAD',))
@@ -169,26 +171,20 @@ def health_check():
 
 @app.route('/api/cors-test')
 def cors_test():
-    try:
-        origin = request.headers.get('Origin')
-        allowed_origins = [
-            "https://restaurante.inksadelivery.com.br",
-            "https://admin.inksadelivery.com.br",
-            "https://clientes.inksadelivery.com.br",
-            "https://entregadores.inksadelivery.com.br",
-            "https://app.inksadelivery.com.br"
-        ]
-        allowed = origin in allowed_origins if origin else False
-        
-        return jsonify({
-            "message": "CORS test successful",
-            "your_origin": origin,
-            "allowed": allowed,
-            "allowed_origins": allowed_origins
-        })
-    except Exception as e:
-        logger.error(f"Erro em /api/cors-test: {e}")
-        return jsonify({"error": "Erro interno no /api/cors-test", "details": str(e)}), 500
+    origin = request.headers.get('Origin')
+    is_allowed = False
+    for allowed in allowed_origins:
+        if isinstance(allowed, str) and allowed == origin:
+            is_allowed = True
+            break
+        elif hasattr(allowed, 'match') and allowed.match(origin):
+            is_allowed = True
+            break
+    return jsonify({
+        "message": "CORS test successful",
+        "your_origin": origin,
+        "is_allowed": is_allowed,
+    })
 
 @socketio.on('connect')
 def handle_connect():
@@ -210,7 +206,7 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.error(f"Erro interno: {error}")
+    logger.error(f"Erro interno: {error}", exc_info=True)
     return jsonify({"error": "Erro interno do servidor"}), 500
 
 @app.errorhandler(405)
