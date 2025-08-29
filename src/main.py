@@ -1,8 +1,8 @@
-# src/main.py - VERSÃO COMPLETA, FINAL E CORRIGIDA
+# src/main.py - VERSÃO COMPLETA E CORRIGIDA
 
 import os
 import sys
-import re  # Importado para usar expressões regulares no CORS
+import re
 from pathlib import Path
 from flask import Flask, jsonify, request
 from dotenv import load_dotenv
@@ -40,7 +40,7 @@ try:
     from src.routes.analytics import analytics_bp
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp
-    # A importação de client_bp foi removida para evitar conflitos.
+    from src.routes.client import client_bp
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
@@ -61,7 +61,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# --- Configuração de CORS Robusta ---
+# --- Configuração de CORS Robusta e Corrigida ---
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
@@ -70,7 +70,9 @@ production_origins = [
     "https://app.inksadelivery.com.br",
 ]
 localhost_pattern = re.compile(r"http://localhost:\d+" )
-vercel_preview_pattern = re.compile(r"https://.*\.inksas-projects\.vercel\.app" )
+# Regex CORRIGIDO: Aceita qualquer subdomínio que termine em .vercel.app
+vercel_preview_pattern = re.compile(r"https://.*\.vercel\.app" )
+
 allowed_origins = production_origins + [localhost_pattern, vercel_preview_pattern]
 
 CORS(
@@ -78,9 +80,7 @@ CORS(
     origins=allowed_origins,
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
-    expose_headers=["Content-Type", "Authorization"],
-    max_age=600,
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"]
 )
 
 # --- Configuração do SocketIO ---
@@ -92,8 +92,9 @@ socketio = SocketIO(
     engineio_logger=False
 )
 
-# --- Registro de Blueprints (Sem Conflitos) ---
+# --- Registro de Blueprints ---
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(client_bp, url_prefix='/api')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
@@ -128,6 +129,7 @@ def index():
         "version": "1.0.0",
     })
 
+# ... (o resto do seu arquivo, incluindo rotas de debug, health, errorhandlers, etc., continua aqui)
 @app.route('/api/debug/routes')
 def debug_routes():
     rules = []
