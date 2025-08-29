@@ -59,54 +59,40 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# Expressão regular atualizada para incluir mais padrões de URL da Vercel
-ALLOWED_ORIGIN_REGEX = (
-    r"^https:\/\/admin\.inksadelivery\.com\.br$|"
-    r"^https:\/\/inksa-admin-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-admin-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"  # previews do admin
-
-    r"^https:\/\/clientes\.inksadelivery\.com\.br$|"
-    r"^https:\/\/inksa-clientes-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-clientes-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"  # previews dos clientes
-
-    # Produção/custom domain (singular e plural, por segurança)
-    r"^https:\/\/restaurante\.inksadelivery\.com\.br$|"
-    r"^https:\/\/restaurantes\.inksadelivery\.com\.br$|"
-
-    # Vercel: aceitar tanto 'restaurante' quanto 'restaurantes'
-    r"^https:\/\/inksa-restaurante(s)?-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-restaurante(s)?-v0(?:-[a-z0-9-]+)*\.vercel\.app$|" 
-    
-    # ADICIONADO: Padrões específicos para capturar URLs atuais dos projetos Vercel
-    r"^https:\/\/inksa-restaurantes-v0-[a-z0-9]+-inksas-projects\.vercel\.app$|"
-    r"^https:\/\/inksa-restaurantes-v0(?:-[a-z0-9-]+)*(?:\.[-a-z0-9]+)*\.vercel\.app$|"
-    
-    # Padrão mais abrangente para diversos deploys de preview
-    r"^https:\/\/inksa-restaurantes-v\d(?:[-a-z0-9]+)*(?:\.[-a-z0-9]+)*\.vercel\.app$|"
-
-    r"^https:\/\/entregadores\.inksadelivery\.com\.br$|"
-    r"^https:\/\/inksa-entregadores-v0\.vercel\.app$|"
-    r"^https:\/\/inksa-entregadores-v0(?:-[a-z0-9-]+)*\.vercel\.app$|"
-
-    r"^https:\/\/app\.inksadelivery\.com\.br$|"
-    r"^https:\/\/inksadelivery\.com\.br$|"
-    
-    # Ambientes de desenvolvimento local
-    r"^http:\/\/localhost:[0-9]+$"
-)
-
+# Configuração CORS simplificada e eficaz
 CORS(
     app,
-    origins=re.compile(ALLOWED_ORIGIN_REGEX),
+    origins=[
+        "https://restaurante.inksadelivery.com.br",
+        "https://admin.inksadelivery.com.br",
+        "https://clientes.inksadelivery.com.br",
+        "https://entregadores.inksadelivery.com.br",
+        "https://app.inksadelivery.com.br",
+        "https://inksa-admin-v0.vercel.app",
+        "https://inksa-clientes-v0.vercel.app",
+        "https://inksa-restaurantes-v0.vercel.app",
+        "https://inksa-entregadores-v0.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:5000"
+    ],
     supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
+    expose_headers=["Content-Type", "Authorization"],
     max_age=600,
 )
 
 socketio = SocketIO(
     app,
-    cors_allowed_origins=re.compile(ALLOWED_ORIGIN_REGEX),
+    cors_allowed_origins=[
+        "https://restaurante.inksadelivery.com.br",
+        "https://admin.inksadelivery.com.br",
+        "https://clientes.inksadelivery.com.br",
+        "https://entregadores.inksadelivery.com.br",
+        "http://localhost:3000",
+        "http://localhost:5173"
+    ],
     async_mode='eventlet',
     logger=False,
     engineio_logger=False
@@ -141,9 +127,27 @@ else:
 
 @app.before_request
 def before_request():
+    if request.method == 'OPTIONS':
+        return '', 200
     origin = request.headers.get('Origin')
-    allowed = bool(re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
-    logger.info(f"{request.method} {request.path} - Origin: {origin} - Allowed: {allowed}")
+    logger.info(f"{request.method} {request.path} - Origin: {origin}")
+
+@app.after_request
+def after_request(response):
+    origin = request.headers.get('Origin')
+    if origin and origin in [
+        "https://restaurante.inksadelivery.com.br",
+        "https://admin.inksadelivery.com.br",
+        "https://clientes.inksadelivery.com.br",
+        "https://entregadores.inksadelivery.com.br",
+        "http://localhost:3000",
+        "http://localhost:5173"
+    ]:
+        response.headers.add('Access-Control-Allow-Origin', origin)
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH')
+    return response
 
 @app.route('/')
 def index():
@@ -187,13 +191,21 @@ def health_check():
 def cors_test():
     try:
         origin = request.headers.get('Origin')
-        allowed = bool(re.match(ALLOWED_ORIGIN_REGEX, origin)) if origin else False
-        logger.info(f"/api/cors-test | Origin: {origin} | Allowed: {allowed}")
+        allowed_origins = [
+            "https://restaurante.inksadelivery.com.br",
+            "https://admin.inksadelivery.com.br",
+            "https://clientes.inksadelivery.com.br",
+            "https://entregadores.inksadelivery.com.br",
+            "http://localhost:3000",
+            "http://localhost:5173"
+        ]
+        allowed = origin in allowed_origins if origin else False
+        
         return jsonify({
             "message": "CORS test successful",
             "your_origin": origin,
             "allowed": allowed,
-            "cors_regex": ALLOWED_ORIGIN_REGEX  # Retorna o regex para debug
+            "allowed_origins": allowed_origins
         })
     except Exception as e:
         logger.error(f"Erro em /api/cors-test: {e}")
