@@ -1,4 +1,4 @@
-# src/routes/restaurant.py - VERSÃO CORRIGIDA E PADRONIZADA
+# src/routes/restaurant.py - VERSÃO FINAL SEM LÓGICA DE MENU
 
 from flask import request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token
@@ -13,6 +13,7 @@ import uuid
 
 restaurant_bp = Blueprint('restaurant_bp', __name__)
 
+# ... (o resto do seu arquivo, como handle_db_errors, etc., continua aqui)
 def handle_db_errors(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -36,6 +37,7 @@ def handle_db_errors(f):
 @restaurant_bp.route('/', methods=['GET'])
 @handle_db_errors
 def get_all_restaurants_public(conn):
+    # ... (esta função permanece a mesma)
     user_lat = request.args.get('user_lat', type=float)
     user_lon = request.args.get('user_lon', type=float)
     
@@ -58,6 +60,7 @@ def get_all_restaurants_public(conn):
         restaurants = [dict(row) for row in cur.fetchall()]
         return jsonify({"status": "success", "data": restaurants})
 
+# ✅ ROTA DE DETALHES CORRIGIDA - NÃO BUSCA MAIS O MENU
 @restaurant_bp.route('/<uuid:restaurant_id>', methods=['GET'])
 @handle_db_errors
 def get_restaurant_details(conn, restaurant_id):
@@ -67,12 +70,12 @@ def get_restaurant_details(conn, restaurant_id):
         if not restaurant:
             return jsonify({"status": "error", "error": "Restaurant not found"}), 404
         
-        # A busca do menu foi removida. O front-end deve fazer uma chamada separada para /api/menu/<restaurant_id> se precisar do menu público.
         return jsonify({
             "status": "success",
             "data": dict(restaurant)
         })
 
+# ... (o resto do arquivo, como handle_profile e upload_logo, continua o mesmo)
 @restaurant_bp.route('/profile', methods=['GET', 'PUT'])
 def handle_profile():
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
@@ -93,7 +96,6 @@ def handle_profile():
                 profile = cur.fetchone()
                 if not profile:
                     return jsonify({"status": "error", "error": "Profile not found"}), 404
-                # PADRONIZADO: Retorna dentro de { "status": "success", "data": ... }
                 return jsonify({"status": "success", "data": dict(profile)})
 
         elif request.method == 'PUT':
@@ -125,7 +127,6 @@ def handle_profile():
                 conn.commit()
                 if not updated:
                     return jsonify({"status": "error", "error": "Profile not found"}), 404
-                # PADRONIZADO: Retorna dentro de { "status": "success", "data": ... }
                 return jsonify({"status": "success", "data": dict(updated)})
     
     except Exception as e:
@@ -183,7 +184,6 @@ def upload_logo():
                 return jsonify({"status": "error", "error": "Restaurant profile not found"}), 404
                 
             conn.commit()
-            # PADRONIZADO: Resposta já estava correta, mantida por consistência.
             return jsonify({
                 "status": "success", 
                 "data": {
