@@ -1,4 +1,4 @@
-# src/main.py - VERSÃO COMPLETA E FINAL
+# src/main.py - VERSÃO COMPLETA, FINAL E CORRIGIDA
 
 import os
 import sys
@@ -40,7 +40,7 @@ try:
     from src.routes.analytics import analytics_bp
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp
-    from src.routes.client import client_bp
+    # A importação de client_bp foi removida para evitar conflitos.
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
@@ -62,7 +62,6 @@ app.config.update(
 )
 
 # --- Configuração de CORS Robusta ---
-# Define origens de produção fixas
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
@@ -70,12 +69,8 @@ production_origins = [
     "https://entregadores.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
 ]
-
-# Define padrões de regex para desenvolvimento e deploys de preview da Vercel
 localhost_pattern = re.compile(r"http://localhost:\d+" )
 vercel_preview_pattern = re.compile(r"https://.*\.inksas-projects\.vercel\.app" )
-
-# Combina todas as origens permitidas
 allowed_origins = production_origins + [localhost_pattern, vercel_preview_pattern]
 
 CORS(
@@ -97,9 +92,8 @@ socketio = SocketIO(
     engineio_logger=False
 )
 
-# --- Registro de Blueprints ---
+# --- Registro de Blueprints (Sem Conflitos) ---
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
-app.register_blueprint(client_bp, url_prefix='/api')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
