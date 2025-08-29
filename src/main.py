@@ -1,8 +1,8 @@
-# main.py - VERSÃO CORRIGIDA E ROBUSTA
+# src/main.py - VERSÃO COMPLETA E FINAL
 
 import os
 import sys
-import re  # Importe o módulo de expressões regulares
+import re  # Importado para usar expressões regulares no CORS
 from pathlib import Path
 from flask import Flask, jsonify, request
 from dotenv import load_dotenv
@@ -11,7 +11,7 @@ from flask_socketio import SocketIO
 import mercadopago
 import logging
 
-# --- Configuração de Path e Logging (sem alterações) ---
+# --- Configuração de Path e Logging ---
 current_dir = Path(__file__).parent
 project_root = current_dir.parent
 sys.path.insert(0, str(project_root))
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# --- Importações dos Blueprints (sem alterações) ---
+# --- Importações dos Blueprints ---
 try:
     from src.routes.auth import auth_bp
     from src.routes.orders import orders_bp
@@ -45,7 +45,7 @@ except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
 
-# --- Inicialização do App (sem alterações) ---
+# --- Inicialização do App ---
 app = Flask(__name__)
 app.url_map.strict_slashes = False
 
@@ -61,12 +61,8 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# ====================================================================
-# <<< CORREÇÃO PRINCIPAL APLICADA AQUI >>>
-# ====================================================================
-# Configuração de CORS robusta usando expressões regulares para a Vercel
-
-# 1. Defina suas origens de produção fixas
+# --- Configuração de CORS Robusta ---
+# Define origens de produção fixas
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
@@ -75,41 +71,33 @@ production_origins = [
     "https://app.inksadelivery.com.br",
 ]
 
-# 2. Defina padrões de regex para desenvolvimento e deploys de preview da Vercel
-# Este padrão permite 'http://localhost:qualquer_porta'
+# Define padrões de regex para desenvolvimento e deploys de preview da Vercel
 localhost_pattern = re.compile(r"http://localhost:\d+" )
-
-# Este padrão permite 'https://qualquer-coisa.inksas-projects.vercel.app'
 vercel_preview_pattern = re.compile(r"https://.*\.inksas-projects\.vercel\.app" )
 
-# 3. Combine todas as origens permitidas
+# Combina todas as origens permitidas
 allowed_origins = production_origins + [localhost_pattern, vercel_preview_pattern]
 
 CORS(
     app,
-    origins=allowed_origins, # Use a nova lista combinada
+    origins=allowed_origins,
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
     expose_headers=["Content-Type", "Authorization"],
     max_age=600,
 )
-# ====================================================================
-# Fim da correção do CORS
-# ====================================================================
 
-
-# --- Configuração do SocketIO (sem alterações) ---
+# --- Configuração do SocketIO ---
 socketio = SocketIO(
     app,
-    cors_allowed_origins="*", # Simplificado para aceitar todas as origens para WebSocket, já que a autenticação será via evento
+    cors_allowed_origins="*",
     async_mode='eventlet',
     logger=False,
     engineio_logger=False
 )
 
-# --- Registro de Blueprints (sem alterações) ---
-# (seu código de registro de blueprints permanece o mesmo)
+# --- Registro de Blueprints ---
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(client_bp, url_prefix='/api')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
@@ -128,10 +116,7 @@ app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(admin_logs_bp)
 app.register_blueprint(admin_users_bp)
 
-
-# --- Restante do arquivo (sem alterações) ---
-# (todo o resto do seu código, como inicialização do Mercado Pago, rotas de health check, etc., permanece igual)
-
+# --- Inicialização de Serviços Externos ---
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
 if MERCADO_PAGO_ACCESS_TOKEN:
     app.mp_sdk = mercadopago.SDK(MERCADO_PAGO_ACCESS_TOKEN)
@@ -140,18 +125,15 @@ else:
     app.mp_sdk = None
     logging.warning("MERCADO_PAGO_ACCESS_TOKEN não encontrado!")
 
-@app.before_request
-def before_request():
-    if request.method == 'OPTIONS':
-        return '', 200
-    origin = request.headers.get('Origin')
-    logger.info(f"{request.method} {request.path} - Origin: {origin}")
-
+# --- Rotas de Status e Debug ---
 @app.route('/')
 def index():
-    return jsonify({"status": "online", "message": "Servidor Inksa funcionando!"})
+    return jsonify({
+        "status": "online",
+        "message": "Servidor Inksa funcionando!",
+        "version": "1.0.0",
+    })
 
-# ... (o resto do seu arquivo main.py continua aqui)
 @app.route('/api/debug/routes')
 def debug_routes():
     rules = []
@@ -169,23 +151,7 @@ def health_check():
         "cors_enabled": True
     })
 
-@app.route('/api/cors-test')
-def cors_test():
-    origin = request.headers.get('Origin')
-    is_allowed = False
-    for allowed in allowed_origins:
-        if isinstance(allowed, str) and allowed == origin:
-            is_allowed = True
-            break
-        elif hasattr(allowed, 'match') and allowed.match(origin):
-            is_allowed = True
-            break
-    return jsonify({
-        "message": "CORS test successful",
-        "your_origin": origin,
-        "is_allowed": is_allowed,
-    })
-
+# --- Handlers de WebSocket (SocketIO) ---
 @socketio.on('connect')
 def handle_connect():
     logger.info(f'Cliente conectado via WebSocket: {request.sid}')
@@ -200,6 +166,7 @@ def handle_ping(data):
     logger.info(f'Ping recebido de {request.sid}: {data}')
     return {'response': 'pong', 'sid': request.sid}
 
+# --- Handlers de Erro ---
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint não encontrado", "path": request.path}), 404
@@ -213,6 +180,7 @@ def internal_error(error):
 def method_not_allowed(error):
     return jsonify({"error": "Método não permitido", "method": request.method}), 405
 
+# --- Ponto de Entrada da Aplicação ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
