@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM O DECORADOR CORRIGIDO)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM A VERIFICAÇÃO CORRIGIDA)
 
 import os
 import uuid
@@ -12,7 +12,7 @@ import psycopg2.extras
 from datetime import datetime, date, time, timedelta
 from decimal import Decimal
 from functools import wraps
-from flask_cors import cross_origin # A importação já estava aqui, o que é ótimo
+from flask_cors import cross_origin
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
@@ -21,9 +21,8 @@ logger = logging.getLogger(__name__)
 
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
-# ... (seu decorador delivery_token_required e helpers continuam os mesmos)
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (COM O RETURN CORRIGIDO)
+# DECORATOR DE AUTENTICAÇÃO (COM A VERIFICAÇÃO CORRIGIDA)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
@@ -37,18 +36,19 @@ def delivery_token_required(f):
         if isinstance(token_result, tuple) and len(token_result) == 2:
             user_auth_id, user_type = token_result
             
-            if user_type != 'delivery': # CORRIGIDO para 'delivery'
-                return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
+            # ✅ CORREÇÃO PRINCIPAL: Alinhado com o que o front-end envia ('delivery')
+            if user_type != 'delivery':
+                return jsonify({"error": f"Acesso não autorizado. Rota para 'delivery', mas o tipo do usuário é '{user_type}'."}), 403
             
             g.user_auth_id = str(user_auth_id)
             
             return f(*args, **kwargs)
         else:
-            # Se get_user_id_from_token retornar um erro (jsonify), passa adiante
             return token_result
 
     return decorated_function
 
+# ... (O RESTO DO SEU ARQUIVO CONTINUA EXATAMENTE IGUAL) ...
 # ==============================================
 # HELPERS (Mantidos como estavam)
 # ==============================================
@@ -66,12 +66,11 @@ def sanitize_text(text):
     if not text: return text
     return re.sub(r'[\x00-\x1F\x7F]', '', text.strip())
 
-
 # ==============================================
-# ROTAS DE PERFIL (COM A CORREÇÃO DO CORS)
+# ROTAS DE PERFIL (Com o decorador @cross_origin() que já adicionamos)
 # ==============================================
 @delivery_auth_profile_bp.route('/profile', methods=['GET', 'PUT'])
-@cross_origin() # ✅ CORREÇÃO: Adicionado o decorador para permitir o acesso
+@cross_origin() 
 @delivery_token_required
 def handle_profile():
     conn = None
@@ -86,7 +85,6 @@ def handle_profile():
             profile = cur.fetchone()
 
             if not profile:
-                # Se o perfil não existe, cria um perfil básico
                 cur.execute(
                     """INSERT INTO delivery_profiles (user_id, first_name, phone) 
                        VALUES (%s, 'Novo Entregador', '00000000000') RETURNING *""",
@@ -139,7 +137,6 @@ def handle_profile():
     finally:
         if conn: conn.close()
 
-# ... (o resto do seu arquivo, incluindo a rota de upload, continua o mesmo)
 # ==============================================
 # ROTA DE UPLOAD DE AVATAR (Estrutura mantida)
 # ==============================================
