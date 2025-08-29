@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM A VERIFICAÇÃO CORRIGIDA)
+# src/routes/delivery_auth_profile.py - VERSÃO FINAL E LIMPA
 
 import os
 import uuid
@@ -12,7 +12,8 @@ import psycopg2.extras
 from datetime import datetime, date, time, timedelta
 from decimal import Decimal
 from functools import wraps
-from flask_cors import cross_origin
+# ❌ REMOVIDO: A importação do cross_origin não é mais necessária aqui.
+# from flask_cors import cross_origin 
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
@@ -36,7 +37,7 @@ def delivery_token_required(f):
         if isinstance(token_result, tuple) and len(token_result) == 2:
             user_auth_id, user_type = token_result
             
-            # ✅ CORREÇÃO PRINCIPAL: Alinhado com o que o front-end envia ('delivery')
+            # ✅ CORREÇÃO: Padronizado para 'delivery' para alinhar com o front-end.
             if user_type != 'delivery':
                 return jsonify({"error": f"Acesso não autorizado. Rota para 'delivery', mas o tipo do usuário é '{user_type}'."}), 403
             
@@ -48,7 +49,7 @@ def delivery_token_required(f):
 
     return decorated_function
 
-# ... (O RESTO DO SEU ARQUIVO CONTINUA EXATAMENTE IGUAL) ...
+# ... (O resto do seu arquivo, incluindo helpers, continua o mesmo)
 # ==============================================
 # HELPERS (Mantidos como estavam)
 # ==============================================
@@ -67,10 +68,10 @@ def sanitize_text(text):
     return re.sub(r'[\x00-\x1F\x7F]', '', text.strip())
 
 # ==============================================
-# ROTAS DE PERFIL (Com o decorador @cross_origin() que já adicionamos)
+# ROTAS DE PERFIL (SEM DECORADORES DE CORS)
 # ==============================================
 @delivery_auth_profile_bp.route('/profile', methods=['GET', 'PUT'])
-@cross_origin() 
+# ❌ REMOVIDO: O decorador @cross_origin() foi removido daqui.
 @delivery_token_required
 def handle_profile():
     conn = None
@@ -138,10 +139,10 @@ def handle_profile():
         if conn: conn.close()
 
 # ==============================================
-# ROTA DE UPLOAD DE AVATAR (Estrutura mantida)
+# ROTA DE UPLOAD DE AVATAR (SEM DECORADOR DE CORS)
 # ==============================================
 @delivery_auth_profile_bp.route('/upload-avatar', methods=['POST'])
-@cross_origin()
+# ❌ REMOVIDO: O decorador @cross_origin() foi removido daqui.
 @delivery_token_required
 def upload_avatar():
     if 'avatar' not in request.files or not request.files['avatar'].filename:
