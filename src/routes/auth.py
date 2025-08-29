@@ -128,9 +128,9 @@ def get_profile():
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
             
-            # Buscar dados básicos do usuário
+            # CORREÇÃO: Buscar dados básicos do usuário SEM a coluna 'name'
             cursor.execute("""
-                SELECT id, email, name, user_type, created_at 
+                SELECT id, email, user_type, created_at 
                 FROM users 
                 WHERE id = %s
             """, (user_id,))
@@ -142,6 +142,9 @@ def get_profile():
                 return jsonify({"error": "Usuário não encontrado"}), 404
                 
             profile_data = dict(user_data)
+            
+            # CORREÇÃO: Adicionar name baseado no email (já que não existe coluna name)
+            profile_data['name'] = profile_data['email'].split('@')[0]
             
             # Adicionar dados específicos baseados no tipo de usuário
             if user_type == 'client':
