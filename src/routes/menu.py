@@ -1,4 +1,5 @@
-# src/routes/menu.py
+# src/routes/menu.py - VERSÃO FINAL CORRIGIDA
+
 from flask import request, jsonify, Blueprint
 import os
 import uuid
@@ -9,14 +10,10 @@ from datetime import datetime, date, time
 import logging
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from functools import wraps
-from flask_cors import CORS, cross_origin
+from flask_cors import CORS
 
 logging.basicConfig(level=logging.INFO)
 menu_bp = Blueprint('menu_bp', __name__)
-
-# Habilita o CORS para todas as rotas neste Blueprint.
-# Isso permite que requisições de outras origens (como o seu frontend em localhost:5174)
-# sejam processadas pelo seu backend em localhost:5000.
 CORS(menu_bp) 
 
 def make_serializable(data):
@@ -40,32 +37,58 @@ def handle_db_errors(f):
             if conn: conn.close()
     return wrapper
 
+# ✅ FUNÇÃO CORRIGIDA
 @menu_bp.route('/', methods=['GET'])
 @handle_db_errors
 def get_menu_items(conn):
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
     if error: return error
     if user_type != 'restaurant': return jsonify({"status": "error", "error": "Unauthorized"}), 403
+    
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute("SELECT id, name, description, price, category, is_available, image_url FROM menu_items WHERE user_id = %s ORDER BY category, name", (user_id,))
+        # 1. Primeiro, buscar o ID do perfil do restaurante usando o user_id do token.
+        cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_id,))
+        restaurant_profile = cur.fetchone()
+        
+        if not restaurant_profile:
+            return jsonify({"status": "error", "error": "Restaurant profile not found for this user"}), 404
+        
+        restaurant_id = restaurant_profile['id']
+        
+        # 2. Agora, usar o restaurant_id para buscar os itens do cardápio.
+        cur.execute(
+            "SELECT id, name, description, price, category, is_available, image_url FROM menu_items WHERE restaurant_id = %s ORDER BY category, name", 
+            (restaurant_id,)
+        )
         items = [make_serializable(dict(row)) for row in cur.fetchall()]
         return jsonify({"status": "success", "data": items})
 
+# ✅ FUNÇÃO CORRIGIDA (para usar restaurant_id)
 @menu_bp.route('/', methods=['POST'])
 @handle_db_errors
 def add_menu_item(conn):
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
     if error: return error
     if user_type != 'restaurant': return jsonify({"status": "error", "error": "Unauthorized"}), 403
+    
     data = request.get_json()
     required = ['name', 'price', 'category']
     if not all(field in data for field in required):
         return jsonify({"status": "error", "error": f"Missing required fields: {required}"}), 400
+        
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Buscar o ID do perfil do restaurante
+            cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_id,))
+            restaurant_profile = cur.fetchone()
+            if not restaurant_profile:
+                return jsonify({"status": "error", "error": "Restaurant profile not found"}), 404
+            restaurant_id = restaurant_profile['id']
+
+            # Inserir o item com o restaurant_id correto
             cur.execute(
-                "INSERT INTO menu_items (user_id, name, description, price, category, is_available, image_url) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (user_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None))
+                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None))
             )
             new_item = make_serializable(dict(cur.fetchone()))
             conn.commit()
@@ -74,33 +97,53 @@ def add_menu_item(conn):
         conn.rollback()
         return jsonify({"status": "error", "error": "Database error"}), 500
 
-# >> NOVA ROTA ADICIONADA <<
-@menu_bp.route('/<int:item_id>', methods=['DELETE'])
+# ✅ ROTA DE UPDATE ADICIONADA E CORRIGIDA
+@menu_bp.route('/<uuid:item_id>', methods=['PUT'])
+@handle_db_errors
+def update_menu_item(conn, item_id):
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error: return error
+    if user_type != 'restaurant': return jsonify({"status": "error", "error": "Unauthorized"}), 403
+    
+    data = request.get_json()
+    
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # Verificar se o item pertence ao restaurante do usuário antes de atualizar
+        cur.execute("SELECT rp.id FROM restaurant_profiles rp JOIN menu_items mi ON rp.id = mi.restaurant_id WHERE mi.id = %s AND rp.user_id = %s", (str(item_id), user_id))
+        if not cur.fetchone():
+            return jsonify({"status": "error", "error": "Item not found or you are not authorized to edit it"}), 404
+
+        # Atualizar o item
+        cur.execute(
+            """
+            UPDATE menu_items 
+            SET name = %s, description = %s, price = %s, category = %s, is_available = %s, image_url = %s
+            WHERE id = %s
+            RETURNING *
+            """,
+            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), str(item_id))
+        )
+        updated_item = make_serializable(dict(cur.fetchone()))
+        conn.commit()
+        return jsonify({"status": "success", "data": updated_item})
+
+# ✅ ROTA DE DELETE CORRIGIDA (usando UUID)
+@menu_bp.route('/<uuid:item_id>', methods=['DELETE'])
 @handle_db_errors
 def delete_menu_item(conn, item_id):
-    """
-    Exclui um item do cardápio pelo seu ID.
-    
-    Parâmetros:
-    - item_id: O ID do item a ser excluído.
-    """
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
     if error: return error
     if user_type != 'restaurant': return jsonify({"status": "error", "error": "Unauthorized"}), 403
     
     try:
         with conn.cursor() as cur:
-            # Exclui o item do banco de dados, verificando se pertence ao usuário
-            # A cláusula `AND user_id = %s` previne que um usuário exclua itens de outro.
-            cur.execute("DELETE FROM menu_items WHERE id = %s AND user_id = %s RETURNING id", (item_id, user_id))
+            cur.execute("DELETE FROM menu_items WHERE id = %s AND user_id = %s RETURNING id", (str(item_id), user_id))
             deleted_id = cur.fetchone()
             conn.commit()
             
             if deleted_id:
-                # O item foi encontrado e excluído com sucesso
                 return jsonify({"status": "success", "message": f"Item com ID {item_id} excluído com sucesso."}), 200
             else:
-                # O item não foi encontrado ou não pertence a este usuário
                 return jsonify({"status": "error", "message": "Item não encontrado ou não autorizado."}), 404
                 
     except psycopg2.Error as e:
