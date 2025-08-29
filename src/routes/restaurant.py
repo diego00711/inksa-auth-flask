@@ -67,15 +67,10 @@ def get_restaurant_details(conn, restaurant_id):
         if not restaurant:
             return jsonify({"status": "error", "error": "Restaurant not found"}), 404
         
-        cur.execute("SELECT * FROM menu_items WHERE restaurant_id = %s", (str(restaurant_id),))
-        menu_items = [dict(item) for item in cur.fetchall()]
-        
+        # A busca do menu foi removida. O front-end deve fazer uma chamada separada para /api/menu/<restaurant_id> se precisar do menu público.
         return jsonify({
             "status": "success",
-            "data": {
-                **dict(restaurant),
-                "menu_items": menu_items
-            }
+            "data": dict(restaurant)
         })
 
 @restaurant_bp.route('/profile', methods=['GET', 'PUT'])
