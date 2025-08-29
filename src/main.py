@@ -1,13 +1,12 @@
-# src/main.py - VERSÃO FINAL COM A CORREÇÃO DO NameError
+# src/main.py - VERSÃO FINAL E CORRIGIDA
 
 import os
 import sys
 import re
 from pathlib import Path
-# ✅ CORREÇÃO: Adicionar 'Blueprint' à importação do Flask
 from flask import Flask, jsonify, request, Blueprint
 from dotenv import load_dotenv
-from flask_cors import CORS
+from flask_cors import CORS # A importação principal já estava aqui, o que é ótimo
 from flask_socketio import SocketIO
 import mercadopago
 import logging
@@ -62,7 +61,8 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# --- Configuração de CORS ---
+# --- Configuração de CORS Global ---
+# Esta configuração já está correta e continua aqui.
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
@@ -79,7 +79,7 @@ CORS(app, origins=allowed_origins, supports_credentials=True)
 # --- Configuração do SocketIO ---
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
 
-# --- REGISTRO DE BLUEPRINTS CORRIGIDO E SEM CONFLITOS ---
+# --- REGISTRO DE BLUEPRINTS ---
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
@@ -89,24 +89,33 @@ app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
-# Rotas de Delivery agrupadas sob /api/delivery
+# --- Rotas de Delivery agrupadas sob /api/delivery ---
 delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
+
+# ✅ CORREÇÃO PRINCIPAL: Habilita o CORS para TODAS as rotas de delivery.
+# Isso garante que /api/delivery/profile, /api/delivery/orders, etc., aceitem as requisições.
+CORS(delivery_bp, supports_credentials=True)
+
+# Registra os blueprints filhos no blueprint "pai"
 delivery_bp.register_blueprint(delivery_auth_profile_bp)
 delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders')
 delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
-app.register_blueprint(delivery_bp)
+app.register_blueprint(delivery_bp) # Registra o blueprint pai na aplicação
 
-# Rotas de Admin agrupadas sob /api/admin
+# --- Rotas de Admin agrupadas sob /api/admin ---
 admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
+CORS(admin_api_bp, supports_credentials=True) # Boa prática: Habilitar CORS aqui também
 admin_api_bp.register_blueprint(admin_bp)
 admin_api_bp.register_blueprint(payouts_bp, url_prefix='/payouts')
 admin_api_bp.register_blueprint(admin_logs_bp, url_prefix='/logs')
 admin_api_bp.register_blueprint(admin_users_bp, url_prefix='/users')
 app.register_blueprint(admin_api_bp)
 
-# Rotas que não precisam de prefixo /api
+# --- Rotas com prefixos customizados ---
 app.register_blueprint(mp_payment_bp, url_prefix='/payment')
 app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
+
+# --- (O resto do seu arquivo main.py continua exatamente igual) ---
 
 # --- Inicialização de Serviços Externos ---
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
@@ -122,7 +131,6 @@ else:
 def index():
     return jsonify({"status": "online", "message": "Servidor Inksa funcionando!"})
 
-# ... (o resto do seu arquivo)
 @app.route('/api/debug/routes')
 def debug_routes():
     rules = []
@@ -140,6 +148,7 @@ def health_check():
         "cors_enabled": True
     })
 
+# ... (O resto do seu arquivo, incluindo handlers de erro e SocketIO, continua aqui)
 @socketio.on('connect')
 def handle_connect():
     logger.info(f'Cliente conectado via WebSocket: {request.sid}')
@@ -172,4 +181,3 @@ if __name__ == '__main__':
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
     logger.info(f"Iniciando servidor na porta {port} (debug: {debug})")
     socketio.run(app, host='0.0.0.0', port=port, debug=debug, use_reloader=debug)
-
