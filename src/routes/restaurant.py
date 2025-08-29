@@ -1,3 +1,5 @@
+# src/routes/restaurant.py - VERSÃO CORRIGIDA E PADRONIZADA
+
 from flask import request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 import os
@@ -96,6 +98,7 @@ def handle_profile():
                 profile = cur.fetchone()
                 if not profile:
                     return jsonify({"status": "error", "error": "Profile not found"}), 404
+                # PADRONIZADO: Retorna dentro de { "status": "success", "data": ... }
                 return jsonify({"status": "success", "data": dict(profile)})
 
         elif request.method == 'PUT':
@@ -127,6 +130,7 @@ def handle_profile():
                 conn.commit()
                 if not updated:
                     return jsonify({"status": "error", "error": "Profile not found"}), 404
+                # PADRONIZADO: Retorna dentro de { "status": "success", "data": ... }
                 return jsonify({"status": "success", "data": dict(updated)})
     
     except Exception as e:
@@ -140,18 +144,14 @@ def handle_profile():
 
 @restaurant_bp.route('/upload-logo', methods=['POST'])
 def upload_logo():
-    # Inicializar conn como None
     conn = None
-    
     try:
-        # Verificar autenticação
         user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
             return error
         if user_type != 'restaurant':
             return jsonify({"status": "error", "error": "Unauthorized"}), 403
         
-        # Verificar se arquivo foi enviado
         if 'logo' not in request.files:
             return jsonify({"status": "error", "error": "No file provided"}), 400
 
@@ -159,26 +159,21 @@ def upload_logo():
         if not file.filename:
             return jsonify({"status": "error", "error": "Empty filename"}), 400
 
-        # Validar tipo de arquivo
         allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif']
         file_ext = os.path.splitext(file.filename)[1].lower()
         if file_ext not in allowed_extensions:
             return jsonify({"status": "error", "error": "Invalid file type. Only JPG, PNG and GIF allowed"}), 400
 
-        # Gerar nome único do arquivo
         unique_filename = f"{user_id}_{str(uuid.uuid4())}{file_ext}"
         
-        # Upload para o Supabase Storage (bucket "logos")
         upload_result = supabase.storage.from_("logos").upload(
             path=unique_filename,
             file=file.read(),
             file_options={"content-type": file.mimetype, "upsert": "true"}
         )
         
-        # Obter URL pública
         public_url = supabase.storage.from_("logos").get_public_url(unique_filename)
         
-        # Atualizar banco de dados
         conn = get_db_connection()
         if not conn:
             return jsonify({"status": "error", "error": "Database connection failed"}), 500
@@ -193,6 +188,7 @@ def upload_logo():
                 return jsonify({"status": "error", "error": "Restaurant profile not found"}), 404
                 
             conn.commit()
+            # PADRONIZADO: Resposta já estava correta, mantida por consistência.
             return jsonify({
                 "status": "success", 
                 "data": {
