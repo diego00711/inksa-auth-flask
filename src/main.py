@@ -1,4 +1,4 @@
-# src/main.py - VERSÃO COMPLETA E CORRIGIDA
+# src/main.py - VERSÃO FINAL CORRIGIDA E ORGANIZADA
 
 import os
 import sys
@@ -61,7 +61,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# --- Configuração de CORS Robusta e Corrigida ---
+# --- Configuração de CORS ---
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
@@ -70,46 +70,43 @@ production_origins = [
     "https://app.inksadelivery.com.br",
 ]
 localhost_pattern = re.compile(r"http://localhost:\d+" )
-# Regex CORRIGIDO: Aceita qualquer subdomínio que termine em .vercel.app
 vercel_preview_pattern = re.compile(r"https://.*\.vercel\.app" )
-
 allowed_origins = production_origins + [localhost_pattern, vercel_preview_pattern]
 
-CORS(
-    app,
-    origins=allowed_origins,
-    supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"]
-)
+CORS(app, origins=allowed_origins, supports_credentials=True)
 
 # --- Configuração do SocketIO ---
-socketio = SocketIO(
-    app,
-    cors_allowed_origins="*",
-    async_mode='eventlet',
-    logger=False,
-    engineio_logger=False
-)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
 
-# --- Registro de Blueprints ---
+# --- ✅ REGISTRO DE BLUEPRINTS CORRIGIDO E SEM CONFLITOS ---
+# Cada blueprint agora tem um prefixo base claro e único.
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
-app.register_blueprint(client_bp, url_prefix='/api')
-app.register_blueprint(orders_bp, url_prefix='/api/orders')
-app.register_blueprint(menu_bp, url_prefix='/api/menu')
+app.register_blueprint(client_bp, url_prefix='/api/client') # Prefixo único
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
-app.register_blueprint(mp_payment_bp, url_prefix='/api/payment')
-app.register_blueprint(delivery_calculator_bp, url_prefix='/api/delivery-calc')
-app.register_blueprint(delivery_auth_profile_bp, url_prefix='/api/delivery')
-app.register_blueprint(delivery_orders_bp, url_prefix='/api/delivery')
-app.register_blueprint(delivery_stats_earnings_bp, url_prefix='/api/delivery')
-app.register_blueprint(admin_bp, url_prefix='/api/admin')
-app.register_blueprint(payouts_bp, url_prefix='/api/admin')
-app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
+app.register_blueprint(menu_bp, url_prefix='/api/menu') # Dedicado apenas para o menu
+app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
-app.register_blueprint(admin_logs_bp)
-app.register_blueprint(admin_users_bp)
+app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
+
+# Rotas de Delivery agrupadas sob /api/delivery
+delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
+delivery_bp.register_blueprint(delivery_auth_profile_bp)
+delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders') # -> /api/delivery/orders
+delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats') # -> /api/delivery/stats
+app.register_blueprint(delivery_bp)
+
+# Rotas de Admin agrupadas sob /api/admin
+admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
+admin_api_bp.register_blueprint(admin_bp)
+admin_api_bp.register_blueprint(payouts_bp, url_prefix='/payouts') # -> /api/admin/payouts
+admin_api_bp.register_blueprint(admin_logs_bp, url_prefix='/logs') # -> /api/admin/logs
+admin_api_bp.register_blueprint(admin_users_bp, url_prefix='/users') # -> /api/admin/users
+app.register_blueprint(admin_api_bp)
+
+# Rotas que não precisam de prefixo /api
+app.register_blueprint(mp_payment_bp, url_prefix='/payment') # Webhook de pagamento
+app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
 
 # --- Inicialização de Serviços Externos ---
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
@@ -123,13 +120,9 @@ else:
 # --- Rotas de Status e Debug ---
 @app.route('/')
 def index():
-    return jsonify({
-        "status": "online",
-        "message": "Servidor Inksa funcionando!",
-        "version": "1.0.0",
-    })
+    return jsonify({"status": "online", "message": "Servidor Inksa funcionando!"})
 
-# ... (o resto do seu arquivo, incluindo rotas de debug, health, errorhandlers, etc., continua aqui)
+# ... (o resto do seu arquivo, incluindo handlers de erro e WebSocket, continua aqui)
 @app.route('/api/debug/routes')
 def debug_routes():
     rules = []
@@ -147,7 +140,6 @@ def health_check():
         "cors_enabled": True
     })
 
-# --- Handlers de WebSocket (SocketIO) ---
 @socketio.on('connect')
 def handle_connect():
     logger.info(f'Cliente conectado via WebSocket: {request.sid}')
@@ -162,7 +154,6 @@ def handle_ping(data):
     logger.info(f'Ping recebido de {request.sid}: {data}')
     return {'response': 'pong', 'sid': request.sid}
 
-# --- Handlers de Erro ---
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint não encontrado", "path": request.path}), 404
@@ -176,7 +167,6 @@ def internal_error(error):
 def method_not_allowed(error):
     return jsonify({"error": "Método não permitido", "method": request.method}), 405
 
-# --- Ponto de Entrada da Aplicação ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
