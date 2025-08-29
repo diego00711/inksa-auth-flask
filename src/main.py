@@ -59,7 +59,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# Configuração CORS simplificada e eficaz
+# Configuração CORS simplificada e eficaz - REMOVIDOS localhost
 CORS(
     app,
     origins=[
@@ -71,10 +71,7 @@ CORS(
         "https://inksa-admin-v0.vercel.app",
         "https://inksa-clientes-v0.vercel.app",
         "https://inksa-restaurantes-v0.vercel.app",
-        "https://inksa-entregadores-v0.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:5000"
+        "https://inksa-entregadores-v0.vercel.app"
     ],
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
@@ -89,9 +86,7 @@ socketio = SocketIO(
         "https://restaurante.inksadelivery.com.br",
         "https://admin.inksadelivery.com.br",
         "https://clientes.inksadelivery.com.br",
-        "https://entregadores.inksadelivery.com.br",
-        "http://localhost:3000",
-        "http://localhost:5173"
+        "https://entregadores.inksadelivery.com.br"
     ],
     async_mode='eventlet',
     logger=False,
@@ -132,22 +127,7 @@ def before_request():
     origin = request.headers.get('Origin')
     logger.info(f"{request.method} {request.path} - Origin: {origin}")
 
-@app.after_request
-def after_request(response):
-    origin = request.headers.get('Origin')
-    if origin and origin in [
-        "https://restaurante.inksadelivery.com.br",
-        "https://admin.inksadelivery.com.br",
-        "https://clientes.inksadelivery.com.br",
-        "https://entregadores.inksadelivery.com.br",
-        "http://localhost:3000",
-        "http://localhost:5173"
-    ]:
-        response.headers.add('Access-Control-Allow-Origin', origin)
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH')
-    return response
+# REMOVIDO o bloco @app.after_request que causava duplicidade de headers
 
 @app.route('/')
 def index():
@@ -196,8 +176,7 @@ def cors_test():
             "https://admin.inksadelivery.com.br",
             "https://clientes.inksadelivery.com.br",
             "https://entregadores.inksadelivery.com.br",
-            "http://localhost:3000",
-            "http://localhost:5173"
+            "https://app.inksadelivery.com.br"
         ]
         allowed = origin in allowed_origins if origin else False
         
