@@ -1,12 +1,13 @@
-# src/routes/analytics.py - VERSÃO FINAL, CORRIGIDA E COMPLETA
+# src/routes/analytics.py - VERSÃO FINAL E DEFINITIVA
 
 import logging
 from flask import Blueprint, jsonify, request
 import psycopg2.extras
+from collections import Counter # Usaremos o Counter para facilitar a contagem
+
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 from functools import wraps
 
-# Garante que o nome do blueprint seja único.
 analytics_bp = Blueprint('analytics_bp', __name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -35,58 +36,65 @@ def get_analytics_summary(conn):
     if user_type != 'restaurant': return jsonify({"status": "error", "error": "Unauthorized"}), 403
 
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        # CORREÇÃO CRÍTICA: Busca o ID do perfil do restaurante a partir do user_id do token.
+        # 1. Busca o ID do perfil do restaurante a partir do user_id (essencial e correto)
         cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_id,))
         restaurant_profile = cur.fetchone()
         if not restaurant_profile:
             return jsonify({"status": "error", "error": "Restaurant profile not found"}), 404
         restaurant_id = restaurant_profile['id']
 
-        # 1. Total de Vendas
+        # 2. Busca todos os pedidos concluídos para o restaurante
         cur.execute(
-            "SELECT COALESCE(SUM(total_amount), 0) AS total_vendas FROM orders WHERE restaurant_id = %s AND status = 'concluido'",
+            "SELECT total_amount, items, created_at FROM orders WHERE restaurant_id = %s AND status = 'concluido'",
             (restaurant_id,)
         )
-        total_vendas = cur.fetchone()['total_vendas']
+        orders = cur.fetchall()
 
-        # 2. Total de Pedidos Concluídos
-        cur.execute(
-            "SELECT COUNT(*) AS pedidos_concluidos FROM orders WHERE restaurant_id = %s AND status = 'concluido'",
-            (restaurant_id,)
-        )
-        pedidos_concluidos = cur.fetchone()['pedidos_concluidos']
+        # --- Início dos Cálculos em Python ---
 
-        # 3. Item Mais Vendido
-        cur.execute("""
-            SELECT mi.name
-            FROM order_items oi
-            JOIN menu_items mi ON oi.menu_item_id = mi.id
-            WHERE oi.restaurant_id = %s
-            GROUP BY mi.name
-            ORDER BY SUM(oi.quantity) DESC
-            LIMIT 1
-        """, (restaurant_id,))
-        item_mais_vendido_row = cur.fetchone()
-        item_mais_vendido = item_mais_vendido_row['name'] if item_mais_vendido_row else 'N/A'
+        # 3. Total de Vendas e Pedidos
+        total_vendas = sum(float(order['total_amount'] or 0) for order in orders)
+        pedidos_concluidos = len(orders)
 
-        # 4. Vendas por Dia (últimos 7 dias)
-        cur.execute("""
-            SELECT 
-                TO_CHAR(DATE(created_at), 'YYYY-MM-DD') AS dia, 
-                SUM(total_amount) AS total
-            FROM orders
-            WHERE restaurant_id = %s AND status = 'concluido' AND created_at >= NOW() - INTERVAL '7 days'
-            GROUP BY dia
-            ORDER BY dia DESC
-        """, (restaurant_id,))
-        vendas_por_dia = [dict(row) for row in cur.fetchall()]
+        # 4. Item Mais Vendido (processando o JSON)
+        all_item_names = []
+        if orders:
+            for order in orders:
+                # Garante que 'items' é uma lista e não é nula
+                if order['items'] and isinstance(order['items'], list):
+                    for item in order['items']:
+                        # Garante que o item é um dicionário e tem nome e quantidade
+                        if isinstance(item, dict) and 'name' in item and 'quantity' in item:
+                            # Adiciona o nome do item repetido pela sua quantidade
+                            all_item_names.extend([item['name']] * item.get('quantity', 1))
+        
+        if all_item_names:
+            item_counts = Counter(all_item_names)
+            item_mais_vendido = item_counts.most_common(1)[0][0]
+        else:
+            item_mais_vendido = 'N/A'
+
+        # 5. Vendas por Dia (processando em Python)
+        sales_by_day = {}
+        seven_days_ago = datetime.now().date() - timedelta(days=7)
+        if orders:
+            for order in orders:
+                order_date = order['created_at'].date()
+                if order_date > seven_days_ago:
+                    day_str = order_date.strftime('%Y-%m-%d')
+                    sales_by_day[day_str] = sales_by_day.get(day_str, 0) + float(order['total_amount'])
+        
+        vendas_por_dia = [{"dia": day, "total": total} for day, total in sorted(sales_by_day.items(), reverse=True)]
 
         # Monta o objeto de resposta final
         summary = {
-            "total_vendas": float(total_vendas),
+            "total_vendas": total_vendas,
             "pedidos_concluidos": pedidos_concluidos,
             "item_mais_vendido": item_mais_vendido,
             "vendas_por_dia": vendas_por_dia
         }
 
         return jsonify({"status": "success", "data": summary})
+
+# Adicionado para o cálculo de datas
+from datetime import datetime, timedelta
