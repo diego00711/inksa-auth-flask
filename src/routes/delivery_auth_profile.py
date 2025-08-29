@@ -1,4 +1,4 @@
-# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM O RETURN CORRIGIDO)
+# inksa-auth-flask/src/routes/delivery_auth_profile.py (VERSÃO COM O DECORADOR CORRIGIDO)
 
 import os
 import uuid
@@ -12,7 +12,7 @@ import psycopg2.extras
 from datetime import datetime, date, time, timedelta
 from decimal import Decimal
 from functools import wraps
-from flask_cors import cross_origin
+from flask_cors import cross_origin # A importação já estava aqui, o que é ótimo
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
+# ... (seu decorador delivery_token_required e helpers continuam os mesmos)
 # ==============================================
 # DECORATOR DE AUTENTICAÇÃO (COM O RETURN CORRIGIDO)
 # ==============================================
@@ -36,15 +37,14 @@ def delivery_token_required(f):
         if isinstance(token_result, tuple) and len(token_result) == 2:
             user_auth_id, user_type = token_result
             
-            if user_type != 'entregador':
+            if user_type != 'delivery': # CORRIGIDO para 'delivery'
                 return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
             
             g.user_auth_id = str(user_auth_id)
             
-            # --- CORREÇÃO FINAL APLICADA AQUI ---
-            # Adiciona o "return" para que a resposta da função da rota seja enviada ao Flask.
             return f(*args, **kwargs)
         else:
+            # Se get_user_id_from_token retornar um erro (jsonify), passa adiante
             return token_result
 
     return decorated_function
@@ -66,10 +66,12 @@ def sanitize_text(text):
     if not text: return text
     return re.sub(r'[\x00-\x1F\x7F]', '', text.strip())
 
+
 # ==============================================
-# ROTAS DE PERFIL (Estrutura mantida)
+# ROTAS DE PERFIL (COM A CORREÇÃO DO CORS)
 # ==============================================
 @delivery_auth_profile_bp.route('/profile', methods=['GET', 'PUT'])
+@cross_origin() # ✅ CORREÇÃO: Adicionado o decorador para permitir o acesso
 @delivery_token_required
 def handle_profile():
     conn = None
@@ -84,6 +86,7 @@ def handle_profile():
             profile = cur.fetchone()
 
             if not profile:
+                # Se o perfil não existe, cria um perfil básico
                 cur.execute(
                     """INSERT INTO delivery_profiles (user_id, first_name, phone) 
                        VALUES (%s, 'Novo Entregador', '00000000000') RETURNING *""",
@@ -136,6 +139,7 @@ def handle_profile():
     finally:
         if conn: conn.close()
 
+# ... (o resto do seu arquivo, incluindo a rota de upload, continua o mesmo)
 # ==============================================
 # ROTA DE UPLOAD DE AVATAR (Estrutura mantida)
 # ==============================================
@@ -168,7 +172,7 @@ def upload_avatar():
 
         supabase.storage.from_(bucket_name).upload(
             path=file_path, file=file_content, 
-            options={"content-type": avatar_file.content_type, "upsert": True}
+            file_options={"content-type": avatar_file.content_type, "upsert": "true"}
         )
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
 
