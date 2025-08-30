@@ -1,13 +1,23 @@
 from flask import Blueprint, request, jsonify
+import uuid
 from src.utils.helpers import get_db_connection, get_user_id_from_token
 
 restaurante_reviews_bp = Blueprint('restaurante_reviews_bp', __name__)
 
 @restaurante_reviews_bp.route('/restaurants/<uuid:restaurant_id>/reviews', methods=['POST'])
 def create_restaurant_review(restaurant_id):
+    # Converte UUID para string para evitar "can't adapt type 'UUID'"
+    if isinstance(restaurant_id, uuid.UUID):
+        restaurant_id = str(restaurant_id)
+
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
     if error:
         return error
+
+    # Se get_user_id_from_token retornar uuid.UUID, converte também
+    if isinstance(user_id, uuid.UUID):
+        user_id = str(user_id)
+
     if user_type != 'client':
         return jsonify({'error': 'Apenas clientes podem avaliar.'}), 403
 
@@ -50,6 +60,10 @@ def create_restaurant_review(restaurant_id):
 
 @restaurante_reviews_bp.route('/restaurants/<uuid:restaurant_id>/reviews', methods=['GET'])
 def list_restaurant_reviews(restaurant_id):
+    # Converte UUID para string para evitar "can't adapt type 'UUID'"
+    if isinstance(restaurant_id, uuid.UUID):
+        restaurant_id = str(restaurant_id)
+
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
