@@ -21,46 +21,28 @@ logger = logging.getLogger(__name__)
 
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
-# ==============================================
-# DECORATOR DE AUTENTICAÇÃO (COM A CORREÇÃO FINAL)
-# ==============================================
+# ... (o decorador e os helpers continuam os mesmos, não precisam de alteração) ...
 def delivery_token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # ✅ CORREÇÃO: Adicionado para evitar erro em requisições de OPTIONS
         if request.method == 'OPTIONS':
             return f(*args, **kwargs)
-
         auth_header = request.headers.get('Authorization')
         if not auth_header:
             return jsonify({"error": "Token de autorização ausente"}), 401
-
-        # A função get_user_id_from_token já lida com a validação
         token_result = get_user_id_from_token(auth_header)
-        
-        # A função agora retorna um tuple (user_id, user_type) ou um erro
         if isinstance(token_result, tuple) and len(token_result) == 3:
             user_auth_id, user_type, error = token_result
             if error:
                 return error
         else:
-            # Se o formato for inesperado, retorna um erro genérico
             return jsonify({"error": "Resposta de validação de token inesperada"}), 500
-
-        # Verificação do tipo de usuário
         if user_type != 'delivery':
             return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
-        
-        # Anexa o ID do usuário ao contexto da requisição para uso nas rotas
         g.user_auth_id = str(user_auth_id)
-        
         return f(*args, **kwargs)
-
     return decorated_function
 
-# ==============================================
-# HELPERS (Mantidos como estavam)
-# ==============================================
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal): return float(obj)
@@ -76,12 +58,13 @@ def sanitize_text(text):
     return re.sub(r'[\x00-\x1F\x7F]', '', text.strip())
 
 # ==============================================
-# ROTAS DE PERFIL (COM CORS APLICADO)
+# ROTA DE PERFIL (Sem alterações)
 # ==============================================
 @delivery_auth_profile_bp.route('/profile', methods=['GET', 'PUT'])
-@cross_origin() # Aplica CORS a esta rota
+@cross_origin()
 @delivery_token_required
 def handle_profile():
+    # ... (código da rota de perfil continua o mesmo)
     conn = None
     try:
         user_id = g.user_auth_id
@@ -147,10 +130,10 @@ def handle_profile():
         if conn: conn.close()
 
 # ==============================================
-# ROTA DE UPLOAD DE AVATAR (COM CORS APLICADO)
+# ROTA DE UPLOAD DE AVATAR (COM A CORREÇÃO FINAL)
 # ==============================================
 @delivery_auth_profile_bp.route('/upload-avatar', methods=['POST'])
-@cross_origin() # Aplica CORS a esta rota
+@cross_origin()
 @delivery_token_required
 def upload_avatar():
     if 'avatar' not in request.files or not request.files['avatar'].filename:
@@ -176,10 +159,13 @@ def upload_avatar():
         file_path = f"public/{profile_id}.{file_ext}"
         file_content = avatar_file.read()
 
+        # ✅ CORREÇÃO FINAL: Substituir 'options' por 'file_options'
         supabase.storage.from_(bucket_name).upload(
-            path=file_path, file=file_content, 
-            options={"content-type": avatar_file.content_type, "upsert": True}
+            path=file_path,
+            file=file_content,
+            file_options={"content-type": avatar_file.content_type, "upsert": "true"}
         )
+        
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
 
         with conn.cursor() as cur:
