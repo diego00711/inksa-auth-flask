@@ -1,4 +1,4 @@
-# src/routes/delivery_auth_profile.py - VERSÃO FINAL E LIMPA
+# inksa-auth-flask/src/routes/delivery_auth_profile.py - VERSÃO FINAL E CORRIGIDA
 
 import os
 import uuid
@@ -12,8 +12,7 @@ import psycopg2.extras
 from datetime import datetime, date, time, timedelta
 from decimal import Decimal
 from functools import wraps
-# ❌ REMOVIDO: A importação do cross_origin não é mais necessária aqui.
-# from flask_cors import cross_origin 
+from flask_cors import CORS, cross_origin # Importar CORS
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
@@ -23,33 +22,32 @@ logger = logging.getLogger(__name__)
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# DECORATOR DE AUTENTICAÇÃO (COM A VERIFICAÇÃO CORRIGIDA)
+# ✅ DECORATOR DE AUTENTICAÇÃO SIMPLIFICADO E CORRIGIDO
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({"error": "Token de autorização ausente"}), 401
+        
+        # A função get_user_id_from_token já lida com a ausência do cabeçalho
+        user_id, user_type, error_response = get_user_id_from_token(auth_header)
+        
+        # Se a função get_user_id_from_token retornou um erro, pare a execução aqui.
+        if error_response:
+            return error_response
 
-        token_result = get_user_id_from_token(auth_header)
-
-        if isinstance(token_result, tuple) and len(token_result) == 2:
-            user_auth_id, user_type = token_result
-            
-            # ✅ CORREÇÃO: Padronizado para 'delivery' para alinhar com o front-end.
-            if user_type != 'delivery':
-                return jsonify({"error": f"Acesso não autorizado. Rota para 'delivery', mas o tipo do usuário é '{user_type}'."}), 403
-            
-            g.user_auth_id = str(user_auth_id)
-            
-            return f(*args, **kwargs)
-        else:
-            return token_result
+        # Verifica se o tipo de usuário é o correto
+        if user_type != 'delivery':
+            return jsonify({"error": f"Acesso não autorizado. Rota para 'delivery', mas o tipo do usuário é '{user_type}'."}), 403
+        
+        # Anexa o ID do usuário ao contexto da requisição para ser usado nas rotas
+        g.user_auth_id = user_id
+        
+        # Se tudo estiver correto, executa a função da rota original
+        return f(*args, **kwargs)
 
     return decorated_function
 
-# ... (O resto do seu arquivo, incluindo helpers, continua o mesmo)
 # ==============================================
 # HELPERS (Mantidos como estavam)
 # ==============================================
@@ -68,10 +66,10 @@ def sanitize_text(text):
     return re.sub(r'[\x00-\x1F\x7F]', '', text.strip())
 
 # ==============================================
-# ROTAS DE PERFIL (SEM DECORADORES DE CORS)
+# ✅ ROTAS DE PERFIL COM CORS APLICADO
 # ==============================================
 @delivery_auth_profile_bp.route('/profile', methods=['GET', 'PUT'])
-# ❌ REMOVIDO: O decorador @cross_origin() foi removido daqui.
+@cross_origin() # Aplica o CORS diretamente na rota
 @delivery_token_required
 def handle_profile():
     conn = None
@@ -139,10 +137,10 @@ def handle_profile():
         if conn: conn.close()
 
 # ==============================================
-# ROTA DE UPLOAD DE AVATAR (SEM DECORADOR DE CORS)
+# ROTA DE UPLOAD DE AVATAR COM CORS APLICADO
 # ==============================================
 @delivery_auth_profile_bp.route('/upload-avatar', methods=['POST'])
-# ❌ REMOVIDO: O decorador @cross_origin() foi removido daqui.
+@cross_origin() # Aplica o CORS diretamente na rota
 @delivery_token_required
 def upload_avatar():
     if 'avatar' not in request.files or not request.files['avatar'].filename:
@@ -170,7 +168,7 @@ def upload_avatar():
 
         supabase.storage.from_(bucket_name).upload(
             path=file_path, file=file_content, 
-            file_options={"content-type": avatar_file.content_type, "upsert": "true"}
+            options={"content-type": avatar_file.content_type, "upsert": True}
         )
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
 
