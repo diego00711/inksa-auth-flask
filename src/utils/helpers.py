@@ -1,3 +1,5 @@
+# src/utils/helpers.py - VERSÃO FINAL E CORRIGIDA
+
 import os
 import psycopg2
 from flask import request, jsonify
@@ -11,13 +13,12 @@ logger = logging.getLogger(__name__)
 AUDIT_DEBUG = os.environ.get("AUDIT_DEBUG", "false").lower() in ("true", "1", "yes")
 
 # Inicialização do cliente Supabase
-supabase_client_type = None  # Track which client type was initialized
+supabase_client_type = None
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
     SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-    # Debug logging for environment variables presence
     if AUDIT_DEBUG:
         logger.info(f"[AUDIT_DEBUG] Environment variables presence: "
                    f"SUPABASE_URL={bool(SUPABASE_URL)}, "
@@ -27,7 +28,6 @@ try:
     if not SUPABASE_URL:
         raise ValueError("Variável de ambiente SUPABASE_URL é obrigatória.")
 
-    # Prefer service role key; fallback to anon key
     if SUPABASE_SERVICE_KEY:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         supabase_client_type = "service"
@@ -39,7 +39,6 @@ try:
     else:
         raise ValueError("Variável de ambiente SUPABASE_SERVICE_KEY ou SUPABASE_KEY é obrigatória.")
     
-    # Debug logging for client initialization
     if AUDIT_DEBUG:
         logger.info(f"[AUDIT_DEBUG] Supabase client initialized: type={supabase_client_type}")
         
@@ -57,18 +56,21 @@ def get_db_connection():
         logger.error(f"❌ Falha na conexão com o banco de dados: {e}")
         return None
 
+# ==============================================================================
+# ✅ FUNÇÃO PRINCIPAL CORRIGIDA
+# ==============================================================================
 def get_user_id_from_token(auth_header):
     """
-    Valida o token JWT, pega o user_id via Supabase, 
-    e confere se está na tabela users.
+    Valida o token JWT e extrai o user_id e o user_type diretamente dele.
     """
     if not auth_header or not auth_header.startswith('Bearer '):
+        # Retorna uma tupla de erro que pode ser usada diretamente no return da rota
         return None, None, (jsonify({"error": "Cabeçalho de autorização inválido"}), 401)
 
     token = auth_header.split(' ')[1]
     
     try:
-        # Obter usuário do Supabase pelo token
+        # Obter o objeto do usuário do Supabase usando o token
         user_response = supabase.auth.get_user(token)
         user = user_response.user
         
@@ -76,32 +78,28 @@ def get_user_id_from_token(auth_header):
             return None, None, (jsonify({"error": "Token inválido ou expirado"}), 401)
 
         user_id = user.id
+        
+        # ✅ CORREÇÃO: Pega o user_type diretamente do user_metadata do token.
+        # Isso é mais rápido e evita uma consulta desnecessária ao banco.
+        user_type = user.user_metadata.get('user_type') if user.user_metadata else None
+        
+        if not user_type:
+            # Se o tipo de usuário não estiver nos metadados do token, o acesso não é permitido.
+            return None, None, (jsonify({"error": "Tipo de usuário (user_type) não encontrado no token"}), 403)
 
-        # Conferir se user_id está na tabela users e pegar user_type
-        conn = get_db_connection()
-        if not conn:
-            return None, None, (jsonify({"error": "Erro de conexão com o banco de dados"}), 500)
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
-                result = cur.fetchone()
-                if not result:
-                    return None, None, (jsonify({"error": "Acesso não autorizado."}), 403)
-                user_type = result[0]
-        finally:
-            conn.close()
-
-        # Se passou, retorna user_id, tipo e None de erro
-        return user_id, user_type, None
+        # Se tudo deu certo, retorna o ID, o tipo e None para o erro.
+        return str(user_id), user_type, None
 
     except Exception as e:
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
         return None, None, (jsonify({"error": "Erro interno ao processar o token"}), 500)
 
+# ==============================================================================
+# O RESTO DO ARQUIVO PERMANECE IGUAL
+# ==============================================================================
 def get_user_info():
     """
-    Extrai informações do usuário a partir do token JWT no header Authorization
-    Retorna um dicionário com user_id, email e (opcionalmente) outros dados.
+    Extrai informações do usuário a partir do token JWT no header Authorization.
     """
     try:
         auth_header = request.headers.get('Authorization')
