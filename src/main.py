@@ -41,6 +41,12 @@ try:
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp
     from src.routes.client import client_bp
+
+    # --- Importação dos Blueprints de Avaliação ---
+    from src.routes.avaliacao.restaurante_reviews import restaurante_reviews_bp
+    from src.routes.avaliacao.entregador_reviews import entregador_reviews_bp
+    from src.routes.avaliacao.menu_item_reviews import menu_item_reviews_bp
+    from src.routes.avaliacao.cliente_reviews import cliente_reviews_bp
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
@@ -62,7 +68,6 @@ app.config.update(
 )
 
 # --- Configuração de CORS Global ---
-# Esta configuração já está correta e continua aqui.
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
@@ -93,7 +98,6 @@ app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
 
 # ✅ CORREÇÃO PRINCIPAL: Habilita o CORS para TODAS as rotas de delivery.
-# Isso garante que /api/delivery/profile, /api/delivery/orders, etc., aceitem as requisições.
 CORS(delivery_bp, supports_credentials=True)
 
 # Registra os blueprints filhos no blueprint "pai"
@@ -104,7 +108,7 @@ app.register_blueprint(delivery_bp) # Registra o blueprint pai na aplicação
 
 # --- Rotas de Admin agrupadas sob /api/admin ---
 admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
-CORS(admin_api_bp, supports_credentials=True) # Boa prática: Habilitar CORS aqui também
+CORS(admin_api_bp, supports_credentials=True)
 admin_api_bp.register_blueprint(admin_bp)
 admin_api_bp.register_blueprint(payouts_bp, url_prefix='/payouts')
 admin_api_bp.register_blueprint(admin_logs_bp, url_prefix='/logs')
@@ -115,7 +119,11 @@ app.register_blueprint(admin_api_bp)
 app.register_blueprint(mp_payment_bp, url_prefix='/payment')
 app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
 
-# --- (O resto do seu arquivo main.py continua exatamente igual) ---
+# --- Rotas de Avaliação agrupadas sob /api/review ---
+app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')
+app.register_blueprint(entregador_reviews_bp, url_prefix='/api/review')
+app.register_blueprint(menu_item_reviews_bp, url_prefix='/api/review')
+app.register_blueprint(cliente_reviews_bp, url_prefix='/api/review')
 
 # --- Inicialização de Serviços Externos ---
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
