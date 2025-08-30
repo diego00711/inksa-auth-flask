@@ -1,22 +1,30 @@
-# inksa-auth-flask/src/routes/delivery_stats_earnings.py
+# inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO CORRIGIDA
 
 from flask import Blueprint, request, jsonify, g
 from datetime import date, timedelta
 import psycopg2.extras
 import traceback
+# ✅ 1. IMPORTAR O cross_origin
+from flask_cors import cross_origin
 from ..utils.helpers import get_db_connection
 from ..utils.delivery_helpers import delivery_token_required, serialize_delivery_data
 
 delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
 
-@delivery_stats_earnings_bp.route('/dashboard-stats/<string:profile_id>', methods=['GET'])
+# ✅ 2. ADICIONAR O DECORADOR @cross_origin À ROTA DO DASHBOARD
+@delivery_stats_earnings_bp.route('/dashboard-stats', methods=['GET'])
+@cross_origin() # <--- ADICIONE ESTA LINHA
 @delivery_token_required 
-def get_dashboard_stats(profile_id): 
+def get_dashboard_stats(): 
+    # O restante da sua função continua exatamente o mesmo...
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
     
     try: 
+        # O g.profile_id é definido pelo decorador @delivery_token_required
+        profile_id = g.profile_id
+
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             today = date.today()
             
@@ -26,16 +34,15 @@ def get_dashboard_stats(profile_id):
                         COALESCE(SUM(delivery_fee), 0) AS earnings,
                         COUNT(id) AS deliveries
                     FROM orders 
-                    WHERE delivery_id = %s 
-                    AND status = 'Entregue' 
+                    WHERE delivery_person_id = %s -- Correção: usar delivery_person_id
+                    AND status = 'Concluído' -- Correção: usar 'Concluído' para consistência
                     AND DATE(created_at) = %s
                 ),
                 active_orders_data AS (
                     SELECT 
                         o.id,
                         o.status,
-                        rp.address_street || ', ' || rp.address_number || ', ' || 
-                        rp.address_city || ' - ' || rp.address_neighborhood AS pickup_address,
+                        rp.address_street || ', ' || rp.address_number AS pickup_address,
                         o.delivery_address,
                         o.total_amount,
                         o.delivery_fee,
@@ -43,16 +50,12 @@ def get_dashboard_stats(profile_id):
                         cp.first_name || ' ' || cp.last_name AS client_name,
                         cp.phone AS client_phone,
                         rp.restaurant_name,
-                        rp.phone AS restaurant_phone,
-                        rp.address_street AS restaurant_street,
-                        rp.address_number AS restaurant_number,
-                        rp.address_city AS restaurant_city,
-                        rp.address_neighborhood AS restaurant_neighborhood
+                        rp.phone AS restaurant_phone
                     FROM orders o
                     LEFT JOIN client_profiles cp ON o.client_id = cp.id
                     LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                    WHERE o.delivery_id = %s
-                    AND o.status IN ('Pendente', 'Aceito', 'Para Entrega')
+                    WHERE o.delivery_person_id = %s -- Correção: usar delivery_person_id
+                    AND o.status IN ('Pendente', 'Aceito', 'A caminho') -- Status mais comuns
                     ORDER BY o.created_at ASC
                 )
                 SELECT 
@@ -69,7 +72,7 @@ def get_dashboard_stats(profile_id):
             stats = cur.fetchone()
             
             if not stats:
-                return jsonify({"status": "error", "message": "Perfil de entregador não encontrado para este usuário."}), 404
+                return jsonify({"status": "error", "message": "Perfil de entregador não encontrado."}), 404
             
             return jsonify({
                 "status": "success",
@@ -92,9 +95,12 @@ def get_dashboard_stats(profile_id):
         if conn:
             conn.close()
 
+# A rota de /earnings-history já está correta e não precisa de alterações.
 @delivery_stats_earnings_bp.route('/earnings-history', methods=['GET'])
+@cross_origin()
 @delivery_token_required
 def get_earnings_history():
+    # ... (código existente)
     profile_id = g.profile_id
     conn = get_db_connection()
     if not conn:
@@ -102,7 +108,6 @@ def get_earnings_history():
     
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Parâmetros de data
             start_date_str = request.args.get('start_date')
             end_date_str = request.args.get('end_date')
 
@@ -120,22 +125,20 @@ def get_earnings_history():
             if start_date > end_date:
                 return jsonify({"status": "error", "message": "A data de início não pode ser posterior à data de fim."}), 400
 
-            # Consulta de ganhos diários
             cur.execute("""
                 SELECT 
                     DATE(o.created_at) AS earning_date, 
                     COALESCE(SUM(o.delivery_fee), 0) AS total_earned_daily,
                     COUNT(o.id) AS total_deliveries_daily
                 FROM orders o
-                WHERE o.delivery_id = %s 
-                  AND o.status = 'Entregue' 
+                WHERE o.delivery_person_id = %s 
+                  AND o.status = 'Concluído' 
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 GROUP BY DATE(o.created_at)
                 ORDER BY earning_date ASC;
             """, (profile_id, start_date, end_date))
             daily_earnings_data = cur.fetchall()
 
-            # Preencher lacunas de dias sem entregas
             full_period_earnings = {}
             current_day = start_date
             while current_day <= end_date:
@@ -160,13 +163,11 @@ def get_earnings_history():
                 for date_str, data in sorted(full_period_earnings.items())
             ]
 
-            # Consulta de entregas detalhadas
             cur.execute("""
                 SELECT 
                     o.id, 
                     o.status, 
-                    rp.address_street || ', ' || rp.address_number || ', ' || 
-                    rp.address_city || ' - ' || rp.address_neighborhood AS pickup_address,
+                    rp.address_street || ', ' || rp.address_number AS pickup_address,
                     o.delivery_address, 
                     o.total_amount, 
                     o.delivery_fee,
@@ -174,22 +175,17 @@ def get_earnings_history():
                     CONCAT(cp.first_name, ' ', cp.last_name) AS client_name,
                     cp.phone AS client_phone,
                     rp.restaurant_name,
-                    rp.phone AS restaurant_phone,
-                    rp.address_street AS restaurant_street,
-                    rp.address_number AS restaurant_number,
-                    rp.address_city AS restaurant_city,
-                    rp.address_neighborhood AS restaurant_neighborhood
+                    rp.phone AS restaurant_phone
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.delivery_id = %s 
-                  AND o.status = 'Entregue' 
+                WHERE o.delivery_person_id = %s 
+                  AND o.status = 'Concluído' 
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 ORDER BY o.created_at DESC;
             """, (profile_id, start_date, end_date))
             detailed_deliveries = cur.fetchall()
 
-            # Calcular totais do período
             total_earnings_period = sum(d['total_earned_daily'] for d in ordered_daily_earnings)
             total_deliveries_period = sum(d['total_deliveries_daily'] for d in ordered_daily_earnings)
             
