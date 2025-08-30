@@ -1,10 +1,10 @@
-# src/utils/helpers.py - VERSÃO FINAL E CORRIGIDA
-
+# src/utils/helpers.py - VERSÃO ATUALIZADA (registra adaptador UUID)
 import os
+import logging
 import psycopg2
+from psycopg2.extras import register_uuid
 from flask import request, jsonify
 from supabase import create_client, Client
-import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,17 +48,38 @@ except Exception as e:
     supabase_client_type = None
 
 def get_db_connection():
+    """
+    Cria e retorna uma conexão psycopg2 configurada.
+    Registra adaptador de UUID para permitir passar objetos uuid.UUID diretamente
+    como parâmetros em cur.execute(..., (some_uuid,)).
+    Retorna None em caso de falha na conexão.
+    """
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        logger.error("❌ DATABASE_URL não encontrada nas variáveis de ambiente.")
+        return None
+
     try:
-        conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
+        conn = psycopg2.connect(database_url)
+        # Registrar adaptador UUID para a conexão (permite passar uuid.UUID)
+        try:
+            register_uuid(conn)
+            if AUDIT_DEBUG:
+                logger.info("[AUDIT_DEBUG] register_uuid aplicado à conexão com sucesso")
+        except Exception as e:
+            # Não falhar a criação da conexão só por causa do registro do adaptador,
+            # mas logar para investigação.
+            logger.warning(f"⚠️ Falha ao registrar adaptador UUID na conexão: {e}")
+
         logger.info("✅ Conexão com banco de dados estabelecida com sucesso")
         return conn
     except Exception as e:
-        logger.error(f"❌ Falha na conexão com o banco de dados: {e}")
+        logger.error(f"❌ Falha na conexão com o banco de dados: {e}", exc_info=True)
         return None
 
-# ==============================================================================
-# ✅ FUNÇÃO PRINCIPAL CORRIGIDA
-# ==============================================================================
+# ======================================================================
+# ✅ FUNÇÃO PRINCIPAL CORRIGIDA (sem mudanças de lógica; mantém comportamento)
+# ======================================================================
 def get_user_id_from_token(auth_header):
     """
     Valida o token JWT e extrai o user_id e o user_type diretamente dele.
@@ -87,16 +108,16 @@ def get_user_id_from_token(auth_header):
             # Se o tipo de usuário não estiver nos metadados do token, o acesso não é permitido.
             return None, None, (jsonify({"error": "Tipo de usuário (user_type) não encontrado no token"}), 403)
 
-        # Se tudo deu certo, retorna o ID, o tipo e None para o erro.
+        # Se tudo deu certo, retorna o ID (string), o tipo e None para o erro.
         return str(user_id), user_type, None
 
     except Exception as e:
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
         return None, None, (jsonify({"error": "Erro interno ao processar o token"}), 500)
 
-# ==============================================================================
-# O RESTO DO ARQUIVO PERMANECE IGUAL
-# ==============================================================================
+# ======================================================================
+# Função auxiliar para obter info do usuário (mantida)
+# ======================================================================
 def get_user_info():
     """
     Extrai informações do usuário a partir do token JWT no header Authorization.
