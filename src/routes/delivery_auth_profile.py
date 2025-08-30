@@ -159,11 +159,12 @@ def upload_avatar():
         file_path = f"public/{profile_id}.{file_ext}"
         file_content = avatar_file.read()
 
-        # ✅ CORREÇÃO FINAL: Substituir 'options' por 'file_options'
+        # ✅ CORREÇÃO FINAL: Mover o 'upsert' para fora de 'file_options'
         supabase.storage.from_(bucket_name).upload(
             path=file_path,
             file=file_content,
-            file_options={"content-type": avatar_file.content_type, "upsert": "true"}
+            file_options={"content-type": avatar_file.content_type},
+            upsert=True # Passado como um argumento de primeiro nível
         )
         
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
