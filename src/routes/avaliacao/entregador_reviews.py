@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from ..utils.helpers import get_db_connection, get_user_id_from_token
+from src.utils.helpers import get_db_connection, get_user_id_from_token
 
 entregador_reviews_bp = Blueprint('entregador_reviews_bp', __name__)
 
