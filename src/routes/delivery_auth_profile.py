@@ -12,7 +12,7 @@ import psycopg2.extras
 from datetime import datetime, date, time, timedelta
 from decimal import Decimal
 from functools import wraps
-from flask_cors import CORS, cross_origin # Importar CORS
+from flask_cors import cross_origin
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
@@ -22,28 +22,38 @@ logger = logging.getLogger(__name__)
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
 # ==============================================
-# ✅ DECORATOR DE AUTENTICAÇÃO SIMPLIFICADO E CORRIGIDO
+# DECORATOR DE AUTENTICAÇÃO (COM A CORREÇÃO FINAL)
 # ==============================================
 def delivery_token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        
-        # A função get_user_id_from_token já lida com a ausência do cabeçalho
-        user_id, user_type, error_response = get_user_id_from_token(auth_header)
-        
-        # Se a função get_user_id_from_token retornou um erro, pare a execução aqui.
-        if error_response:
-            return error_response
+        # ✅ CORREÇÃO: Adicionado para evitar erro em requisições de OPTIONS
+        if request.method == 'OPTIONS':
+            return f(*args, **kwargs)
 
-        # Verifica se o tipo de usuário é o correto
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return jsonify({"error": "Token de autorização ausente"}), 401
+
+        # A função get_user_id_from_token já lida com a validação
+        token_result = get_user_id_from_token(auth_header)
+        
+        # A função agora retorna um tuple (user_id, user_type) ou um erro
+        if isinstance(token_result, tuple) and len(token_result) == 3:
+            user_auth_id, user_type, error = token_result
+            if error:
+                return error
+        else:
+            # Se o formato for inesperado, retorna um erro genérico
+            return jsonify({"error": "Resposta de validação de token inesperada"}), 500
+
+        # Verificação do tipo de usuário
         if user_type != 'delivery':
-            return jsonify({"error": f"Acesso não autorizado. Rota para 'delivery', mas o tipo do usuário é '{user_type}'."}), 403
+            return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
         
-        # Anexa o ID do usuário ao contexto da requisição para ser usado nas rotas
-        g.user_auth_id = user_id
+        # Anexa o ID do usuário ao contexto da requisição para uso nas rotas
+        g.user_auth_id = str(user_auth_id)
         
-        # Se tudo estiver correto, executa a função da rota original
         return f(*args, **kwargs)
 
     return decorated_function
@@ -66,10 +76,10 @@ def sanitize_text(text):
     return re.sub(r'[\x00-\x1F\x7F]', '', text.strip())
 
 # ==============================================
-# ✅ ROTAS DE PERFIL COM CORS APLICADO
+# ROTAS DE PERFIL (COM CORS APLICADO)
 # ==============================================
 @delivery_auth_profile_bp.route('/profile', methods=['GET', 'PUT'])
-@cross_origin() # Aplica o CORS diretamente na rota
+@cross_origin() # Aplica CORS a esta rota
 @delivery_token_required
 def handle_profile():
     conn = None
@@ -137,10 +147,10 @@ def handle_profile():
         if conn: conn.close()
 
 # ==============================================
-# ROTA DE UPLOAD DE AVATAR COM CORS APLICADO
+# ROTA DE UPLOAD DE AVATAR (COM CORS APLICADO)
 # ==============================================
 @delivery_auth_profile_bp.route('/upload-avatar', methods=['POST'])
-@cross_origin() # Aplica o CORS diretamente na rota
+@cross_origin() # Aplica CORS a esta rota
 @delivery_token_required
 def upload_avatar():
     if 'avatar' not in request.files or not request.files['avatar'].filename:
