@@ -202,7 +202,6 @@ def update_order_status(order_id):
         
         new_status_internal = VALID_STATUSES[new_status_display]
         
-        # Impede que esta rota seja usada para as transições controladas por código
         if new_status_internal in ['delivering', 'delivered']:
             return jsonify({"error": f"Para mudar o status para '{new_status_display}', use o endpoint de verificação de código apropriado."}), 400
 
@@ -298,7 +297,7 @@ def complete_order(order_id):
             if order['status'] != 'delivering': return jsonify({"error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY.get(order['status'])}"}), 400
             if order['delivery_code'] != data['delivery_code'].upper(): return jsonify({"error": "Código de entrega inválido"}), 403
 
-            cur.execute("UPDATE orders SET status = 'delivered', updated_at = %s WHERE id = %s", (datetime.now(), str(order_id)))
+            cur.execute("UPDATE orders SET status = 'delivered', updated_at = %s, completed_at = %s WHERE id = %s", (datetime.now(), datetime.now(), str(order_id)))
             conn.commit()
             logger.info(f"Pedido {order_id} entregue com sucesso.")
             return jsonify({"status": "success", "message": "Pedido entregue com sucesso!"}), 200
@@ -369,3 +368,91 @@ def get_order_status_history(order_id):
         return jsonify({"error": "Erro interno do servidor"}), 500
     finally:
         if conn: conn.close()
+
+
+# =====================================================================
+# ✅✅✅ INÍCIO DA NOVA ROTA ADICIONADA ✅✅✅
+# =====================================================================
+
+@orders_bp.route('/pending-client-review', methods=['GET'])
+def get_pending_client_reviews():
+    """
+    Retorna os pedidos de um cliente que foram entregues e estão
+    pendentes de avaliação (do restaurante ou do entregador).
+    """
+    logger.info("=== INÍCIO get_pending_client_reviews ===")
+    conn = None
+    try:
+        # 1. Autentica o usuário e garante que é um cliente
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'client':
+            return jsonify({'error': 'Acesso negado. Apenas para clientes.'}), 403
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # 2. Busca o ID do perfil do cliente a partir do user_id do token
+            cur.execute("SELECT id FROM client_profiles WHERE user_id = %s", (user_id,))
+            client_profile = cur.fetchone()
+            if not client_profile:
+                return jsonify({'error': 'Perfil de cliente não encontrado.'}), 404
+            
+            client_id = client_profile['id']
+
+            # 3. Query SQL para encontrar pedidos entregues que ainda não foram totalmente avaliados
+            # A lógica é:
+            # - O pedido pertence ao cliente e foi entregue.
+            # - E (pelo menos uma das avaliações está pendente):
+            #   - Não existe avaliação do restaurante para este pedido.
+            #   - OU (o pedido teve um entregador E não existe avaliação do entregador para este pedido).
+            sql_query = """
+                SELECT 
+                    o.id, 
+                    o.restaurant_id,
+                    rp.trading_name as restaurant_name,
+                    o.delivery_id as deliveryman_id,
+                    dp.full_name as deliveryman_name,
+                    o.completed_at
+                FROM 
+                    orders o
+                JOIN 
+                    restaurant_profiles rp ON o.restaurant_id = rp.id
+                LEFT JOIN 
+                    delivery_profiles dp ON o.delivery_id = dp.id
+                WHERE 
+                    o.client_id = %s
+                    AND o.status = 'delivered'
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1 FROM restaurant_reviews rr 
+                            WHERE rr.order_id = o.id AND rr.client_id = %s
+                        )
+                        OR 
+                        (o.delivery_id IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM delivery_reviews dr 
+                            WHERE dr.order_id = o.id AND dr.client_id = %s
+                        ))
+                    )
+                ORDER BY o.completed_at DESC;
+            """
+            
+            # Passamos o client_id três vezes, uma para cada placeholder %s na query
+            cur.execute(sql_query, (client_id, client_id, client_id))
+            
+            orders_to_review = [dict(row) for row in cur.fetchall()]
+            
+            logger.info(f"Encontrados {len(orders_to_review)} pedidos pendentes de avaliação para o cliente {client_id}")
+            return jsonify(orders_to_review), 200
+
+    except Exception as e:
+        logger.error(f"Erro em get_pending_client_reviews: {e}", exc_info=True)
+        return jsonify({'error': 'Erro interno do servidor ao buscar pedidos para avaliação.'}), 500
+    finally:
+        if conn:
+            conn.close()
+            logger.info("Conexão com banco fechada em get_pending_client_reviews")
+
+# =====================================================================
+# ✅✅✅ FIM DA NOVA ROTA ADICIONADA ✅✅✅
+# =====================================================================
