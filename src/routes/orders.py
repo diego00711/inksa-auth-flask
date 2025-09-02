@@ -88,7 +88,6 @@ def handle_orders():
             if sort_order.upper() not in {'ASC', 'DESC'}:
                 return jsonify({"error": "Direção de ordenação inválida. Use 'asc' ou 'desc'"}), 400
 
-            # Oculta códigos de verificação na listagem geral por segurança
             query = "SELECT o.id, o.client_id, o.restaurant_id, o.items, o.delivery_address, o.total_amount_items, o.delivery_fee, o.total_amount, o.status, o.created_at, o.updated_at, rp.restaurant_name, rp.logo_url as restaurant_logo, cp.first_name as client_first_name, cp.last_name as client_last_name FROM orders o LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id LEFT JOIN client_profiles cp ON o.client_id = cp.id WHERE 1=1"
             params = []
 
@@ -162,7 +161,6 @@ def handle_orders():
                 conn.commit()
 
                 order_dict = dict(new_order)
-                # Ocultar códigos na resposta ao cliente por segurança
                 order_dict.pop('pickup_code', None)
                 order_dict.pop('delivery_code', None)
                 order_dict['status_display'] = STATUS_DISPLAY.get(order_dict['status'], order_dict['status'])
@@ -244,7 +242,7 @@ def pickup_order(order_id):
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
-        if user_type not in ['restaurant', 'driver']: # Futuramente, pode ser apenas 'driver'
+        if user_type not in ['restaurant', 'driver']:
             return jsonify({"error": "Acesso não autorizado para retirada"}), 403
 
         data = request.get_json()
@@ -354,7 +352,6 @@ def get_order_status_history(order_id):
             if not order:
                 return jsonify({"error": "Pedido não encontrado ou acesso negado"}), 404
             
-            # NOTA: Implementação simplificada. Idealmente, haveria uma tabela `order_status_history`.
             history = [{
                 "status": STATUS_DISPLAY.get(order['status'], order['status']),
                 "timestamp": order['updated_at'].isoformat(),
@@ -371,7 +368,7 @@ def get_order_status_history(order_id):
 
 
 # =====================================================================
-# ✅✅✅ INÍCIO DA NOVA ROTA ADICIONADA ✅✅✅
+# ✅✅✅ INÍCIO DA NOVA ROTA CORRIGIDA ✅✅✅
 # =====================================================================
 
 @orders_bp.route('/pending-client-review', methods=['GET'])
@@ -383,7 +380,6 @@ def get_pending_client_reviews():
     logger.info("=== INÍCIO get_pending_client_reviews ===")
     conn = None
     try:
-        # 1. Autentica o usuário e garante que é um cliente
         user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
             return error
@@ -392,7 +388,6 @@ def get_pending_client_reviews():
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # 2. Busca o ID do perfil do cliente a partir do user_id do token
             cur.execute("SELECT id FROM client_profiles WHERE user_id = %s", (user_id,))
             client_profile = cur.fetchone()
             if not client_profile:
@@ -400,17 +395,12 @@ def get_pending_client_reviews():
             
             client_id = client_profile['id']
 
-            # 3. Query SQL para encontrar pedidos entregues que ainda não foram totalmente avaliados
-            # A lógica é:
-            # - O pedido pertence ao cliente e foi entregue.
-            # - E (pelo menos uma das avaliações está pendente):
-            #   - Não existe avaliação do restaurante para este pedido.
-            #   - OU (o pedido teve um entregador E não existe avaliação do entregador para este pedido).
+            # Query SQL com o nome da coluna CORRIGIDO
             sql_query = """
                 SELECT 
                     o.id, 
                     o.restaurant_id,
-                    rp.trading_name as restaurant_name,
+                    rp.restaurant_name as restaurant_name, -- ✅ CORREÇÃO APLICADA AQUI
                     o.delivery_id as deliveryman_id,
                     dp.full_name as deliveryman_name,
                     o.completed_at
@@ -437,7 +427,6 @@ def get_pending_client_reviews():
                 ORDER BY o.completed_at DESC;
             """
             
-            # Passamos o client_id três vezes, uma para cada placeholder %s na query
             cur.execute(sql_query, (client_id, client_id, client_id))
             
             orders_to_review = [dict(row) for row in cur.fetchall()]
@@ -454,5 +443,5 @@ def get_pending_client_reviews():
             logger.info("Conexão com banco fechada em get_pending_client_reviews")
 
 # =====================================================================
-# ✅✅✅ FIM DA NOVA ROTA ADICIONADA ✅✅✅
+# ✅✅✅ FIM DA NOVA ROTA CORRIGIDA ✅✅✅
 # =====================================================================
