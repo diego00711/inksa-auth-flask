@@ -48,8 +48,8 @@ def is_valid_status_transition(current_status, new_status):
         'pending': ['accepted', 'cancelled'],
         'accepted': ['preparing', 'cancelled'],
         'preparing': ['ready', 'cancelled'],
-        'ready': ['delivering', 'cancelled'], # A transição para 'delivering' será controlada pelo endpoint /pickup
-        'delivering': ['delivered'],          # A transição para 'delivered' será controlada pelo endpoint /complete
+        'ready': ['delivering', 'cancelled'],
+        'delivering': ['delivered'],
         'delivered': [],
         'cancelled': []
     }
@@ -74,7 +74,6 @@ def handle_orders():
             logger.error("Falha na conexão com o banco de dados")
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
-        # --- GET: Listar pedidos ---
         if request.method == 'GET':
             logger.info("Processando GET - Listar pedidos")
             
@@ -119,7 +118,6 @@ def handle_orders():
             logger.info(f"Encontrados {len(orders)} pedidos")
             return jsonify({"status": "success", "data": orders}), 200
 
-        # --- POST: Criar novo pedido ---
         elif request.method == 'POST':
             logger.info("Processando POST - Criar pedido")
             if user_type != 'client':
@@ -179,7 +177,6 @@ def handle_orders():
 
 @orders_bp.route('/<uuid:order_id>/status', methods=['PUT'])
 def update_order_status(order_id):
-    """Atualiza o status de um pedido (exceto para 'delivering' e 'delivered', que usam rotas próprias)."""
     logger.info(f"=== INÍCIO UPDATE_ORDER_STATUS para {order_id} ===")
     conn = None
     
@@ -236,7 +233,6 @@ def update_order_status(order_id):
 
 @orders_bp.route('/<uuid:order_id>/pickup', methods=['POST'])
 def pickup_order(order_id):
-    """Endpoint para o entregador usar o código de retirada e mover o status para 'delivering'."""
     logger.info(f"=== INÍCIO PICKUP_ORDER para {order_id} ===")
     conn = None
     try:
@@ -273,7 +269,6 @@ def pickup_order(order_id):
 
 @orders_bp.route('/<uuid:order_id>/complete', methods=['POST'])
 def complete_order(order_id):
-    """Endpoint para o entregador usar o código de entrega e mover o status para 'delivered'."""
     logger.info(f"=== INÍCIO COMPLETE_ORDER para {order_id} ===")
     conn = None
     try:
@@ -310,7 +305,6 @@ def complete_order(order_id):
 
 @orders_bp.route('/valid-statuses', methods=['GET'])
 def get_valid_statuses():
-    """Retorna os status válidos para o tipo de usuário."""
     logger.info("=== INÍCIO get_valid_statuses ===")
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
@@ -332,7 +326,6 @@ def get_valid_statuses():
 
 @orders_bp.route('/<uuid:order_id>/status-history', methods=['GET'])
 def get_order_status_history(order_id):
-    """Retorna o histórico de status de um pedido."""
     logger.info("=== INÍCIO get_order_status_history ===")
     conn = None
     try:
@@ -368,7 +361,7 @@ def get_order_status_history(order_id):
 
 
 # =====================================================================
-# ✅✅✅ INÍCIO DA NOVA ROTA CORRIGIDA ✅✅✅
+# ✅✅✅ INÍCIO DA ROTA COM A QUERY SQL DEFINITIVA ✅✅✅
 # =====================================================================
 
 @orders_bp.route('/pending-client-review', methods=['GET'])
@@ -395,14 +388,15 @@ def get_pending_client_reviews():
             
             client_id = client_profile['id']
 
-            # Query SQL com o nome da coluna CORRIGIDO
+            # Query SQL com os nomes de coluna exatos do seu banco de dados
             sql_query = """
                 SELECT 
                     o.id, 
                     o.restaurant_id,
-                    rp.restaurant_name as restaurant_name, -- ✅ CORREÇÃO APLICADA AQUI
+                    rp.restaurant_name,
                     o.delivery_id as deliveryman_id,
-                    dp.full_name as deliveryman_name,
+                    -- Concatena first_name e last_name para o nome do entregador
+                    (dp.first_name || ' ' || dp.last_name) as deliveryman_name,
                     o.completed_at
                 FROM 
                     orders o
@@ -443,5 +437,5 @@ def get_pending_client_reviews():
             logger.info("Conexão com banco fechada em get_pending_client_reviews")
 
 # =====================================================================
-# ✅✅✅ FIM DA NOVA ROTA CORRIGIDA ✅✅✅
+# ✅✅✅ FIM DA ROTA CORRIGIDA ✅✅✅
 # =====================================================================
