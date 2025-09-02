@@ -388,16 +388,16 @@ def get_pending_client_reviews():
             
             client_id = client_profile['id']
 
-            # Query SQL com os nomes de coluna exatos do seu banco de dados
+            # Query SQL com a correção final para a coluna de data
             sql_query = """
                 SELECT 
                     o.id, 
                     o.restaurant_id,
                     rp.restaurant_name,
                     o.delivery_id as deliveryman_id,
-                    -- Concatena first_name e last_name para o nome do entregador
                     (dp.first_name || ' ' || dp.last_name) as deliveryman_name,
-                    o.completed_at
+                    -- ✅ CORREÇÃO FINAL: Usa 'updated_at' e a renomeia para 'completed_at'
+                    o.updated_at as completed_at
                 FROM 
                     orders o
                 JOIN 
@@ -418,7 +418,7 @@ def get_pending_client_reviews():
                             WHERE dr.order_id = o.id AND dr.client_id = %s
                         ))
                     )
-                ORDER BY o.completed_at DESC;
+                ORDER BY o.updated_at DESC;
             """
             
             cur.execute(sql_query, (client_id, client_id, client_id))
@@ -435,6 +435,7 @@ def get_pending_client_reviews():
         if conn:
             conn.close()
             logger.info("Conexão com banco fechada em get_pending_client_reviews")
+
 
 # =====================================================================
 # ✅✅✅ FIM DA ROTA CORRIGIDA ✅✅✅
