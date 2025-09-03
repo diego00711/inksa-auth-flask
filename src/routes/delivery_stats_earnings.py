@@ -5,9 +5,7 @@ from datetime import date, timedelta
 import psycopg2.extras
 import traceback
 from flask_cors import cross_origin
-from ..utils.helpers import get_db_connection
-# ✅ CORREÇÃO: O nome do decorador no arquivo de helpers é 'delivery_token_required'
-from ..utils.delivery_helpers import delivery_token_required, serialize_delivery_data
+from ..utils.helpers import get_db_connection, delivery_token_required, serialize_delivery_data
 
 delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
 
@@ -25,15 +23,13 @@ def get_dashboard_stats():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             today = date.today()
             
-            # ✅ CORREÇÃO PRINCIPAL: Substituir 'delivery_person_id' e 'delivery_id' por 'profile_id' que vem do token
-            # e usar o nome correto da coluna no WHERE, que é 'delivery_id'
             cur.execute("""
                 WITH today_stats AS (
                     SELECT 
                         COALESCE(SUM(delivery_fee), 0) AS earnings,
                         COUNT(id) AS deliveries
                     FROM orders 
-                    WHERE delivery_id = %s -- Nome correto da coluna
+                    WHERE delivery_id = %s
                     AND status = 'Concluído' 
                     AND DATE(created_at) = %s
                 ),
@@ -46,7 +42,7 @@ def get_dashboard_stats():
                     FROM orders o
                     LEFT JOIN client_profiles cp ON o.client_id = cp.id
                     LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                    WHERE o.delivery_id = %s -- Nome correto da coluna
+                    WHERE o.delivery_id = %s
                     AND o.status IN ('Pendente', 'Aceito', 'A caminho')
                     ORDER BY o.created_at ASC
                 )
@@ -113,14 +109,13 @@ def get_earnings_history():
             if start_date > end_date:
                 return jsonify({"status": "error", "message": "A data de início não pode ser posterior à data de fim."}), 400
             
-            # ✅ CORREÇÃO PRINCIPAL: Usar 'delivery_id'
             cur.execute("""
                 SELECT 
                     DATE(o.created_at) AS earning_date, 
                     COALESCE(SUM(o.delivery_fee), 0) AS total_earned_daily,
                     COUNT(o.id) AS total_deliveries_daily
                 FROM orders o
-                WHERE o.delivery_id = %s -- Nome correto da coluna
+                WHERE o.delivery_id = %s
                   AND o.status = 'Concluído' 
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 GROUP BY DATE(o.created_at)
@@ -152,7 +147,6 @@ def get_earnings_history():
                 for date_str, data in sorted(full_period_earnings.items())
             ]
             
-            # ✅ CORREÇÃO PRINCIPAL: Usar 'delivery_id'
             cur.execute("""
                 SELECT 
                     o.id, o.status, rp.address_street || ', ' || rp.address_number AS pickup_address,
@@ -162,7 +156,7 @@ def get_earnings_history():
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.delivery_id = %s -- Nome correto da coluna
+                WHERE o.delivery_id = %s
                   AND o.status = 'Concluído' 
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 ORDER BY o.created_at DESC;
