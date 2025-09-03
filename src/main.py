@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from flask import Flask, jsonify, request, Blueprint
 from dotenv import load_dotenv
-from flask_cors import CORS # A importação principal já estava aqui, o que é ótimo
+from flask_cors import CORS
 from flask_socketio import SocketIO
 import mercadopago
 import logging
@@ -41,8 +41,6 @@ try:
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp
     from src.routes.client import client_bp
-
-    # --- Importação dos Blueprints de Avaliação ---
     from src.routes.avaliacao.restaurante_reviews import restaurante_reviews_bp
     from src.routes.avaliacao.entregador_reviews import entregador_reviews_bp
     from src.routes.avaliacao.menu_item_reviews import menu_item_reviews_bp
@@ -89,22 +87,22 @@ app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
+
+# ✅✅✅ CORREÇÃO DE CORS PARA PEDIDOS ✅✅✅
+CORS(orders_bp, supports_credentials=True)
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
+
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
 # --- Rotas de Delivery agrupadas sob /api/delivery ---
 delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
-
-# ✅ CORREÇÃO PRINCIPAL: Habilita o CORS para TODAS as rotas de delivery.
 CORS(delivery_bp, supports_credentials=True)
-
-# Registra os blueprints filhos no blueprint "pai"
 delivery_bp.register_blueprint(delivery_auth_profile_bp)
 delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders')
 delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
-app.register_blueprint(delivery_bp) # Registra o blueprint pai na aplicação
+app.register_blueprint(delivery_bp)
 
 # --- Rotas de Admin agrupadas sob /api/admin ---
 admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
