@@ -4,7 +4,7 @@ from flask import Blueprint, request, jsonify
 from datetime import date, timedelta
 import psycopg2.extras
 import traceback
-# ✅ CORREÇÃO: cross_origin não é mais necessário aqui, pois o CORS é global
+ # ✅ CORREÇÃO: cross_origin não é mais necessário aqui, pois o CORS é global
 from ..utils.helpers import get_db_connection, delivery_token_required
 
 delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
