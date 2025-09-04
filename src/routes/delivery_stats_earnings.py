@@ -4,13 +4,13 @@ from flask import Blueprint, request, jsonify
 from datetime import date, timedelta
 import psycopg2.extras
 import traceback
-from flask_cors import cross_origin
+# ✅ CORREÇÃO: cross_origin não é mais necessário aqui, então a importação foi removida.
 from ..utils.helpers import get_db_connection, delivery_token_required
 
 delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
 
 @delivery_stats_earnings_bp.route('/dashboard-stats', methods=['GET'])
-@cross_origin(origins=['https://inksa-entregadoresv0-7on06sulp-inksas-projects.vercel.app', 'http://localhost:3000'], supports_credentials=True)
+# ✅ CORREÇÃO: O decorador @cross_origin foi removido. A configuração global cuidará disso.
 @delivery_token_required 
 def get_dashboard_stats(): 
     conn = None
@@ -154,7 +154,7 @@ def get_dashboard_stats():
             conn.close()
 
 @delivery_stats_earnings_bp.route('/earnings-history', methods=['GET'])
-@cross_origin(origins=['https://inksa-entregadoresv0-7on06sulp-inksas-projects.vercel.app', 'http://localhost:3000'], supports_credentials=True)
+# ✅ CORREÇÃO: O decorador @cross_origin foi removido.
 @delivery_token_required
 def get_earnings_history():
     conn = None
