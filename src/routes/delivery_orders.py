@@ -15,10 +15,28 @@ from flask_cors import cross_origin
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from .gamification_routes import add_points_for_event
 
+# --- Blueprint e Rotas ---
+delivery_orders_bp = Blueprint('delivery_orders_bp', __name__)
+
+# --- Handler para requisições OPTIONS ---
+@delivery_orders_bp.before_request
+def handle_options():
+    if request.method == "OPTIONS":
+        response = jsonify()
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+
 # --- Decorator de Autenticação CORRIGIDO ---
 def delivery_token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # ✅ CORREÇÃO: Permitir requisições OPTIONS sem autenticação
+        if request.method == "OPTIONS":
+            return f(*args, **kwargs)
+            
         conn = None 
         try:
             auth_header = request.headers.get('Authorization')
@@ -26,15 +44,10 @@ def delivery_token_required(f):
                 return jsonify({"status": "error", "message": "Token de autorização ausente"}), 401
             
             # ✅ CORREÇÃO: Chama a função corretamente
-            token_result = get_user_id_from_token(auth_header)
+            user_auth_id, user_type, error_response = get_user_id_from_token(auth_header)
             
-            # Verifica se retornou um erro
-            if isinstance(token_result, tuple) and len(token_result) == 3:
-                user_auth_id, user_type, error_response = token_result
-                if error_response:
-                    return error_response
-            else:
-                return jsonify({"status": "error", "message": "Resposta de validação de token inesperada"}), 500
+            if error_response:
+                return error_response
             
             # Verifica se o tipo de usuário é o correto
             if user_type != 'delivery':
@@ -80,9 +93,6 @@ class CustomJSONEncoder(json.JSONEncoder):
 
 def serialize_data_with_encoder(data):
     return json.loads(json.dumps(data, cls=CustomJSONEncoder))
-
-# --- Blueprint e Rotas ---
-delivery_orders_bp = Blueprint('delivery_orders_bp', __name__)
 
 # --- Rota para buscar entregas por status (NOVA) ---
 @delivery_orders_bp.route('/orders-by-status', methods=['GET'])
