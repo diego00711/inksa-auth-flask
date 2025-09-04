@@ -1,10 +1,10 @@
-# src/main.py - VERSÃO FINAL COMPLETA E CORRIGIDA
+# src/main.py - VERSÃO FINAL E CORRIGIDA
 
 import os
 import sys
 import re
 from pathlib import Path
-from flask import Flask, jsonify, request, make_response, Blueprint
+from flask import Flask, jsonify, request, Blueprint
 from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_socketio import SocketIO
@@ -65,26 +65,23 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# --- Configuração de CORS Global CORRIGIDA ---
+# --- Configuração de CORS Global ---
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
     "https://clientes.inksadelivery.com.br",
     "https://entregadores.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
-    "https://inksa-entregadoresv0-bszzimhel-inksas-projects.vercel.app",
-    "https://*.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:5173"
+    # ✅ ADICIONAR ESTES DOMÍNIOS QUE ESTÃO DANDO ERRO
+    "https://inksa-entregadoresv0-7on06sulp-inksas-projects.vercel.app",
+    "https://inksa-clientes.vercel.app", 
+    "https://inksa-restaurantes.vercel.app"
 ]
+localhost_pattern = re.compile(r"http://localhost:\d+" )
+vercel_preview_pattern = re.compile(r"https://.*\.vercel\.app" )
+allowed_origins = production_origins + [localhost_pattern, vercel_preview_pattern]
 
-# Configuração CORRETA do CORS
-CORS(app, 
-    origins=production_origins,
-    supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-)
+CORS(app, origins=allowed_origins, supports_credentials=True)
 
 # --- Configuração do SocketIO ---
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
@@ -139,30 +136,6 @@ else:
     app.mp_sdk = None
     logging.warning("MERCADO_PAGO_ACCESS_TOKEN não encontrado!")
 
-# --- Middleware CORS para headers ---
-@app.after_request
-def after_request(response):
-    origin = request.headers.get('Origin')
-    if origin in production_origins:
-        response.headers.add('Access-Control-Allow-Origin', origin)
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    return response
-
-# --- Handler para OPTIONS requests ---
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = make_response()
-        origin = request.headers.get('Origin')
-        if origin in production_origins:
-            response.headers.add("Access-Control-Allow-Origin", origin)
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Requested-With")
-        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
-        response.headers.add("Access-Control-Allow-Credentials", "true")
-        return response
-
 # --- Rotas de Status e Debug ---
 @app.route('/')
 def index():
@@ -185,7 +158,7 @@ def health_check():
         "cors_enabled": True
     })
 
-# --- Handlers WebSocket ---
+# ... (O resto do seu arquivo, incluindo handlers de erro e SocketIO, continua aqui)
 @socketio.on('connect')
 def handle_connect():
     logger.info(f'Cliente conectado via WebSocket: {request.sid}')
@@ -200,7 +173,6 @@ def handle_ping(data):
     logger.info(f'Ping recebido de {request.sid}: {data}')
     return {'response': 'pong', 'sid': request.sid}
 
-# --- Handlers de Erro ---
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint não encontrado", "path": request.path}), 404
