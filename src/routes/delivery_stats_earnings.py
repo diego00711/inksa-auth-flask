@@ -1,11 +1,11 @@
-# inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO FINAL E CORRIGIDA
+# inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO CORRIGIDA
 
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify
 from datetime import date, timedelta
 import psycopg2.extras
 import traceback
 from flask_cors import cross_origin
-from ..utils.helpers import get_db_connection, delivery_token_required, serialize_delivery_data
+from ..utils.helpers import get_db_connection, delivery_token_required
 
 delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
 
@@ -18,11 +18,21 @@ def get_dashboard_stats():
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
     
     try: 
-        profile_id = g.profile_id
+        # Use request.user_id em vez de g.profile_id
+        user_id = request.user_id
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             today = date.today()
             
+            # Primeiro, buscar o ID do perfil do entregador
+            cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
+            delivery_profile = cur.fetchone()
+            
+            if not delivery_profile:
+                return jsonify({"status": "error", "message": "Perfil de entregador não encontrado."}), 404
+                
+            profile_id = delivery_profile['id']
+
             cur.execute("""
                 WITH today_stats AS (
                     SELECT 
@@ -30,26 +40,29 @@ def get_dashboard_stats():
                         COUNT(id) AS deliveries
                     FROM orders 
                     WHERE delivery_id = %s
-                    AND status = 'Concluído' 
+                    AND status = 'delivered'  -- ✅ CORRIGIDO: status em inglês
                     AND DATE(created_at) = %s
                 ),
                 active_orders_data AS (
                     SELECT 
-                        o.id, o.status, rp.address_street || ', ' || rp.address_number AS pickup_address,
+                        o.id, o.status, 
+                        COALESCE(rp.address_street || ', ' || rp.address_number, 'Endereço não disponível') AS pickup_address,
                         o.delivery_address, o.total_amount, o.delivery_fee, o.created_at,
-                        cp.first_name || ' ' || cp.last_name AS client_name, cp.phone AS client_phone,
-                        rp.restaurant_name, rp.phone AS restaurant_phone
+                        COALESCE(cp.first_name || ' ' || cp.last_name, 'Cliente') AS client_name, 
+                        COALESCE(cp.phone, 'Telefone não disponível') AS client_phone,
+                        COALESCE(rp.restaurant_name, 'Restaurante') AS restaurant_name, 
+                        COALESCE(rp.phone, 'Telefone não disponível') AS restaurant_phone
                     FROM orders o
                     LEFT JOIN client_profiles cp ON o.client_id = cp.id
                     LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                     WHERE o.delivery_id = %s
-                    AND o.status IN ('Pendente', 'Aceito', 'A caminho')
+                    AND o.status IN ('pending', 'accepted', 'delivering')  -- ✅ CORRIGIDO: status em inglês
                     ORDER BY o.created_at ASC
                 )
                 SELECT 
                     dp.rating, dp.total_deliveries, ts.earnings AS today_earnings,
                     ts.deliveries AS today_deliveries,
-                    (SELECT json_agg(a) FROM active_orders_data a) AS active_orders
+                    (SELECT COALESCE(json_agg(a), '[]'::json) FROM active_orders_data a) AS active_orders
                 FROM delivery_profiles dp
                 CROSS JOIN today_stats ts
                 WHERE dp.id = %s
@@ -58,7 +71,13 @@ def get_dashboard_stats():
             stats = cur.fetchone()
             
             if not stats:
-                return jsonify({"status": "error", "message": "Perfil de entregador não encontrado."}), 404
+                return jsonify({"status": "error", "message": "Estatísticas não encontradas."}), 404
+            
+            # Processar active_orders corretamente
+            active_orders = stats['active_orders'] or []
+            if isinstance(active_orders, str):
+                import json
+                active_orders = json.loads(active_orders)
             
             return jsonify({
                 "status": "success",
@@ -67,7 +86,7 @@ def get_dashboard_stats():
                     "todayEarnings": float(stats['today_earnings']) if stats['today_earnings'] is not None else 0.0,
                     "avgRating": float(stats['rating']) if stats['rating'] is not None else 0.0,
                     "totalDeliveries": stats['total_deliveries'] or 0, 
-                    "activeOrders": serialize_delivery_data(stats['active_orders'] or [])
+                    "activeOrders": active_orders  # ✅ CORRIGIDO: não usar serialize_delivery_data aqui
                 }
             }), 200
             
@@ -85,13 +104,23 @@ def get_dashboard_stats():
 @cross_origin()
 @delivery_token_required
 def get_earnings_history():
-    profile_id = g.profile_id
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
     
     try:
+        user_id = request.user_id
+        
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Buscar o ID do perfil do entregador
+            cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
+            delivery_profile = cur.fetchone()
+            
+            if not delivery_profile:
+                return jsonify({"status": "error", "message": "Perfil de entregador não encontrado."}), 404
+                
+            profile_id = delivery_profile['id']
+
             start_date_str = request.args.get('start_date')
             end_date_str = request.args.get('end_date')
 
@@ -116,7 +145,7 @@ def get_earnings_history():
                     COUNT(o.id) AS total_deliveries_daily
                 FROM orders o
                 WHERE o.delivery_id = %s
-                  AND o.status = 'Concluído' 
+                  AND o.status = 'delivered'  -- ✅ CORRIGIDO: status em inglês
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 GROUP BY DATE(o.created_at)
                 ORDER BY earning_date ASC;
@@ -149,15 +178,18 @@ def get_earnings_history():
             
             cur.execute("""
                 SELECT 
-                    o.id, o.status, rp.address_street || ', ' || rp.address_number AS pickup_address,
+                    o.id, o.status, 
+                    COALESCE(rp.address_street || ', ' || rp.address_number, 'Endereço não disponível') AS pickup_address,
                     o.delivery_address, o.total_amount, o.delivery_fee, o.created_at,
-                    CONCAT(cp.first_name, ' ', cp.last_name) AS client_name, cp.phone AS client_phone,
-                    rp.restaurant_name, rp.phone AS restaurant_phone
+                    COALESCE(cp.first_name || ' ' || cp.last_name, 'Cliente') AS client_name, 
+                    COALESCE(cp.phone, 'Telefone não disponível') AS client_phone,
+                    COALESCE(rp.restaurant_name, 'Restaurante') AS restaurant_name, 
+                    COALESCE(rp.phone, 'Telefone não disponível') AS restaurant_phone
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE o.delivery_id = %s
-                  AND o.status = 'Concluído' 
+                  AND o.status = 'delivered'  -- ✅ CORRIGIDO: status em inglês
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 ORDER BY o.created_at DESC;
             """, (profile_id, start_date, end_date))
@@ -171,8 +203,8 @@ def get_earnings_history():
                 "periodEndDate": end_date.isoformat(),
                 "totalEarningsPeriod": float(total_earnings_period),
                 "totalDeliveriesPeriod": total_deliveries_period,
-                "dailyEarnings": serialize_delivery_data(ordered_daily_earnings), 
-                "detailedDeliveries": serialize_delivery_data([dict(d) for d in detailed_deliveries])
+                "dailyEarnings": ordered_daily_earnings,  # ✅ CORRIGIDO: não usar serialize_delivery_data
+                "detailedDeliveries": [dict(d) for d in detailed_deliveries]  # ✅ CORRIGIDO: não usar serialize_delivery_data
             }
             
             return jsonify({"status": "success", "data": response_data}), 200
