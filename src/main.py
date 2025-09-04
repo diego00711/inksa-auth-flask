@@ -72,7 +72,6 @@ production_origins = [
     "https://clientes.inksadelivery.com.br",
     "https://entregadores.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
-    # ✅ ADICIONAR ESTES DOMÍNIOS QUE ESTÃO DANDO ERRO
     "https://inksa-entregadoresv0-7on06sulp-inksas-projects.vercel.app",
     "https://inksa-clientes.vercel.app", 
     "https://inksa-restaurantes.vercel.app"
@@ -81,6 +80,7 @@ localhost_pattern = re.compile(r"http://localhost:\d+" )
 vercel_preview_pattern = re.compile(r"https://.*\.vercel\.app" )
 allowed_origins = production_origins + [localhost_pattern, vercel_preview_pattern]
 
+# ✅ CORREÇÃO: Aplica o CORS a toda a aplicação, incluindo todos os Blueprints.
 CORS(app, origins=allowed_origins, supports_credentials=True)
 
 # --- Configuração do SocketIO ---
@@ -92,8 +92,7 @@ app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 
-# ✅✅✅ CORREÇÃO DE CORS PARA PEDIDOS ✅✅✅
-CORS(orders_bp, supports_credentials=True)
+# ✅ CORREÇÃO: A configuração de CORS foi removida daqui, pois a global já cobre este Blueprint.
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
@@ -102,7 +101,7 @@ app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
 # --- Rotas de Delivery agrupadas sob /api/delivery ---
 delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
-CORS(delivery_bp, supports_credentials=True)
+# ✅ CORREÇÃO: A configuração de CORS foi removida daqui.
 delivery_bp.register_blueprint(delivery_auth_profile_bp)
 delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders')
 delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
@@ -110,7 +109,7 @@ app.register_blueprint(delivery_bp)
 
 # --- Rotas de Admin agrupadas sob /api/admin ---
 admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
-CORS(admin_api_bp, supports_credentials=True)
+# ✅ CORREÇÃO: A configuração de CORS foi removida daqui.
 admin_api_bp.register_blueprint(admin_bp)
 admin_api_bp.register_blueprint(payouts_bp, url_prefix='/payouts')
 admin_api_bp.register_blueprint(admin_logs_bp, url_prefix='/logs')
@@ -158,7 +157,7 @@ def health_check():
         "cors_enabled": True
     })
 
-# ... (O resto do seu arquivo, incluindo handlers de erro e SocketIO, continua aqui)
+# --- Handlers de Erro e SocketIO ---
 @socketio.on('connect')
 def handle_connect():
     logger.info(f'Cliente conectado via WebSocket: {request.sid}')
