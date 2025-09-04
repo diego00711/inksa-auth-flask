@@ -1,9 +1,10 @@
-# src/utils/helpers.py - VERSÃO ATUALIZADA (registra adaptador UUID)
+# src/utils/helpers.py - VERSÃO ATUALIZADA (com delivery_token_required)
 import os
 import logging
 import psycopg2
 from psycopg2.extras import register_uuid
 from flask import request, jsonify
+from functools import wraps
 from supabase import create_client, Client
 
 logging.basicConfig(level=logging.INFO)
@@ -138,3 +139,58 @@ def get_user_info():
     except Exception as e:
         logger.error(f"Erro ao obter informações do usuário: {e}", exc_info=True)
         return None
+
+# ======================================================================
+# ✅ FUNÇÃO AUSENTE ADICIONADA: delivery_token_required
+# ======================================================================
+def delivery_token_required(f):
+    """
+    Decorator que verifica se o token é válido e pertence a um usuário do tipo 'delivery'.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        user_id, user_type, error_response = get_user_id_from_token(auth_header)
+        
+        if error_response:
+            return error_response
+        
+        if user_type != 'delivery':
+            return jsonify({"error": "Acesso negado. Apenas usuários do tipo delivery podem acessar esta rota."}), 403
+        
+        # Adiciona user_id e user_type ao contexto da requisição
+        request.user_id = user_id
+        request.user_type = user_type
+        
+        return f(*args, **kwargs)
+    
+    return decorated_function
+
+# ======================================================================
+# ✅ FUNÇÃO AUSENTE ADICIONADA: serialize_delivery_data
+# ======================================================================
+def serialize_delivery_data(row):
+    """
+    Serializa dados de entregas para formato JSON.
+    """
+    if not row:
+        return None
+    
+    return {
+        'id': row[0],
+        'order_id': row[1],
+        'delivery_user_id': row[2],
+        'status': row[3],
+        'created_at': row[4].isoformat() if row[4] else None,
+        'updated_at': row[5].isoformat() if row[5] else None,
+        'delivery_address': row[6],
+        'customer_phone': row[7],
+        'estimated_delivery_time': row[8].isoformat() if row[8] else None,
+        'actual_delivery_time': row[9].isoformat() if row[9] else None,
+        'delivery_notes': row[10],
+        'delivery_fee': float(row[11]) if row[11] else None,
+        'payment_status': row[12],
+        'customer_name': row[13],
+        'restaurant_name': row[14],
+        'restaurant_address': row[15]
+    }
