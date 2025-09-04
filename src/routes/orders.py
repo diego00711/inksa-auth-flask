@@ -55,6 +55,17 @@ def is_valid_status_transition(current_status, new_status):
     }
     return new_status in valid_transitions.get(current_status, [])
 
+# --- Handler para requisições OPTIONS ---
+@orders_bp.before_request
+def handle_options():
+    if request.method == "OPTIONS":
+        response = jsonify()
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+
 # --- Rotas da API ---
 
 @orders_bp.route('/', methods=['GET', 'POST'])
@@ -360,10 +371,6 @@ def get_order_status_history(order_id):
         if conn: conn.close()
 
 
-# =====================================================================
-# ✅✅✅ INÍCIO DA ROTA COM A QUERY SQL DEFINITIVA ✅✅✅
-# =====================================================================
-
 @orders_bp.route('/pending-client-review', methods=['GET'])
 def get_pending_client_reviews():
     """
@@ -396,7 +403,6 @@ def get_pending_client_reviews():
                     rp.restaurant_name,
                     o.delivery_id as deliveryman_id,
                     (dp.first_name || ' ' || dp.last_name) as deliveryman_name,
-                    -- ✅ CORREÇÃO FINAL: Usa 'updated_at' e a renomeia para 'completed_at'
                     o.updated_at as completed_at
                 FROM 
                     orders o
@@ -436,78 +442,69 @@ def get_pending_client_reviews():
             conn.close()
             logger.info("Conexão com banco fechada em get_pending_client_reviews")
 
-# src/routes/avaliacao/entregador_reviews.py
 
-from flask import Blueprint, request, jsonify
-import psycopg2.extras
-from src.utils.helpers import get_db_connection, get_user_id_from_token
-
-entregador_reviews_bp = Blueprint('entregador_reviews_bp', __name__)
-
-# Rota POST original (sem alterações)
-@entregador_reviews_bp.route('/delivery/<uuid:delivery_id>/reviews', methods=['POST'])
-def create_delivery_review(delivery_id):
-    # ... seu código original aqui ...
-    pass
-
-# ✅✅✅ INÍCIO DA NOVA ROTA ✅✅✅
-@entregador_reviews_bp.route('/delivery/my-reviews', methods=['GET'])
-def get_my_delivery_reviews():
-    """ Busca as avaliações que o entregador logado recebeu dos clientes. """
-    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-    if error: return error
-    if user_type != 'delivery': return jsonify({'error': 'Acesso negado.'}), 403
-
+@orders_bp.route('/pending-delivery-review', methods=['GET', 'OPTIONS'])
+def get_pending_delivery_review():
+    """
+    Retorna os pedidos que foram entregues por um entregador e estão
+    pendentes de avaliação do cliente para o entregador.
+    """
+    logger.info("=== INÍCIO get_pending_delivery_review ===")
     conn = None
     try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'delivery':
+            return jsonify({'error': 'Acesso negado. Apenas para entregadores.'}), 403
+
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Buscar o perfil do entregador
             cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
             delivery_profile = cur.fetchone()
-            if not delivery_profile: return jsonify({'error': 'Perfil de entregador não encontrado.'}), 404
+            if not delivery_profile:
+                return jsonify({'error': 'Perfil de entregador não encontrado.'}), 404
             
             delivery_id = delivery_profile['id']
 
-            cur.execute("""
+            # Query para buscar pedidos entregues pelo entregador que estão pendentes de avaliação
+            sql_query = """
                 SELECT 
-                    dr.rating, 
-                    dr.comment, 
-                    dr.created_at,
-                    (cp.first_name || ' ' || cp.last_name) as reviewer_name
+                    o.id, 
+                    o.restaurant_id,
+                    rp.restaurant_name,
+                    o.client_id,
+                    (cp.first_name || ' ' || cp.last_name) as client_name,
+                    o.updated_at as delivered_at,
+                    o.total_amount
                 FROM 
-                    delivery_reviews dr
+                    orders o
                 JOIN 
-                    client_profiles cp ON dr.client_id = cp.id
+                    restaurant_profiles rp ON o.restaurant_id = rp.id
+                JOIN 
+                    client_profiles cp ON o.client_id = cp.id
                 WHERE 
-                    dr.delivery_id = %s 
-                ORDER BY 
-                    dr.created_at DESC
-            """, (delivery_id,))
+                    o.delivery_id = %s
+                    AND o.status = 'delivered'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM delivery_reviews dr 
+                        WHERE dr.order_id = o.id AND dr.delivery_id = %s
+                    )
+                ORDER BY o.updated_at DESC;
+            """
             
-            reviews = [dict(row) for row in cur.fetchall()]
+            cur.execute(sql_query, (delivery_id, delivery_id))
+            
+            orders_to_review = [dict(row) for row in cur.fetchall()]
+            
+            logger.info(f"Encontrados {len(orders_to_review)} pedidos pendentes de avaliação para o entregador {delivery_id}")
+            return jsonify(orders_to_review), 200
 
-            cur.execute("SELECT AVG(rating)::float, COUNT(*) FROM delivery_reviews WHERE delivery_id = %s", (delivery_id,))
-            avg, count = cur.fetchone()
-            
-            return jsonify({
-                'reviews': reviews,
-                'average_rating': avg or 0,
-                'total_reviews': count
-            }), 200
-            
     except Exception as e:
-        print(f"Erro ao buscar avaliações do entregador: {e}")
-        return jsonify({'error': 'Erro interno do servidor'}), 500
+        logger.error(f"Erro em get_pending_delivery_review: {e}", exc_info=True)
+        return jsonify({'error': 'Erro interno do servidor ao buscar pedidos para avaliação.'}), 500
     finally:
-        if conn: conn.close()
-# ✅✅✅ FIM DA NOVA ROTA ✅✅✅
-
-# Rota GET original (pode ser mantida)
-@entregador_reviews_bp.route('/delivery/<uuid:delivery_id>/reviews', methods=['GET'])
-def list_delivery_reviews(delivery_id):
-    # ... seu código original aqui ...
-    pass
-
-# =====================================================================
-# ✅✅✅ FIM DA ROTA CORRIGIDA ✅✅✅
-# =====================================================================
+        if conn:
+            conn.close()
+            logger.info("Conexão com banco fechada em get_pending_delivery_review")
