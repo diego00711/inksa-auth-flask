@@ -13,18 +13,19 @@ delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
 @cross_origin()
 @delivery_token_required 
 def get_dashboard_stats(): 
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    conn = None
     
     try: 
-        # Use request.user_id em vez de g.profile_id
         user_id = request.user_id
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             today = date.today()
             
-            # Primeiro, buscar o ID do perfil do entregador
+            # Buscar o ID do perfil do entregador
             cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
             delivery_profile = cur.fetchone()
             
@@ -33,60 +34,93 @@ def get_dashboard_stats():
                 
             profile_id = delivery_profile['id']
 
+            # ✅ CORREÇÃO: Query simplificada e corrigida
             cur.execute("""
-                WITH today_stats AS (
-                    SELECT 
-                        COALESCE(SUM(delivery_fee), 0) AS earnings,
-                        COUNT(id) AS deliveries
-                    FROM orders 
-                    WHERE delivery_id = %s
-                    AND status = 'delivered'  -- ✅ CORRIGIDO: status em inglês
-                    AND DATE(created_at) = %s
-                ),
-                active_orders_data AS (
-                    SELECT 
-                        o.id, o.status, 
-                        COALESCE(rp.address_street || ', ' || rp.address_number, 'Endereço não disponível') AS pickup_address,
-                        o.delivery_address, o.total_amount, o.delivery_fee, o.created_at,
-                        COALESCE(cp.first_name || ' ' || cp.last_name, 'Cliente') AS client_name, 
-                        COALESCE(cp.phone, 'Telefone não disponível') AS client_phone,
-                        COALESCE(rp.restaurant_name, 'Restaurante') AS restaurant_name, 
-                        COALESCE(rp.phone, 'Telefone não disponível') AS restaurant_phone
-                    FROM orders o
-                    LEFT JOIN client_profiles cp ON o.client_id = cp.id
-                    LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                    WHERE o.delivery_id = %s
-                    AND o.status IN ('pending', 'accepted', 'delivering')  -- ✅ CORRIGIDO: status em inglês
-                    ORDER BY o.created_at ASC
-                )
+                -- Estatísticas de hoje
                 SELECT 
-                    dp.rating, dp.total_deliveries, ts.earnings AS today_earnings,
-                    ts.deliveries AS today_deliveries,
-                    (SELECT COALESCE(json_agg(a), '[]'::json) FROM active_orders_data a) AS active_orders
-                FROM delivery_profiles dp
-                CROSS JOIN today_stats ts
-                WHERE dp.id = %s
+                    COALESCE(COUNT(o.id), 0) as today_deliveries,
+                    COALESCE(SUM(o.delivery_fee), 0) as today_earnings
+                FROM orders o
+                WHERE o.delivery_id = %s
+                AND o.status = 'delivered'
+                AND DATE(o.created_at) = %s
+
+                -- Estatísticas totais do perfil
+                SELECT 
+                    COALESCE(rating, 0) as rating,
+                    COALESCE(total_deliveries, 0) as total_deliveries
+                FROM delivery_profiles 
+                WHERE id = %s
+
+                -- Pedidos ativos
+                SELECT 
+                    o.id,
+                    o.status,
+                    o.total_amount,
+                    o.delivery_fee,
+                    o.created_at,
+                    o.delivery_address,
+                    CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
+                    cp.phone as client_phone,
+                    rp.restaurant_name,
+                    rp.phone as restaurant_phone,
+                    CONCAT(rp.address_street, ', ', rp.address_number, ' - ', rp.address_neighborhood) as pickup_address
+                FROM orders o
+                LEFT JOIN client_profiles cp ON o.client_id = cp.id
+                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                WHERE o.delivery_id = %s
+                AND o.status IN ('accepted', 'preparing', 'ready', 'delivering')
+                ORDER BY o.created_at ASC
             """, (profile_id, today, profile_id, profile_id))
             
-            stats = cur.fetchone()
+            # Primeiro resultado: estatísticas de hoje
+            today_stats = cur.fetchone()
+            if not today_stats:
+                today_deliveries = 0
+                today_earnings = 0.0
+            else:
+                today_deliveries = today_stats['today_deliveries']
+                today_earnings = float(today_stats['today_earnings']) if today_stats['today_earnings'] else 0.0
+
+            # Segundo resultado: estatísticas do perfil
+            cur.nextset()
+            profile_stats = cur.fetchone()
+            if not profile_stats:
+                avg_rating = 0.0
+                total_deliveries = 0
+            else:
+                avg_rating = float(profile_stats['rating']) if profile_stats['rating'] else 0.0
+                total_deliveries = profile_stats['total_deliveries'] or 0
+
+            # Terceiro resultado: pedidos ativos
+            cur.nextset()
+            active_orders = cur.fetchall()
+            serialized_active_orders = []
             
-            if not stats:
-                return jsonify({"status": "error", "message": "Estatísticas não encontradas."}), 404
+            for order in active_orders:
+                serialized_active_orders.append({
+                    'id': order['id'],
+                    'status': order['status'],
+                    'total_amount': float(order['total_amount']) if order['total_amount'] else 0.0,
+                    'delivery_fee': float(order['delivery_fee']) if order['delivery_fee'] else 0.0,
+                    'created_at': order['created_at'].isoformat() if order['created_at'] else None,
+                    'delivery_address': order['delivery_address'],
+                    'client_name': order['client_name'],
+                    'client_phone': order['client_phone'],
+                    'restaurant_name': order['restaurant_name'],
+                    'restaurant_phone': order['restaurant_phone'],
+                    'pickup_address': order['pickup_address']
+                })
             
-            # Processar active_orders corretamente
-            active_orders = stats['active_orders'] or []
-            if isinstance(active_orders, str):
-                import json
-                active_orders = json.loads(active_orders)
-            
+            # ✅ FORMATO CORRETO esperado pelo frontend
             return jsonify({
                 "status": "success",
                 "data": {
-                    "todayDeliveries": stats['today_deliveries'] or 0,
-                    "todayEarnings": float(stats['today_earnings']) if stats['today_earnings'] is not None else 0.0,
-                    "avgRating": float(stats['rating']) if stats['rating'] is not None else 0.0,
-                    "totalDeliveries": stats['total_deliveries'] or 0, 
-                    "activeOrders": active_orders  # ✅ CORRIGIDO: não usar serialize_delivery_data aqui
+                    "todayDeliveries": today_deliveries,
+                    "todayEarnings": today_earnings,
+                    "avgRating": avg_rating,
+                    "totalDeliveries": total_deliveries,
+                    "activeOrders": serialized_active_orders
                 }
             }), 200
             
@@ -104,13 +138,15 @@ def get_dashboard_stats():
 @cross_origin()
 @delivery_token_required
 def get_earnings_history():
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    conn = None
     
     try:
         user_id = request.user_id
         
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             # Buscar o ID do perfil do entregador
             cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
@@ -125,7 +161,7 @@ def get_earnings_history():
             end_date_str = request.args.get('end_date')
 
             end_date = date.today()
-            start_date = end_date - timedelta(days=6)
+            start_date = end_date - timedelta(days=6)  # Últimos 7 dias por padrão
 
             try:
                 if start_date_str:
@@ -138,6 +174,7 @@ def get_earnings_history():
             if start_date > end_date:
                 return jsonify({"status": "error", "message": "A data de início não pode ser posterior à data de fim."}), 400
             
+            # Ganhos diários
             cur.execute("""
                 SELECT 
                     DATE(o.created_at) AS earning_date, 
@@ -145,13 +182,15 @@ def get_earnings_history():
                     COUNT(o.id) AS total_deliveries_daily
                 FROM orders o
                 WHERE o.delivery_id = %s
-                  AND o.status = 'delivered'  -- ✅ CORRIGIDO: status em inglês
+                  AND o.status = 'delivered'
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 GROUP BY DATE(o.created_at)
                 ORDER BY earning_date ASC;
             """, (profile_id, start_date, end_date))
+            
             daily_earnings_data = cur.fetchall()
 
+            # Preencher todos os dias do período, mesmo sem entregas
             full_period_earnings = {}
             current_day = start_date
             while current_day <= end_date:
@@ -175,36 +214,59 @@ def get_earnings_history():
                 }
                 for date_str, data in sorted(full_period_earnings.items())
             ]
-            
+
+            # Entregas detalhadas
             cur.execute("""
                 SELECT 
-                    o.id, o.status, 
-                    COALESCE(rp.address_street || ', ' || rp.address_number, 'Endereço não disponível') AS pickup_address,
-                    o.delivery_address, o.total_amount, o.delivery_fee, o.created_at,
-                    COALESCE(cp.first_name || ' ' || cp.last_name, 'Cliente') AS client_name, 
-                    COALESCE(cp.phone, 'Telefone não disponível') AS client_phone,
-                    COALESCE(rp.restaurant_name, 'Restaurante') AS restaurant_name, 
-                    COALESCE(rp.phone, 'Telefone não disponível') AS restaurant_phone
+                    o.id,
+                    o.status,
+                    o.total_amount,
+                    o.delivery_fee,
+                    o.created_at,
+                    o.delivery_address,
+                    CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
+                    cp.phone as client_phone,
+                    rp.restaurant_name,
+                    rp.phone as restaurant_phone,
+                    CONCAT(rp.address_street, ', ', rp.address_number, ' - ', rp.address_neighborhood) as pickup_address
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE o.delivery_id = %s
-                  AND o.status = 'delivered'  -- ✅ CORRIGIDO: status em inglês
+                  AND o.status = 'delivered'
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 ORDER BY o.created_at DESC;
             """, (profile_id, start_date, end_date))
+            
             detailed_deliveries = cur.fetchall()
+            serialized_detailed_deliveries = []
+            
+            for delivery in detailed_deliveries:
+                serialized_detailed_deliveries.append({
+                    'id': delivery['id'],
+                    'status': delivery['status'],
+                    'total_amount': float(delivery['total_amount']) if delivery['total_amount'] else 0.0,
+                    'delivery_fee': float(delivery['delivery_fee']) if delivery['delivery_fee'] else 0.0,
+                    'created_at': delivery['created_at'].isoformat() if delivery['created_at'] else None,
+                    'delivery_address': delivery['delivery_address'],
+                    'client_name': delivery['client_name'],
+                    'client_phone': delivery['client_phone'],
+                    'restaurant_name': delivery['restaurant_name'],
+                    'restaurant_phone': delivery['restaurant_phone'],
+                    'pickup_address': delivery['pickup_address']
+                })
 
             total_earnings_period = sum(d['total_earned_daily'] for d in ordered_daily_earnings)
             total_deliveries_period = sum(d['total_deliveries_daily'] for d in ordered_daily_earnings)
             
+            # ✅ FORMATO CORRETO para o histórico
             response_data = {
                 "periodStartDate": start_date.isoformat(),
                 "periodEndDate": end_date.isoformat(),
                 "totalEarningsPeriod": float(total_earnings_period),
                 "totalDeliveriesPeriod": total_deliveries_period,
-                "dailyEarnings": ordered_daily_earnings,  # ✅ CORRIGIDO: não usar serialize_delivery_data
-                "detailedDeliveries": [dict(d) for d in detailed_deliveries]  # ✅ CORRIGIDO: não usar serialize_delivery_data
+                "dailyEarnings": ordered_daily_earnings,
+                "detailedDeliveries": serialized_detailed_deliveries
             }
             
             return jsonify({"status": "success", "data": response_data}), 200
