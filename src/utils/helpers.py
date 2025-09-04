@@ -1,4 +1,4 @@
-# src/utils/helpers.py - VERSÃO ATUALIZADA (com delivery_token_required)
+# src/utils/helpers.py - VERSÃO ATUALIZADA (com suporte a OPTIONS)
 import os
 import logging
 import psycopg2
@@ -79,12 +79,17 @@ def get_db_connection():
         return None
 
 # ======================================================================
-# ✅ FUNÇÃO PRINCIPAL CORRIGIDA (sem mudanças de lógica; mantém comportamento)
+# ✅ FUNÇÃO PRINCIPAL CORRIGIDA (com suporte a OPTIONS)
 # ======================================================================
 def get_user_id_from_token(auth_header):
     """
     Valida o token JWT e extrai o user_id e o user_type diretamente dele.
+    Retorna None para requisições OPTIONS.
     """
+    # Permitir requisições OPTIONS sem autenticação
+    if request.method == "OPTIONS":
+        return None, None, None
+        
     if not auth_header or not auth_header.startswith('Bearer '):
         # Retorna uma tupla de erro que pode ser usada diretamente no return da rota
         return None, None, (jsonify({"error": "Cabeçalho de autorização inválido"}), 401)
@@ -102,7 +107,7 @@ def get_user_id_from_token(auth_header):
         user_id = user.id
         
         # ✅ CORREÇÃO: Pega o user_type diretamente do user_metadata do token.
-        # Isso é mais rápido e evita uma consulta desnecessária ao banco.
+        # Isso é mais rápido evita uma consulta desnecessária ao banco.
         user_type = user.user_metadata.get('user_type') if user.user_metadata else None
         
         if not user_type:
@@ -141,7 +146,7 @@ def get_user_info():
         return None
 
 # ======================================================================
-# ✅ FUNÇÃO AUSENTE ADICIONADA: delivery_token_required
+# ✅ FUNÇÃO AUSENTE ADICIONADA: delivery_token_required (com suporte a OPTIONS)
 # ======================================================================
 def delivery_token_required(f):
     """
@@ -149,6 +154,10 @@ def delivery_token_required(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Permitir requisições OPTIONS sem autenticação
+        if request.method == 'OPTIONS':
+            return jsonify(), 200
+            
         auth_header = request.headers.get('Authorization')
         user_id, user_type, error_response = get_user_id_from_token(auth_header)
         
