@@ -4,7 +4,7 @@ import os
 import sys
 import re
 from pathlib import Path
-from flask import Flask, jsonify, request, Blueprint
+from flask import Flask, jsonify, request, Blueprint, make_response
 from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_socketio import SocketIO
@@ -71,26 +71,51 @@ production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
     "https://clientes.inksadelivery.com.br",
-    "https://entregadores.inksadelivery.com.br",
+    "https://entregadores.inksadelelivery.com.br",
     "https://app.inksadelivery.com.br",
 ]
 
 # Padrões para desenvolvimento local e previews da Vercel
-allowed_origins_patterns = [
-    re.compile(r"http://localhost:\d+" ),
-    re.compile(r"https://.*\.vercel\.app" ) # Captura todas as URLs de deploy e preview da Vercel
+# Observação: usamos strings (padrões) que o flask-cors aceita como regex.
+dev_and_preview_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://inksa-entregadoresv0-pom9cde9s-inksa-projects.vercel.app",
+    r"https://.*\.vercel\.app"
 ]
 
-# Combina as listas
-allowed_origins = production_origins + allowed_origins_patterns
+# Combina as listas de origens
+allowed_origins_list = production_origins + dev_and_preview_origins
 
-# ✅ CORREÇÃO FINAL: Aplica o CORS a toda a aplicação, incluindo todos os Blueprints.
-# Esta é a única chamada CORS necessária.
-CORS(app, origins=allowed_origins, supports_credentials=True)
-
+# Configuração explícita do CORS para as rotas /api/*
+# - permite headers Authorization e Content-Type (essencial para preflight)
+# - inclui métodos OPTIONS
+CORS(
+    app,
+    resources={r"/api/*": {"origins": allowed_origins_list}},
+    supports_credentials=True,
+    expose_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+)
 
 # --- Configuração do SocketIO ---
+# Permitir origens para SocketIO (padrão amplo para não bloquear WS)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
+
+# --- PRE-FLIGHT HANDLER ---
+# Responder 200 para OPTIONS cedo, antes de passar por middlewares/decorators
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        # Retorna resposta vazia 200 com cabeçalhos CORS básicos (flask-cors também os adicionará)
+        resp = make_response("", 200)
+        origin = request.headers.get("Origin", "*")
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Authorization,Content-Type,X-Requested-With,Accept"
+        # Se for necessário enviar credenciais, o front-end deve usar credenciais e o server configurar corretamente.
+        return resp
 
 # --- REGISTRO DE BLUEPRINTS ---
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
@@ -98,16 +123,13 @@ app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 
-# ✅ CORREÇÃO: A chamada CORS duplicada foi removida daqui.
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
-
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
 # --- Rotas de Delivery agrupadas sob /api/delivery ---
 delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
-# ✅ CORREÇÃO: A chamada CORS duplicada foi removida daqui.
 delivery_bp.register_blueprint(delivery_auth_profile_bp)
 delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders')
 delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
@@ -115,7 +137,6 @@ app.register_blueprint(delivery_bp)
 
 # --- Rotas de Admin agrupadas sob /api/admin ---
 admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
-# ✅ CORREÇÃO: A chamada CORS duplicada foi removida daqui.
 admin_api_bp.register_blueprint(admin_bp)
 admin_api_bp.register_blueprint(payouts_bp, url_prefix='/payouts')
 admin_api_bp.register_blueprint(admin_logs_bp, url_prefix='/logs')
