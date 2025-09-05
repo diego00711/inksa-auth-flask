@@ -86,3 +86,29 @@ def upgrade():
 
 def downgrade():
     op.drop_column("delivery_profiles", "daily_goal")
+    """add online_minutes_today to delivery_profiles
+
+Revision ID: 20250905_add_online_minutes_today
+Revises: <prev_revision>
+Create Date: 2025-09-05 14:38:00.000000
+"""
+from alembic import op
+import sqlalchemy as sa
+
+# revise these values
+revision = "20250905_add_online_minutes_today"
+down_revision = "<prev_revision>"
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    # add column with server default 0 to avoid locking large tables on some setups
+    op.add_column(
+        "delivery_profiles",
+        sa.Column("online_minutes_today", sa.Integer(), nullable=False, server_default="0"),
+    )
+    # remove server_default if you don't want it persisted as default in schema
+    op.alter_column("delivery_profiles", "online_minutes_today", server_default=None)
+
+def downgrade():
+    op.drop_column("delivery_profiles", "online_minutes_today")
