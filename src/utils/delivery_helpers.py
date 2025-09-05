@@ -22,8 +22,16 @@ def serialize_delivery_data(data):
     return json.loads(json.dumps(data, cls=DeliveryJSONEncoder))
 
 def delivery_token_required(f):
+    """
+    Decorator específico para delivery que inclui verificação de perfil.
+    Para uso geral com apenas verificação de tipo de usuário, use helpers.delivery_token_required.
+    """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Permitir requisições OPTIONS sem autenticação
+        if request.method == 'OPTIONS':
+            return jsonify(), 200
+            
         conn = None 
         try:
             auth_header = request.headers.get('Authorization')

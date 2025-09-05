@@ -14,34 +14,14 @@ from decimal import Decimal
 from functools import wraps
 from flask_cors import cross_origin
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, delivery_token_required
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 delivery_auth_profile_bp = Blueprint('delivery_auth_profile', __name__)
 
-# ... (o decorador e os helpers continuam os mesmos, não precisam de alteração) ...
-def delivery_token_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if request.method == 'OPTIONS':
-            return f(*args, **kwargs)
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({"error": "Token de autorização ausente"}), 401
-        token_result = get_user_id_from_token(auth_header)
-        if isinstance(token_result, tuple) and len(token_result) == 3:
-            user_auth_id, user_type, error = token_result
-            if error:
-                return error
-        else:
-            return jsonify({"error": "Resposta de validação de token inesperada"}), 500
-        if user_type != 'delivery':
-            return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
-        g.user_auth_id = str(user_auth_id)
-        return f(*args, **kwargs)
-    return decorated_function
+# ... (using delivery_token_required from helpers.py) ...
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):

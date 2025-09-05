@@ -13,6 +13,7 @@ from functools import wraps
 from flask_cors import cross_origin
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.delivery_helpers import delivery_token_required
 from .gamification_routes import add_points_for_event
 
 # --- Blueprint e Rotas ---
@@ -29,59 +30,7 @@ def handle_options():
         response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
 
-# --- Decorator de Autenticação CORRIGIDO ---
-def delivery_token_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # ✅ CORREÇÃO: Permitir requisições OPTIONS sem autenticação
-        if request.method == "OPTIONS":
-            return f(*args, **kwargs)
-            
-        conn = None 
-        try:
-            auth_header = request.headers.get('Authorization')
-            if not auth_header:
-                return jsonify({"status": "error", "message": "Token de autorização ausente"}), 401
-            
-            # ✅ CORREÇÃO: Chama a função corretamente
-            user_auth_id, user_type, error_response = get_user_id_from_token(auth_header)
-            
-            if error_response:
-                return error_response
-            
-            # Verifica se o tipo de usuário é o correto
-            if user_type != 'delivery':
-                return jsonify({"status": "error", "message": "Acesso não autorizado. Apenas para entregadores."}), 403
-            
-            conn = get_db_connection()
-            if not conn:
-                return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-            
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
-                profile = cur.fetchone()
-            
-            if not profile:
-                return jsonify({"status": "error", "message": "Perfil de entregador não encontrado para este usuário"}), 404
-            
-            # Armazena o ID do perfil no contexto global
-            g.profile_id = str(profile['id'])
-            g.user_auth_id = str(user_auth_id)
-
-            # ✅ CORREÇÃO: Executa a função original
-            return f(*args, **kwargs)
-
-        except psycopg2.Error as e:
-            traceback.print_exc()
-            return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
-        except Exception as e:
-            traceback.print_exc()
-            return jsonify({"status": "error", "message": "Erro interno no servidor", "detail": str(e)}), 500
-        finally:
-            if conn:
-                conn.close()
-    
-    return decorated_function
+# --- Rotas de Delivery Orders ---
 
 # --- Encoder JSON Customizado ---
 class CustomJSONEncoder(json.JSONEncoder):

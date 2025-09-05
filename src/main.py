@@ -86,7 +86,22 @@ allowed_origins = production_origins + allowed_origins_patterns
 
 # ✅ CORREÇÃO FINAL: Aplica o CORS a toda a aplicação, incluindo todos os Blueprints.
 # Esta é a única chamada CORS necessária.
-CORS(app, origins=allowed_origins, supports_credentials=True)
+CORS(app, 
+     origins=allowed_origins, 
+     supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization", "Access-Control-Allow-Credentials"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"])
+
+# Add global OPTIONS handler to prevent authentication from blocking preflight requests
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify()
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization,Access-Control-Allow-Credentials")
+        response.headers.add("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS,PATCH")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
 
 
 # --- Configuração do SocketIO ---

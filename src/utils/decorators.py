@@ -1,13 +1,21 @@
+# DEPRECATED: Use delivery_token_required from helpers.py or delivery_helpers.py instead
+# This file is kept for backward compatibility but should not be used for new code
+
 from functools import wraps
 from flask import request, jsonify, g
 from config import supabase # Assume que a tua inicialização do Supabase está em config.py
 
 def delivery_token_required(f):
     """
-    Verifica se o token JWT é válido e se o utilizador é do tipo 'delivery'.
+    DEPRECATED: Use helpers.delivery_token_required or delivery_helpers.delivery_token_required instead.
+    This version does not properly handle CORS OPTIONS requests.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Add OPTIONS support for CORS compatibility
+        if request.method == 'OPTIONS':
+            return jsonify(), 200
+            
         token = None
         if 'Authorization' in request.headers:
             # O cabeçalho deve ser 'Bearer <token>'
