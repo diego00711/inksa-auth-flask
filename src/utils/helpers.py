@@ -78,7 +78,7 @@ def get_db_connection():
         logger.error(f"❌ Falha na conexão com o banco de dados: {e}", exc_info=True)
         return None
 
-# ======================================================================
+# ====================================================================== 
 # ✅ FUNÇÃO PRINCIPAL CORRIGIDA (com suporte a OPTIONS)
 # ======================================================================
 def get_user_id_from_token(auth_header):
@@ -121,7 +121,7 @@ def get_user_id_from_token(auth_header):
         logger.error(f"Erro ao decodificar ou validar token: {e}", exc_info=True)
         return None, None, (jsonify({"error": "Erro interno ao processar o token"}), 500)
 
-# ======================================================================
+# ====================================================================== 
 # Função auxiliar para obter info do usuário (mantida)
 # ======================================================================
 def get_user_info():
@@ -145,7 +145,7 @@ def get_user_info():
         logger.error(f"Erro ao obter informações do usuário: {e}", exc_info=True)
         return None
 
-# ======================================================================
+# ====================================================================== 
 # ✅ FUNÇÃO AUSENTE ADICIONADA: delivery_token_required (com suporte a OPTIONS)
 # ======================================================================
 def delivery_token_required(f):
@@ -175,7 +175,7 @@ def delivery_token_required(f):
     
     return decorated_function
 
-# ======================================================================
+# ====================================================================== 
 # ✅ FUNÇÃO AUSENTE ADICIONADA: serialize_delivery_data
 # ======================================================================
 def serialize_delivery_data(row):
