@@ -60,3 +60,29 @@ Both should return 200 instead of 500 errors.
 - The backend uses the Service Role key which bypasses RLS
 - Do NOT expose the Service Role key in frontend environments
 - The table supports all filtering and pagination features used by the admin_logs route
+
+- """add daily_goal to delivery_profiles
+
+Revision ID: xxxx_add_daily_goal
+Revises: <prev_revision>
+Create Date: 2025-09-05 14:10:00.000000
+"""
+from alembic import op
+import sqlalchemy as sa
+
+# revise these values
+revision = "xxxx_add_daily_goal"
+down_revision = "<prev_revision>"
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    op.add_column(
+        "delivery_profiles",
+        sa.Column("daily_goal", sa.Integer(), nullable=False, server_default="0"),
+    )
+    # remove server_default after applying if you prefer
+    op.alter_column("delivery_profiles", "daily_goal", server_default=None)
+
+def downgrade():
+    op.drop_column("delivery_profiles", "daily_goal")
