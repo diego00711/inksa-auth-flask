@@ -130,7 +130,7 @@ def handle_profile():
         if conn: conn.close()
 
 # ==============================================
-# ROTA DE UPLOAD DE AVATAR (COM A CORREÇÃO FINAL)
+# ROTA DE UPLOAD DE AVATAR (CORRIGIDA)
 # ==============================================
 @delivery_auth_profile_bp.route('/upload-avatar', methods=['POST'])
 @cross_origin()
@@ -159,13 +159,33 @@ def upload_avatar():
         file_path = f"public/{profile_id}.{file_ext}"
         file_content = avatar_file.read()
 
-        # ✅ CORREÇÃO FINAL: Mover o 'upsert' para fora de 'file_options'
-        supabase.storage.from_(bucket_name).upload(
-            path=file_path,
-            file=file_content,
-            file_options={"content-type": avatar_file.content_type},
-            upsert=True # Passado como um argumento de primeiro nível
-        )
+        # CORREÇÃO: Remover parâmetro 'upsert' e tratar sobrescrita manualmente
+        try:
+            # Tentar fazer upload direto primeiro
+            result = supabase.storage.from_(bucket_name).upload(
+                path=file_path,
+                file=file_content,
+                file_options={"content-type": avatar_file.content_type}
+            )
+        except Exception as upload_error:
+            # Se der erro de arquivo já existe, deletar e tentar novamente
+            if "already exists" in str(upload_error).lower() or "duplicate" in str(upload_error).lower():
+                try:
+                    # Deletar arquivo existente
+                    supabase.storage.from_(bucket_name).remove([file_path])
+                    
+                    # Tentar upload novamente
+                    result = supabase.storage.from_(bucket_name).upload(
+                        path=file_path,
+                        file=file_content,
+                        file_options={"content-type": avatar_file.content_type}
+                    )
+                except Exception as retry_error:
+                    logger.error(f"Erro no retry do upload: {str(retry_error)}")
+                    return jsonify({"error": "Erro ao fazer upload da imagem"}), 500
+            else:
+                logger.error(f"Erro no upload de avatar: {str(upload_error)}")
+                return jsonify({"error": "Erro ao fazer upload da imagem"}), 500
         
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
 
