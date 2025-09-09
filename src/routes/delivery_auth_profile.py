@@ -128,8 +128,10 @@ def handle_profile():
                 cur.execute(query, params)
                 updated_profile = cur.fetchone()
                 conn.commit()
-
-                return jsonify({"data": serialize_data(dict(updated_profile))}), 200
+                
+                updated_dict = dict(updated_profile)
+                logger.info(f"Perfil atualizado com avatar_url: {updated_dict.get('avatar_url')}")
+                return jsonify({"data": serialize_data(updated_dict)}), 200
 
     except Exception as e:
         logger.error(f"Erro em handle_profile: {e}", exc_info=True)
@@ -169,7 +171,6 @@ def upload_avatar():
         bucket_name = "delivery-avatars"
         
         # ✅ CORREÇÃO 1: Gerar nome único para evitar conflitos
-        import time
         timestamp = str(int(time.time()))
         file_path = f"public/{profile_id}_{timestamp}.{file_ext}"
         file_content = avatar_file.read()
@@ -222,7 +223,6 @@ def upload_avatar():
                     if retry_count >= max_retries:
                         return jsonify({"error": "Erro ao fazer upload da imagem"}), 500
                     
-                import time
                 time.sleep(1)  # Aguardar 1 segundo antes de tentar novamente
 
         # ✅ CORREÇÃO 4: Obter URL pública corretamente
@@ -233,32 +233,14 @@ def upload_avatar():
             logger.error(f"Erro ao gerar URL pública: {url_error}")
             return jsonify({"error": "Erro ao gerar URL da imagem"}), 500
 
-        # ✅ CORREÇÃO 5: Atualizar banco de dados com logs detalhados
+        # ✅ CORREÇÃO 5: Atualizar banco de dados
         try:
             with conn.cursor() as cur:
-                logger.info(f"Atualizando avatar_url no banco para profile_id: {profile_id}")
-                logger.info(f"URL que será salva: {public_url}")
-                
-                # Atualizar com a URL gerada
                 cur.execute("UPDATE delivery_profiles SET avatar_url = %s WHERE id = %s", (public_url, profile_id))
-                
-                # Verificar se a atualização funcionou
-                if cur.rowcount > 0:
-                    conn.commit()
-                    logger.info(f"✅ Avatar URL atualizada com sucesso no banco!")
-                    
-                    # Verificar se realmente foi salvo
-                    cur.execute("SELECT avatar_url FROM delivery_profiles WHERE id = %s", (profile_id,))
-                    check_result = cur.fetchone()
-                    logger.info(f"Verificação - URL salva no banco: {check_result[0] if check_result else 'NULL'}")
-                else:
-                    logger.error(f"❌ Nenhuma linha foi atualizada no banco!")
-                    return jsonify({"error": "Erro ao salvar URL no perfil"}), 500
-                    
+                conn.commit()
+                logger.info(f"Avatar URL atualizada no banco para profile_id: {profile_id}")
         except Exception as db_error:
             logger.error(f"Erro ao atualizar banco de dados: {db_error}")
-            if conn: 
-                conn.rollback()
             return jsonify({"error": "Erro ao salvar URL da imagem"}), 500
 
         return jsonify({"avatar_url": public_url}), 200
