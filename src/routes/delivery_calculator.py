@@ -1,4 +1,3 @@
-# src/routes/delivery_calculator.py
 
 from flask import Blueprint, request, jsonify
 from flask_cors import CORS
