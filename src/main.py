@@ -88,7 +88,6 @@ allowed_origins = production_origins + allowed_origins_patterns
 # Esta é a única chamada CORS necessária.
 CORS(app, origins=allowed_origins, supports_credentials=True)
 
-
 # --- Configuração do SocketIO ---
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
 
@@ -126,8 +125,9 @@ app.register_blueprint(admin_api_bp)
 
 # --- Rotas com prefixos customizados ---
 app.register_blueprint(mp_payment_bp, url_prefix='/payment')
-# ✅ CORREÇÃO: Removido o registro duplicado do delivery_calculator_bp
-# app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
+# ✅ CORREÇÃO: Removido o registro duplicado e incorreto do delivery_calculator_bp
+# Linha original removida: app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
+# Blueprint agora está corretamente registrado dentro do delivery_bp acima
 
 # --- Rotas de Avaliação agrupadas sob /api/review ---
 app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')
