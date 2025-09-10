@@ -1,4 +1,4 @@
-# src/routes/restaurant.py - VERSÃO FINAL SEM LÓGICA DE MENU
+# src/routes/restaurant.py - VERSÃO CORRIGIDA COM CARDÁPIO
 
 from flask import request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token
@@ -10,10 +10,20 @@ import psycopg2.extras
 from ..utils.helpers import supabase
 from functools import wraps
 import uuid
+from datetime import datetime, date, time
 
 restaurant_bp = Blueprint('restaurant_bp', __name__)
 
-# ... (o resto do seu arquivo, como handle_db_errors, etc., continua aqui)
+def make_serializable(data):
+    """Converte dados para JSON serializável"""
+    if isinstance(data, dict): 
+        return {k: make_serializable(v) for k, v in data.items()}
+    if isinstance(data, list): 
+        return [make_serializable(item) for item in data]
+    if isinstance(data, (datetime, date, time)): 
+        return data.isoformat()
+    return data
+
 def handle_db_errors(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -37,7 +47,6 @@ def handle_db_errors(f):
 @restaurant_bp.route('/', methods=['GET'])
 @handle_db_errors
 def get_all_restaurants_public(conn):
-    # ... (esta função permanece a mesma)
     user_lat = request.args.get('user_lat', type=float)
     user_lon = request.args.get('user_lon', type=float)
     
@@ -60,22 +69,37 @@ def get_all_restaurants_public(conn):
         restaurants = [dict(row) for row in cur.fetchall()]
         return jsonify({"status": "success", "data": restaurants})
 
-# ✅ ROTA DE DETALHES CORRIGIDA - NÃO BUSCA MAIS O MENU
+# ✅ ROTA DE DETALHES CORRIGIDA - AGORA INCLUI O CARDÁPIO
 @restaurant_bp.route('/<uuid:restaurant_id>', methods=['GET'])
 @handle_db_errors
 def get_restaurant_details(conn, restaurant_id):
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # 1. Buscar dados básicos do restaurante
         cur.execute("SELECT * FROM restaurant_profiles WHERE id = %s", (str(restaurant_id),))
         restaurant = cur.fetchone()
+        
         if not restaurant:
             return jsonify({"status": "error", "error": "Restaurant not found"}), 404
         
+        # 2. Buscar itens do cardápio
+        cur.execute("""
+            SELECT id, name, description, price, category, is_available, image_url, created_at
+            FROM menu_items 
+            WHERE restaurant_id = %s 
+            ORDER BY category, name
+        """, (str(restaurant_id),))
+        
+        menu_items = [make_serializable(dict(row)) for row in cur.fetchall()]
+        
+        # 3. Combinar dados do restaurante com o cardápio
+        restaurant_data = make_serializable(dict(restaurant))
+        restaurant_data['menu_items'] = menu_items
+        
         return jsonify({
             "status": "success",
-            "data": dict(restaurant)
+            "data": restaurant_data
         })
 
-# ... (o resto do arquivo, como handle_profile e upload_logo, continua o mesmo)
 @restaurant_bp.route('/profile', methods=['GET', 'PUT'])
 def handle_profile():
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
