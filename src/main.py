@@ -111,6 +111,8 @@ delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
 delivery_bp.register_blueprint(delivery_auth_profile_bp)
 delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders')
 delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
+# ✅ CORREÇÃO PRINCIPAL: Adicionando o delivery_calculator_bp no lugar correto
+delivery_bp.register_blueprint(delivery_calculator_bp)
 app.register_blueprint(delivery_bp)
 
 # --- Rotas de Admin agrupadas sob /api/admin ---
@@ -124,7 +126,8 @@ app.register_blueprint(admin_api_bp)
 
 # --- Rotas com prefixos customizados ---
 app.register_blueprint(mp_payment_bp, url_prefix='/payment')
-app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
+# ✅ CORREÇÃO: Removido o registro duplicado do delivery_calculator_bp
+# app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
 
 # --- Rotas de Avaliação agrupadas sob /api/review ---
 app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')
