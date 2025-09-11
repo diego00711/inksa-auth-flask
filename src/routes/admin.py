@@ -1,6 +1,9 @@
 import os
 import traceback
 from flask import Blueprint, request, jsonify
+# --- INÍCIO DA CORREÇÃO ---
+from flask_cors import CORS
+# --- FIM DA CORREÇÃO ---
 import psycopg2.extras
 from gotrue.errors import AuthApiError
 from datetime import datetime, timedelta
@@ -10,6 +13,12 @@ from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from ..utils.audit import log_admin_action
 
 admin_bp = Blueprint('admin_bp', __name__, url_prefix='/admin')
+
+# --- INÍCIO DA CORREÇÃO ---
+# Aplica o CORS diretamente a este blueprint, permitindo a URL específica da Vercel.
+CORS(admin_bp, origins=["https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app"], supports_credentials=True )
+# --- FIM DA CORREÇÃO ---
+
 
 # Decorador para verificar se o usuário é um administrador
 def admin_required(f):
