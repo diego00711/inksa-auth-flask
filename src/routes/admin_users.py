@@ -1,6 +1,9 @@
 import os
 import traceback
 from flask import Blueprint, request, jsonify
+# --- INÍCIO DA CORREÇÃO ---
+from flask_cors import CORS
+# --- FIM DA CORREÇÃO ---
 import psycopg2.extras
 from datetime import datetime
 from functools import wraps
@@ -10,6 +13,12 @@ from ..utils.audit import log_admin_action_auto
 
 # Create blueprint for admin users API endpoints
 admin_users_bp = Blueprint('admin_users_bp', __name__)
+
+# --- INÍCIO DA CORREÇÃO ---
+# Aplica o CORS diretamente a este blueprint, permitindo a URL específica da Vercel.
+CORS(admin_users_bp, origins=["https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app"], supports_credentials=True )
+# --- FIM DA CORREÇÃO ---
+
 
 # Decorador para verificar se o usuário é um administrador
 def admin_required(f):
@@ -267,57 +276,4 @@ def update_user(user_id):
             if not user:
                 return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
             
-            updates = []
-            params = []
-            update_details = []
-            
-            # Handle user_type (role) update
-            if 'user_type' in data:
-                new_user_type = data['user_type']
-                valid_types = ['client', 'restaurant', 'delivery', 'admin']
-                
-                if new_user_type not in valid_types:
-                    return jsonify({"status": "error", "message": f"Tipo de usuário inválido. Deve ser um de: {', '.join(valid_types)}"}), 400
-                
-                updates.append("user_type = %s")
-                params.append(new_user_type)
-                update_details.append(f"user_type: {user['user_type']} -> {new_user_type}")
-            
-            # Handle status update (for now, this is just informational since we determine status dynamically)
-            if 'status' in data:
-                new_status = data['status']
-                if new_status not in ['active', 'inactive']:
-                    return jsonify({"status": "error", "message": "Status inválido. Deve ser 'active' ou 'inactive'."}), 400
-                
-                # Note: We don't actually store status in the database yet, 
-                # but we log the intended change for audit purposes
-                update_details.append(f"status: -> {new_status}")
-            
-            # Perform updates if any
-            if updates:
-                params.append(str(user_id))
-                update_query = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
-                cur.execute(update_query, tuple(params))
-                
-                if cur.rowcount == 0:
-                    return jsonify({"status": "error", "message": "Falha ao atualizar usuário"}), 500
-                
-                conn.commit()
-            
-            # Log the update action
-            if update_details:
-                log_admin_action_auto(
-                    "UpdateUser", 
-                    f"Updated user {user['email']} (ID: {user_id}): {', '.join(update_details)}"
-                )
-            
-            return jsonify({"status": "success", "message": "Usuário atualizado com sucesso."}), 200
-
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno ao atualizar usuário.", "detail": str(e)}), 500
-    finally:
-        if conn:
-            conn.close()
+            updates =
