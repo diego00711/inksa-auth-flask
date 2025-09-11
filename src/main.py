@@ -72,13 +72,19 @@ production_origins = [
     "https://entregadores.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
 ]
+
+# CORREÇÃO: Domínios Vercel atualizados
 vercel_preview_origins = [
     "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
+    "https://inksa-admin-v0-5pv7tmapd-inksas-projects.vercel.app",
+    "https://inksa-admin-v0-awfofjwr4-inksas-projects.vercel.app",
 ]
+
 allowed_origins_patterns = [
     re.compile(r"http://localhost:\d+" ),
     re.compile(r"https://.*\.vercel\.app" ) 
 ]
+
 allowed_origins = production_origins + vercel_preview_origins + allowed_origins_patterns
 CORS(app, origins=allowed_origins, supports_credentials=True)
 
@@ -104,13 +110,11 @@ delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
 delivery_bp.register_blueprint(delivery_calculator_bp)
 app.register_blueprint(delivery_bp)
 
-# --- INÍCIO DA CORREÇÃO ---
-# Registro simplificado dos blueprints de admin
+# --- Registro simplificado dos blueprints de admin ---
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
 app.register_blueprint(admin_users_bp, url_prefix='/api/admin/users')
-# --- FIM DA CORREÇÃO ---
 
 # --- Rotas com prefixos customizados ---
 app.register_blueprint(mp_payment_bp, url_prefix='/payment')
