@@ -1,4 +1,4 @@
-# src/utils/helpers.py - VERSÃO FINAL CORRIGIDA
+# src/utils/helpers.py - VERSÃO FINAL E COMPLETA
 
 import os
 import logging
@@ -18,12 +18,13 @@ logger = logging.getLogger(__name__)
 AUDIT_DEBUG = os.environ.get("AUDIT_DEBUG", "false").lower() in ("true", "1", "yes")
 
 # --- Inicialização do Supabase ---
+supabase: Client = None
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         raise ValueError("As variáveis de ambiente SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórias.")
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     logger.info("✅ Cliente Supabase inicializado com sucesso usando Service Role Key")
 except Exception as e:
     logger.error(f"❌ Falha ao inicializar o cliente Supabase: {e}")
@@ -61,6 +62,9 @@ def get_user_id_from_token(auth_header):
     conn = None
     
     try:
+        if not supabase:
+            raise Exception("Cliente Supabase não inicializado.")
+
         # 1. Validar o token e obter o usuário do Supabase
         user_response = supabase.auth.get_user(token)
         user = user_response.user
@@ -89,6 +93,9 @@ def get_user_id_from_token(auth_header):
 
     except Exception as e:
         logger.error(f"Erro ao decodificar token ou buscar permissões: {e}", exc_info=True)
+        # Distingue entre erro de token e outros erros
+        if "JWT" in str(e) or "Token" in str(e):
+             return None, None, (jsonify({"error": f"Erro de autenticação: {e}"}), 401)
         return None, None, (jsonify({"error": "Erro interno ao processar o token"}), 500)
     finally:
         if conn:
@@ -105,37 +112,14 @@ def get_user_info():
         if not auth_header or not auth_header.startswith('Bearer '):
             return None
         token = auth_header.split(' ')[1]
+        if not supabase:
+            raise Exception("Cliente Supabase não inicializado.")
         user_response = supabase.auth.get_user(token)
         user = user_response.user
         return {'user_id': user.id, 'email': user.email} if user else None
     except Exception as e:
         logger.error(f"Erro ao obter informações do usuário: {e}", exc_info=True)
         return None
-
-def delivery_token_required(f):
-    """
-    Decorator que verifica se o token é válido e pertence a um usuário do tipo 'delivery'.
-    """
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if request.method == 'OPTIONS':
-            return jsonify(), 200
-            
-        auth_header = request.headers.get('Authorization')
-        user_id, user_type, error_response = get_user_id_from_token(auth_header)
-        
-        if error_response:
-            return error_response
-        
-        if user_type != 'delivery':
-            return jsonify({"error": "Acesso negado. Apenas usuários do tipo delivery."}), 403
-        
-        request.user_id = user_id
-        request.user_type = user_type
-        
-        return f(*args, **kwargs)
-    
-    return decorated_function
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
