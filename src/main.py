@@ -76,17 +76,22 @@ production_origins = [
     "https://app.inksadelivery.com.br",
 ]
 
+# --- INÍCIO DA CORREÇÃO ---
+# Adiciona a URL específica do preview da Vercel que está causando o problema
+vercel_preview_origins = [
+    "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
+]
+# --- FIM DA CORREÇÃO ---
+
 # Padrões para desenvolvimento local e previews da Vercel
 allowed_origins_patterns = [
     re.compile(r"http://localhost:\d+" ),
-    re.compile(r"https://.*\.vercel\.app" ) # Captura todas as URLs de deploy e preview da Vercel
+    re.compile(r"https://.*\.vercel\.app" ) 
 ]
 
 # Combina as listas
-allowed_origins = production_origins + allowed_origins_patterns
+allowed_origins = production_origins + vercel_preview_origins + allowed_origins_patterns
 
-# ✅ CORREÇÃO FINAL: Aplica o CORS a toda a aplicação, incluindo todos os Blueprints.
-# Esta é a única chamada CORS necessária.
 CORS(app, origins=allowed_origins, supports_credentials=True)
 
 # --- Configuração do SocketIO ---
@@ -98,27 +103,21 @@ app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
-
-# ✅ CORREÇÃO: A chamada CORS duplicada foi removida daqui.
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
-
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
 # --- Rotas de Delivery agrupadas sob /api/delivery ---
 delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
-# ✅ CORREÇÃO: A chamada CORS duplicada foi removida daqui.
 delivery_bp.register_blueprint(delivery_auth_profile_bp)
 delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders')
 delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
-# ✅ CORREÇÃO PRINCIPAL: Adicionando o delivery_calculator_bp no lugar correto
 delivery_bp.register_blueprint(delivery_calculator_bp)
 app.register_blueprint(delivery_bp)
 
 # --- Rotas de Admin agrupadas sob /api/admin ---
 admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
-# ✅ CORREÇÃO: A chamada CORS duplicada foi removida daqui.
 admin_api_bp.register_blueprint(admin_bp)
 admin_api_bp.register_blueprint(payouts_bp, url_prefix='/payouts')
 admin_api_bp.register_blueprint(admin_logs_bp, url_prefix='/logs')
@@ -127,9 +126,6 @@ app.register_blueprint(admin_api_bp)
 
 # --- Rotas com prefixos customizados ---
 app.register_blueprint(mp_payment_bp, url_prefix='/payment')
-# ✅ CORREÇÃO: Removido o registro duplicado e incorreto do delivery_calculator_bp
-# Linha original removida: app.register_blueprint(delivery_calculator_bp, url_prefix='/delivery-calc')
-# Blueprint agora está corretamente registrado dentro do delivery_bp acima
 
 # --- Rotas de Avaliação agrupadas sob /api/review ---
 app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')
