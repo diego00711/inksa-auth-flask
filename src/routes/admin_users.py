@@ -1,9 +1,7 @@
 import os
 import traceback
 from flask import Blueprint, request, jsonify
-# --- INÍCIO DA CORREÇÃO ---
 from flask_cors import CORS
-# --- FIM DA CORREÇÃO ---
 import psycopg2.extras
 from datetime import datetime
 from functools import wraps
@@ -14,11 +12,8 @@ from ..utils.audit import log_admin_action_auto
 # Create blueprint for admin users API endpoints
 admin_users_bp = Blueprint('admin_users_bp', __name__)
 
-# --- INÍCIO DA CORREÇÃO ---
 # Aplica o CORS diretamente a este blueprint, permitindo a URL específica da Vercel.
 CORS(admin_users_bp, origins=["https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app"], supports_credentials=True )
-# --- FIM DA CORREÇÃO ---
-
 
 # Decorador para verificar se o usuário é um administrador
 def admin_required(f):
@@ -39,7 +34,6 @@ def admin_required(f):
 def get_user_status(user_data):
     """
     Determine user status based on profile data and user_type.
-    For now, we'll consider users with profile data as 'active' and those without as 'inactive'.
     """
     if user_data.get('full_name') and user_data.get('full_name').strip():
         return 'active'
@@ -50,18 +44,8 @@ def get_user_status(user_data):
 @admin_required
 def list_users():
     """
-    GET /api/users
     List users with pagination and filtering support.
-    Query params:
-    - page (int, default 1)
-    - page_size (int, default 20, max 100) 
-    - query (string, optional) - fuzzy search on email/name
-    - status ("active"|"inactive"|"all", default "all")
-    - role (string, optional) - filter by user_type
-    - sort (string, optional, default "created_at:desc")
     """
-    
-    # Parse query parameters
     page = max(1, int(request.args.get('page', 1)))
     page_size = min(100, max(1, int(request.args.get('page_size', 20))))
     query = request.args.get('query', '').strip()
@@ -69,7 +53,6 @@ def list_users():
     role_filter = request.args.get('role', '').strip()
     sort_param = request.args.get('sort', 'created_at:desc').strip()
     
-    # Parse sort parameter
     if ':' in sort_param:
         sort_field, sort_direction = sort_param.split(':', 1)
         sort_direction = sort_direction.upper()
@@ -79,7 +62,6 @@ def list_users():
         sort_field = sort_param
         sort_direction = 'DESC'
     
-    # Validate sort field
     allowed_sort_fields = ['created_at', 'email', 'user_type', 'full_name']
     if sort_field not in allowed_sort_fields:
         sort_field = 'created_at'
@@ -90,7 +72,6 @@ def list_users():
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Build base query
             base_query = """
                 SELECT 
                     u.id, u.email, u.user_type, u.created_at,
@@ -110,12 +91,10 @@ def list_users():
             where_clauses = []
             params = []
             
-            # Role filter (user_type)
             if role_filter:
                 where_clauses.append("u.user_type = %s")
                 params.append(role_filter)
             
-            # Query filter (fuzzy search on email and name)
             if query:
                 where_clauses.append("""
                     (u.email ILIKE %s OR 
@@ -128,52 +107,28 @@ def list_users():
                 query_param = f'%{query}%'
                 params.extend([query_param, query_param])
             
-            # Build WHERE clause
             where_sql = ""
             if where_clauses:
                 where_sql = " WHERE " + " AND ".join(where_clauses)
             
-            # Count total records
-            count_query = f"""
-                SELECT COUNT(DISTINCT u.id) as total
-                FROM users u
-                LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
-                LEFT JOIN restaurant_profiles rp ON u.id = rp.id AND u.user_type = 'restaurant'
-                LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
-                {where_sql}
-            """
-            
+            count_query = f"SELECT COUNT(DISTINCT u.id) as total FROM users u LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client' LEFT JOIN restaurant_profiles rp ON u.id = rp.id AND u.user_type = 'restaurant' LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery' {where_sql}"
             cur.execute(count_query, tuple(params))
             total_count = cur.fetchone()['total']
             
-            # Build final query with pagination
-            final_query = f"""
-                {base_query}
-                {where_sql}
-                ORDER BY {sort_field} {sort_direction}
-                LIMIT %s OFFSET %s
-            """
-            
+            final_query = f"{base_query} {where_sql} ORDER BY {sort_field} {sort_direction} LIMIT %s OFFSET %s"
             offset = (page - 1) * page_size
             cur.execute(final_query, tuple(params + [page_size, offset]))
             users = [dict(row) for row in cur.fetchall()]
             
-            # Add status to each user and filter by status if needed
             filtered_users = []
             for user in users:
                 user['status'] = get_user_status(user)
-                
-                # Apply status filter
                 if status_filter == 'all' or user['status'] == status_filter:
                     filtered_users.append(user)
             
-            # If we filtered by status, we need to adjust total count
-            # For simplicity, we'll use the current approach but note this isn't perfect for pagination
             if status_filter != 'all':
-                # This is a simplified approach - in production you'd want to handle this in the SQL
                 total_count = len(filtered_users)
             
-            # Format response
             response = {
                 "items": filtered_users,
                 "total": total_count,
@@ -194,7 +149,6 @@ def list_users():
 @admin_required
 def get_user_detail(user_id):
     """
-    GET /api/users/{id}
     Get detailed information about a specific user.
     """
     conn = get_db_connection()
@@ -203,7 +157,6 @@ def get_user_detail(user_id):
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Get user with profile details
             query = """
                 SELECT 
                     u.id, u.email, u.user_type, u.created_at,
@@ -214,16 +167,13 @@ def get_user_detail(user_id):
                     ) AS full_name,
                     COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
                     COALESCE(cp.phone, rp.phone, dp.phone) AS phone,
-                    -- Client profile details
                     cp.first_name, cp.last_name, cp.cpf,
                     cp.address_street, cp.address_number, cp.address_neighborhood,
                     cp.address_city as client_city, cp.address_state, cp.address_zipcode,
-                    -- Restaurant profile details  
                     rp.restaurant_name, rp.business_name, rp.cnpj,
                     rp.address_street as rest_address_street, rp.address_number as rest_address_number,
                     rp.address_neighborhood as rest_address_neighborhood, rp.address_city as rest_address_city,
                     rp.address_state as rest_address_state, rp.address_zipcode as rest_address_zipcode,
-                    -- Delivery profile details
                     dp.first_name as delivery_first_name, dp.last_name as delivery_last_name,
                     dp.cpf as delivery_cpf, dp.birth_date, dp.vehicle_type
                 FROM users u
@@ -255,9 +205,7 @@ def get_user_detail(user_id):
 @admin_required  
 def update_user(user_id):
     """
-    PATCH /api/users/{id}
     Partial update for user status/role.
-    Expected payload: { "user_type": "client|restaurant|delivery|admin", "status": "active|inactive" }
     """
     data = request.get_json()
     if not data:
@@ -269,11 +217,57 @@ def update_user(user_id):
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Check if user exists
             cur.execute("SELECT id, user_type, email FROM users WHERE id = %s", (str(user_id),))
             user = cur.fetchone()
             
             if not user:
                 return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
             
-            updates =
+            updates = []
+            params = []
+            update_details = []
+            
+            if 'user_type' in data:
+                new_user_type = data['user_type']
+                valid_types = ['client', 'restaurant', 'delivery', 'admin']
+                
+                if new_user_type not in valid_types:
+                    return jsonify({"status": "error", "message": f"Tipo de usuário inválido. Deve ser um de: {', '.join(valid_types)}"}), 400
+                
+                updates.append("user_type = %s")
+                params.append(new_user_type)
+                update_details.append(f"user_type: {user['user_type']} -> {new_user_type}")
+            
+            if 'status' in data:
+                new_status = data['status']
+                if new_status not in ['active', 'inactive']:
+                    return jsonify({"status": "error", "message": "Status inválido. Deve ser 'active' ou 'inactive'."}), 400
+                update_details.append(f"status: -> {new_status}")
+            
+            if updates:
+                params.append(str(user_id))
+                update_query = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
+                cur.execute(update_query, tuple(params))
+                
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return jsonify({"status": "error", "message": "Falha ao atualizar usuário"}), 500
+                
+                conn.commit()
+            
+            if update_details:
+                log_admin_action_auto(
+                    "UpdateUser", 
+                    f"Updated user {user['email']} (ID: {user_id}): {', '.join(update_details)}"
+                )
+            
+            return jsonify({"status": "success", "message": "Usuário atualizado com sucesso."}), 200
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Erro interno ao atualizar usuário.", "detail": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
