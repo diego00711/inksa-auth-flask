@@ -24,6 +24,7 @@ try:
     from src.routes.auth import auth_bp
     from src.routes.orders import orders_bp
     from src.routes.menu import menu_bp
+    from src.routes.upload import upload_bp
     from src.routes.restaurant import restaurant_bp
     from src.routes.payment import mp_payment_bp
     from src.routes.delivery_calculator import delivery_calculator_bp
@@ -97,6 +98,7 @@ app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
+app.register_blueprint(upload_bp, url_prefix='/api/upload')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
