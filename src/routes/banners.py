@@ -1,4 +1,4 @@
-# src/routes/banners.py
+# src/routes/banners.py - VERSÃO COMPLETA COM 'text_position'
 import uuid
 import json
 import logging
@@ -37,13 +37,11 @@ def get_banners():
     conn = None
     
     try:
-        # Verificar se há token de autenticação
         auth_header = request.headers.get('Authorization')
         is_admin = False
         
         if auth_header:
             user_auth_id, user_type, error = get_user_id_from_token(auth_header)
-            # CORREÇÃO: Aceitar tanto admin quanto restaurant
             if not error and user_type in ['admin', 'restaurant']:
                 is_admin = True
         
@@ -54,18 +52,18 @@ def get_banners():
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             if is_admin:
-                # Admin vê todos os banners
+                # Admin vê todos os banners, incluindo a posição do texto
                 query = """
                     SELECT id, title, subtitle, image_url, link_url, is_active, 
-                           display_order, created_at, updated_at
+                           display_order, created_at, updated_at, text_position
                     FROM banners 
                     ORDER BY display_order ASC, created_at DESC
                 """
                 cur.execute(query)
             else:
-                # Clientes veem apenas banners ativos
+                # Clientes veem apenas banners ativos, incluindo a posição do texto
                 query = """
-                    SELECT id, title, subtitle, image_url, link_url, display_order
+                    SELECT id, title, subtitle, image_url, link_url, display_order, text_position
                     FROM banners 
                     WHERE is_active = true 
                     ORDER BY display_order ASC, created_at DESC
@@ -98,7 +96,6 @@ def create_banner():
             logger.warning(f"Erro de autenticação: {error}")
             return error
         
-        # CORREÇÃO: Aceitar tanto admin quanto restaurant
         if user_type not in ['admin', 'restaurant']:
             return jsonify({"error": "Apenas administradores podem criar banners"}), 403
         
@@ -112,7 +109,6 @@ def create_banner():
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Obter o próximo display_order
             cur.execute("SELECT COALESCE(MAX(display_order), -1) + 1 FROM banners")
             next_order = cur.fetchone()[0]
             
@@ -124,6 +120,7 @@ def create_banner():
                 'link_url': data.get('link_url'),
                 'is_active': data.get('is_active', True),
                 'display_order': data.get('display_order', next_order),
+                'text_position': data.get('text_position', 'center'),  # CAMPO ADICIONADO
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
             }
@@ -147,13 +144,10 @@ def create_banner():
 
     except Exception as e:
         logger.error(f"Erro inesperado em create_banner: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
-            logger.info("Conexão com banco fechada em create_banner")
+        if conn: conn.close()
 
 
 @banners_bp.route('/<uuid:banner_id>', methods=['GET'])
@@ -163,13 +157,11 @@ def get_banner(banner_id):
     conn = None
     
     try:
-        # Verificar se é admin para mostrar dados completos
         auth_header = request.headers.get('Authorization')
         is_admin = False
         
         if auth_header:
             user_auth_id, user_type, error = get_user_id_from_token(auth_header)
-            # CORREÇÃO: Aceitar tanto admin quanto restaurant
             if not error and user_type in ['admin', 'restaurant']:
                 is_admin = True
 
@@ -181,7 +173,7 @@ def get_banner(banner_id):
             if is_admin:
                 query = "SELECT * FROM banners WHERE id = %s"
             else:
-                query = "SELECT id, title, subtitle, image_url, link_url, display_order FROM banners WHERE id = %s AND is_active = true"
+                query = "SELECT id, title, subtitle, image_url, link_url, display_order, text_position FROM banners WHERE id = %s AND is_active = true"
             
             cur.execute(query, (str(banner_id),))
             banner = cur.fetchone()
@@ -195,8 +187,7 @@ def get_banner(banner_id):
         logger.error(f"Erro em get_banner: {e}", exc_info=True)
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 @banners_bp.route('/<uuid:banner_id>', methods=['PUT'])
@@ -207,10 +198,8 @@ def update_banner(banner_id):
     
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
         
-        # CORREÇÃO: Aceitar tanto admin quanto restaurant
         if user_type not in ['admin', 'restaurant']:
             return jsonify({"error": "Apenas administradores podem atualizar banners"}), 403
 
@@ -223,18 +212,15 @@ def update_banner(banner_id):
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Verificar se o banner existe
             cur.execute("SELECT * FROM banners WHERE id = %s", (str(banner_id),))
-            banner = cur.fetchone()
-            
-            if not banner:
+            if not cur.fetchone():
                 return jsonify({"error": "Banner não encontrado"}), 404
 
-            # Campos que podem ser atualizados
             update_fields = []
             update_values = []
             
-            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order']
+            # CAMPO 'text_position' ADICIONADO À LISTA
+            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position']
             
             for field in updatable_fields:
                 if field in data:
@@ -244,7 +230,6 @@ def update_banner(banner_id):
             if not update_fields:
                 return jsonify({"error": "Nenhum campo válido para atualização"}), 400
             
-            # Adicionar updated_at
             update_fields.append("updated_at = %s")
             update_values.append(datetime.now())
             update_values.append(str(banner_id))
@@ -263,12 +248,10 @@ def update_banner(banner_id):
 
     except Exception as e:
         logger.error(f"Erro em update_banner: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 @banners_bp.route('/<uuid:banner_id>', methods=['DELETE'])
@@ -279,10 +262,8 @@ def delete_banner(banner_id):
     
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
         
-        # CORREÇÃO: Aceitar tanto admin quanto restaurant
         if user_type not in ['admin', 'restaurant']:
             return jsonify({"error": "Apenas administradores podem deletar banners"}), 403
 
@@ -291,14 +272,10 @@ def delete_banner(banner_id):
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Verificar se o banner existe
             cur.execute("SELECT id FROM banners WHERE id = %s", (str(banner_id),))
-            banner = cur.fetchone()
-            
-            if not banner:
+            if not cur.fetchone():
                 return jsonify({"error": "Banner não encontrado"}), 404
             
-            # Deletar o banner
             cur.execute("DELETE FROM banners WHERE id = %s", (str(banner_id),))
             conn.commit()
             
@@ -307,12 +284,10 @@ def delete_banner(banner_id):
 
     except Exception as e:
         logger.error(f"Erro em delete_banner: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 @banners_bp.route('/<uuid:banner_id>/toggle-status', methods=['PUT'])
@@ -323,10 +298,8 @@ def toggle_banner_status(banner_id):
     
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
         
-        # CORREÇÃO: Aceitar tanto admin quanto restaurant
         if user_type not in ['admin', 'restaurant']:
             return jsonify({"error": "Apenas administradores podem alterar status de banners"}), 403
 
@@ -335,14 +308,12 @@ def toggle_banner_status(banner_id):
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Obter status atual
             cur.execute("SELECT is_active FROM banners WHERE id = %s", (str(banner_id),))
             banner = cur.fetchone()
             
             if not banner:
                 return jsonify({"error": "Banner não encontrado"}), 404
             
-            # Inverter o status
             new_status = not banner['is_active']
             
             cur.execute(
@@ -363,12 +334,10 @@ def toggle_banner_status(banner_id):
 
     except Exception as e:
         logger.error(f"Erro em toggle_banner_status: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 @banners_bp.route('/reorder', methods=['PUT'])
@@ -379,10 +348,8 @@ def reorder_banners():
     
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
         
-        # CORREÇÃO: Aceitar tanto admin quanto restaurant
         if user_type not in ['admin', 'restaurant']:
             return jsonify({"error": "Apenas administradores podem reordenar banners"}), 403
 
@@ -399,9 +366,9 @@ def reorder_banners():
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Atualizar a ordem de cada banner
             for item in banner_orders:
                 if 'id' not in item or 'display_order' not in item:
+                    conn.rollback()
                     return jsonify({"error": "Cada item deve conter 'id' e 'display_order'"}), 400
                 
                 cur.execute(
@@ -416,12 +383,10 @@ def reorder_banners():
 
     except Exception as e:
         logger.error(f"Erro em reorder_banners: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 @banners_bp.route('/stats', methods=['GET'])
@@ -432,10 +397,8 @@ def get_banner_stats():
     
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
-        if error:
-            return error
+        if error: return error
         
-        # CORREÇÃO: Aceitar tanto admin quanto restaurant
         if user_type not in ['admin', 'restaurant']:
             return jsonify({"error": "Apenas administradores podem ver estatísticas"}), 403
 
@@ -444,7 +407,6 @@ def get_banner_stats():
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Contar banners por status
             cur.execute("""
                 SELECT 
                     COUNT(*) as total,
@@ -462,5 +424,4 @@ def get_banner_stats():
         logger.error(f"Erro em get_banner_stats: {e}", exc_info=True)
         return jsonify({"error": "Erro interno no servidor"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
