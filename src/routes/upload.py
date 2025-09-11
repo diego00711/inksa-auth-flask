@@ -1,4 +1,4 @@
-# src/routes/upload.py
+# src/routes/upload.py - VERSÃO CORRIGIDA
 import os
 import uuid
 import logging
@@ -66,42 +66,76 @@ def upload_banner_image():
         try:
             # Ler conteúdo do arquivo
             file_content = file.read()
+            logger.info(f"Arquivo lido: {len(file_content)} bytes")
             
-            # Upload para o bucket 'banner-images'
-            result = supabase.storage.from_('banner-images').upload(
+            # CORREÇÃO: Upload para o bucket 'banner-images' com a sintaxe correta
+            response = supabase.storage.from_('banner-images').upload(
                 path=unique_filename,
                 file=file_content,
                 file_options={
-                    "content-type": f"image/{file_extension}",
-                    "upsert": False
+                    "content-type": f"image/{file_extension}"
                 }
             )
             
-            if result.error:
-                logger.error(f"Erro no upload para Supabase: {result.error}")
-                return jsonify({"error": "Erro ao fazer upload da imagem"}), 500
+            logger.info(f"Resposta do upload: {response}")
+            
+            # Verificar se houve erro no upload
+            if hasattr(response, 'error') and response.error:
+                logger.error(f"Erro no upload para Supabase: {response.error}")
+                return jsonify({"error": f"Erro ao fazer upload: {response.error}"}), 500
             
             # Obter URL pública da imagem
-            public_url = supabase.storage.from_('banner-images').get_public_url(unique_filename)
-            
-            if not public_url:
-                return jsonify({"error": "Erro ao gerar URL pública da imagem"}), 500
-            
-            logger.info(f"Upload realizado com sucesso: {unique_filename}")
-            
-            return jsonify({
-                "status": "success",
-                "message": "Imagem enviada com sucesso",
-                "data": {
-                    "filename": unique_filename,
-                    "url": public_url,
-                    "size": file_size
-                }
-            }), 200
+            try:
+                public_url_response = supabase.storage.from_('banner-images').get_public_url(unique_filename)
+                
+                if hasattr(public_url_response, 'error') and public_url_response.error:
+                    logger.error(f"Erro ao obter URL pública: {public_url_response.error}")
+                    return jsonify({"error": "Erro ao gerar URL pública da imagem"}), 500
+                
+                # A URL pode estar em diferentes formatos dependendo da versão do Supabase
+                if hasattr(public_url_response, 'data'):
+                    public_url = public_url_response.data
+                elif hasattr(public_url_response, 'publicURL'):
+                    public_url = public_url_response.publicURL
+                elif isinstance(public_url_response, str):
+                    public_url = public_url_response
+                else:
+                    # Construir URL manualmente se necessário
+                    supabase_url = os.environ.get('SUPABASE_URL', '').rstrip('/')
+                    public_url = f"{supabase_url}/storage/v1/object/public/banner-images/{unique_filename}"
+                
+                logger.info(f"Upload realizado com sucesso: {unique_filename}")
+                logger.info(f"URL pública: {public_url}")
+                
+                return jsonify({
+                    "status": "success",
+                    "message": "Imagem enviada com sucesso",
+                    "data": {
+                        "filename": unique_filename,
+                        "url": public_url,
+                        "size": file_size
+                    }
+                }), 200
+                
+            except Exception as url_error:
+                logger.error(f"Erro ao gerar URL pública: {url_error}")
+                # Tentar construir URL manualmente
+                supabase_url = os.environ.get('SUPABASE_URL', '').rstrip('/')
+                public_url = f"{supabase_url}/storage/v1/object/public/banner-images/{unique_filename}"
+                
+                return jsonify({
+                    "status": "success",
+                    "message": "Imagem enviada com sucesso",
+                    "data": {
+                        "filename": unique_filename,
+                        "url": public_url,
+                        "size": file_size
+                    }
+                }), 200
             
         except Exception as storage_error:
-            logger.error(f"Erro no storage do Supabase: {storage_error}")
-            return jsonify({"error": "Erro interno no serviço de upload"}), 500
+            logger.error(f"Erro no storage do Supabase: {storage_error}", exc_info=True)
+            return jsonify({"error": f"Erro interno no serviço de upload: {str(storage_error)}"}), 500
         
     except Exception as e:
         logger.error(f"Erro inesperado em upload_banner_image: {e}", exc_info=True)
@@ -128,10 +162,10 @@ def delete_banner_image(filename):
         
         try:
             # Deletar do Supabase Storage
-            result = supabase.storage.from_('banner-images').remove([filename])
+            response = supabase.storage.from_('banner-images').remove([filename])
             
-            if result.error:
-                logger.error(f"Erro ao deletar do Supabase: {result.error}")
+            if hasattr(response, 'error') and response.error:
+                logger.error(f"Erro ao deletar do Supabase: {response.error}")
                 return jsonify({"error": "Erro ao deletar imagem"}), 500
             
             logger.info(f"Imagem deletada com sucesso: {filename}")
