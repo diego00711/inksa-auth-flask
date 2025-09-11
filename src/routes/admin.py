@@ -1,9 +1,7 @@
 import os
 import traceback
 from flask import Blueprint, request, jsonify
-# --- INÍCIO DA CORREÇÃO ---
 from flask_cors import CORS
-# --- FIM DA CORREÇÃO ---
 import psycopg2.extras
 from gotrue.errors import AuthApiError
 from datetime import datetime, timedelta
@@ -12,13 +10,13 @@ from functools import wraps
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from ..utils.audit import log_admin_action
 
-admin_bp = Blueprint('admin_bp', __name__, url_prefix='/admin')
-
 # --- INÍCIO DA CORREÇÃO ---
-# Aplica o CORS diretamente a este blueprint, permitindo a URL específica da Vercel.
-CORS(admin_bp, origins=["https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app"], supports_credentials=True )
+# O url_prefix foi removido daqui para ser definido no main.py
+admin_bp = Blueprint('admin_bp', __name__)
 # --- FIM DA CORREÇÃO ---
 
+# Aplica o CORS diretamente a este blueprint, permitindo a URL específica da Vercel.
+CORS(admin_bp, origins=["https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app"], supports_credentials=True )
 
 # Decorador para verificar se o usuário é um administrador
 def admin_required(f):
@@ -60,7 +58,6 @@ def admin_login():
             supabase.auth.sign_out()
             return jsonify({"status": "error", "message": "Acesso não permitido. Apenas para administradores."}), 403
 
-        # Log successful admin login
         log_admin_action(user.email, "Login", f"Admin login successful", request)
 
         return jsonify({
@@ -88,55 +85,35 @@ def admin_login():
 @admin_bp.route('/logout', methods=['POST'])
 @admin_required
 def admin_logout():
-    """Admin logout route with audit logging"""
     try:
         from ..utils.audit import log_admin_action_auto
-        
-        # Log logout action before signing out
         log_admin_action_auto("Logout", "Admin logout")
-        
-        # Sign out from Supabase
         supabase.auth.sign_out()
-        
-        return jsonify({
-            "status": "success",
-            "message": "Logout realizado com sucesso"
-        }), 200
-        
+        return jsonify({"status": "success", "message": "Logout realizado com sucesso"}), 200
     except Exception as e:
-        return jsonify({
-            "status": "error", 
-            "message": f"Erro durante logout: {str(e)}"
-        }), 500
+        return jsonify({"status": "error", "message": f"Erro durante logout: {str(e)}"}), 500
 
 @admin_bp.route('/users', methods=['GET'])
 @admin_required
 def get_all_users():
     filter_user_type = request.args.get('user_type', None)
     filter_city = request.args.get('city', None)
-
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             params = []
             sql_query = """
                 SELECT 
                     u.id, u.email, u.user_type, u.created_at,
-                    COALESCE(
-                        cp.first_name || ' ' || cp.last_name, 
-                        rp.restaurant_name, 
-                        dp.first_name || ' ' || dp.last_name
-                    ) AS full_name,
+                    COALESCE(cp.first_name || ' ' || cp.last_name, rp.restaurant_name, dp.first_name || ' ' || dp.last_name) AS full_name,
                     COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city
                 FROM users u
                 LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
                 LEFT JOIN restaurant_profiles rp ON u.id = rp.id AND u.user_type = 'restaurant'
                 LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
             """
-            
             where_clauses = []
             if filter_user_type and filter_user_type.lower() != 'todos':
                 where_clauses.append("u.user_type = %s")
@@ -146,13 +123,10 @@ def get_all_users():
                 params.append(f'%{filter_city}%')
             if where_clauses:
                 sql_query += " WHERE " + " AND ".join(where_clauses)
-
             sql_query += " ORDER BY u.created_at DESC;"
             cur.execute(sql_query, tuple(params))
             users = [dict(row) for row in cur.fetchall()]
-
         return jsonify({"status": "success", "data": users}), 200
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao buscar usuários.", "detail": str(e)}), 500
@@ -166,20 +140,12 @@ def get_all_restaurants():
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            sql_query = """
-                SELECT rp.*, u.created_at
-                FROM restaurant_profiles rp
-                JOIN users u ON rp.id = u.id
-                ORDER BY u.created_at DESC;
-            """
+            sql_query = "SELECT rp.*, u.created_at FROM restaurant_profiles rp JOIN users u ON rp.id = u.id ORDER BY u.created_at DESC;"
             cur.execute(sql_query)
             restaurants = [dict(row) for row in cur.fetchall()]
-
         return jsonify({"status": "success", "data": restaurants}), 200
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao buscar restaurantes.", "detail": str(e)}), 500
@@ -193,7 +159,6 @@ def get_kpi_summary():
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             sql_query = """
@@ -206,7 +171,6 @@ def get_kpi_summary():
             """
             cur.execute(sql_query)
             kpis = cur.fetchone()
-
         kpi_data = {
             "totalRevenue": float(kpis['totalrevenue']),
             "averageTicket": float(kpis['averageticket']),
@@ -214,9 +178,7 @@ def get_kpi_summary():
             "totalClients": kpis['totalclients'],
             "newClientsToday": kpis['newclientstoday'],
         }
-        
         return jsonify({"status": "success", "data": kpi_data}), 200
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao buscar KPIs.", "detail": str(e)}), 500
@@ -229,33 +191,19 @@ def get_kpi_summary():
 def get_revenue_chart_data():
     conn = get_db_connection()
     if not conn: return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             sql_query = """
-                WITH last_7_days AS (
-                    SELECT generate_series(
-                        current_date - interval '6 days',
-                        current_date,
-                        '1 day'
-                    )::date AS day
-                )
-                SELECT
-                    to_char(d.day, 'DD/MM') AS formatted_date,
-                    COALESCE(SUM(o.total_amount), 0) AS daily_revenue
-                FROM last_7_days d
-                LEFT JOIN orders o ON DATE(o.created_at) = d.day AND o.status_pagamento = 'approved'
-                GROUP BY d.day
-                ORDER BY d.day;
+                WITH last_7_days AS (SELECT generate_series(current_date - interval '6 days', current_date, '1 day')::date AS day)
+                SELECT to_char(d.day, 'DD/MM') AS formatted_date, COALESCE(SUM(o.total_amount), 0) AS daily_revenue
+                FROM last_7_days d LEFT JOIN orders o ON DATE(o.created_at) = d.day AND o.status_pagamento = 'approved'
+                GROUP BY d.day ORDER BY d.day;
             """
             cur.execute(sql_query)
             chart_data = [dict(row) for row in cur.fetchall()]
-        
         for item in chart_data:
             item['daily_revenue'] = float(item['daily_revenue'])
-
         return jsonify({"status": "success", "data": chart_data}), 200
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao buscar dados do gráfico.", "detail": str(e)}), 500
@@ -268,32 +216,23 @@ def get_recent_orders():
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             sql_query = """
-                SELECT 
-                    o.id,
-                    o.total_amount,
-                    o.status,
-                    o.created_at,
+                SELECT o.id, o.total_amount, o.status, o.created_at,
                     COALESCE(cp.first_name || ' ' || cp.last_name, 'Cliente Anônimo') AS client_name,
                     COALESCE(rp.restaurant_name, 'Restaurante Desconhecido') AS restaurant_name
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.user_id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                ORDER BY o.created_at DESC
-                LIMIT 5;
+                ORDER BY o.created_at DESC LIMIT 5;
             """
             cur.execute(sql_query)
             recent_orders = [dict(row) for row in cur.fetchall()]
-
         for order in recent_orders:
             order['total_amount'] = float(order['total_amount'])
             order['created_at'] = order['created_at'].isoformat()
-
         return jsonify({"status": "success", "data": recent_orders}), 200
-        
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao buscar pedidos recentes.", "detail": str(e)}), 500
@@ -301,18 +240,15 @@ def get_recent_orders():
         if conn:
             conn.close()
 
-# Endpoint para ATUALIZAR os dados de um restaurante
 @admin_bp.route('/restaurants/<uuid:restaurant_id>', methods=['PUT'])
 @admin_required
 def update_restaurant(restaurant_id):
     data = request.get_json()
     if not data:
         return jsonify({"status": "error", "message": "Nenhum dado enviado para atualização."}), 400
-
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-
     try:
         with conn.cursor() as cur:
             set_parts = []
@@ -321,55 +257,33 @@ def update_restaurant(restaurant_id):
                 if key.isalnum():
                     set_parts.append(f"{key} = %s")
                     values.append(value)
-
             if not set_parts:
                 return jsonify({"status": "error", "message": "Nenhum campo válido para atualização."}), 400
-
             values.append(str(restaurant_id))
-            
-            sql_query = f"""
-                UPDATE restaurant_profiles
-                SET {', '.join(set_parts)}
-                WHERE id = %s;
-            """
-            
+            sql_query = f"UPDATE restaurant_profiles SET {', '.join(set_parts)} WHERE id = %s;"
             cur.execute(sql_query, tuple(values))
-
             if cur.rowcount == 0:
                 return jsonify({"status": "error", "message": "Restaurante não encontrado."}), 404
-
             conn.commit()
-
-            # Log restaurant update action
             from ..utils.audit import log_admin_action_auto
             restaurant_fields = ', '.join(data.keys())
             log_admin_action_auto("UpdateRestaurant", f"Updated restaurant {restaurant_id} fields: {restaurant_fields}")
-
         return jsonify({"status": "success", "message": "Restaurante atualizado com sucesso."}), 200
-
     except Exception as e:
-        if conn:
-            conn.rollback() 
+        if conn: conn.rollback() 
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao atualizar o restaurante.", "detail": str(e)}), 500
     finally:
         if conn:
             conn.close()
 
-# NOVO ENDPOINT: DASHBOARD CONSOLIDADO
 @admin_bp.route('/dashboard', methods=['GET'])
 @admin_required
 def get_dashboard():
-    """
-    Retorna todos os dados necessários para o dashboard admin em uma única resposta:
-    KPIs, gráfico de faturamento e pedidos recentes.
-    """
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-    
     try:
-        # KPIs
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
                 SELECT
@@ -387,58 +301,36 @@ def get_dashboard():
                 "totalClients": kpis_row['totalclients'],
                 "newClientsToday": kpis_row['newclientstoday'],
             }
-
-        # Gráfico de faturamento (últimos 7 dias)
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                WITH last_7_days AS (
-                    SELECT generate_series(
-                        current_date - interval '6 days',
-                        current_date,
-                        '1 day'
-                    )::date AS day
-                )
-                SELECT
-                    to_char(d.day, 'DD/MM') AS formatted_date,
-                    COALESCE(SUM(o.total_amount), 0) AS daily_revenue
-                FROM last_7_days d
-                LEFT JOIN orders o ON DATE(o.created_at) = d.day AND o.status_pagamento = 'approved'
-                GROUP BY d.day
-                ORDER BY d.day;
+                WITH last_7_days AS (SELECT generate_series(current_date - interval '6 days', current_date, '1 day')::date AS day)
+                SELECT to_char(d.day, 'DD/MM') AS formatted_date, COALESCE(SUM(o.total_amount), 0) AS daily_revenue
+                FROM last_7_days d LEFT JOIN orders o ON DATE(o.created_at) = d.day AND o.status_pagamento = 'approved'
+                GROUP BY d.day ORDER BY d.day;
             """)
             chart_data = [dict(row) for row in cur.fetchall()]
             for item in chart_data:
                 item['daily_revenue'] = float(item['daily_revenue'])
-
-        # Pedidos recentes
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT 
-                    o.id,
-                    o.total_amount,
-                    o.status,
-                    o.created_at,
+                SELECT o.id, o.total_amount, o.status, o.created_at,
                     COALESCE(cp.first_name || ' ' || cp.last_name, 'Cliente Anônimo') AS client_name,
                     COALESCE(rp.restaurant_name, 'Restaurante Desconhecido') AS restaurant_name
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.user_id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                ORDER BY o.created_at DESC
-                LIMIT 5;
+                ORDER BY o.created_at DESC LIMIT 5;
             """)
             recent_orders = [dict(row) for row in cur.fetchall()]
             for order in recent_orders:
                 order['total_amount'] = float(order['total_amount'])
                 order['created_at'] = order['created_at'].isoformat()
-
-        # Monta resposta unificada
         return jsonify({
             "status": "success",
             "kpis": kpis,
             "chartData": chart_data,
             "recentOrders": recent_orders
         }), 200
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Erro interno ao buscar dados do dashboard.", "detail": str(e)}), 500
