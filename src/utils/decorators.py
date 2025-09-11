@@ -1,15 +1,18 @@
-# src/utils/decorators.py - NOVO ARQUIVO
+# src/utils/decorators.py (ou o nome do seu arquivo) - CÓDIGO CORRIGIDO E COMPLETO
 
 from functools import wraps
 from flask import request, jsonify
-from .helpers import get_user_id_from_token # Importa a função auxiliar
+# A importação agora vem de helpers, que é o nosso padrão
+from .helpers import get_user_id_from_token 
 
 def admin_required(f):
     """
-    Decorator que verifica se o token é válido e pertence a um usuário do tipo 'admin'.
+    Decorator que verifica se o token é válido e se o usuário é do tipo 'admin',
+    buscando a permissão do banco de dados.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Permite requisições OPTIONS (para o CORS funcionar)
         if request.method == 'OPTIONS':
             return jsonify(), 200
             
@@ -22,7 +25,7 @@ def admin_required(f):
         if user_type != 'admin':
             return jsonify({"error": "Acesso negado. Apenas administradores."}), 403
         
-        # Adiciona user_id ao contexto da requisição para uso posterior, se necessário
+        # Anexa o user_id à requisição para uso posterior, se necessário
         request.user_id = user_id
         
         return f(*args, **kwargs)
@@ -31,10 +34,12 @@ def admin_required(f):
 
 def delivery_token_required(f):
     """
-    Decorator que verifica se o token é válido e pertence a um usuário do tipo 'delivery'.
+    Decorator que verifica se o token é válido e se o usuário é do tipo 'delivery',
+    buscando a permissão do banco de dados.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Permite requisições OPTIONS (para o CORS funcionar)
         if request.method == 'OPTIONS':
             return jsonify(), 200
             
@@ -47,7 +52,7 @@ def delivery_token_required(f):
         if user_type != 'delivery':
             return jsonify({"error": "Acesso negado. Apenas entregadores."}), 403
         
-        # Adiciona user_id e user_type ao contexto da requisição
+        # Anexa as informações à requisição para uso nas rotas
         request.user_id = user_id
         request.user_type = user_type
         
@@ -58,9 +63,11 @@ def delivery_token_required(f):
 def user_token_required(f):
     """
     Decorator genérico que apenas valida o token e anexa as informações do usuário à requisição.
+    Útil para rotas que qualquer usuário logado pode acessar.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Permite requisições OPTIONS (para o CORS funcionar)
         if request.method == 'OPTIONS':
             return jsonify(), 200
             
@@ -70,6 +77,7 @@ def user_token_required(f):
         if error_response:
             return error_response
         
+        # Anexa as informações à requisição
         request.user_id = user_id
         request.user_type = user_type
         
