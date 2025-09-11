@@ -1,38 +1,78 @@
-from functools import wraps
-from flask import request, jsonify, g
-from config import supabase # Assume que a tua inicialização do Supabase está em config.py
+# src/utils/decorators.py - NOVO ARQUIVO
 
-def delivery_token_required(f):
+from functools import wraps
+from flask import request, jsonify
+from .helpers import get_user_id_from_token # Importa a função auxiliar
+
+def admin_required(f):
     """
-    Verifica se o token JWT é válido e se o utilizador é do tipo 'delivery'.
+    Decorator que verifica se o token é válido e pertence a um usuário do tipo 'admin'.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        token = None
-        if 'Authorization' in request.headers:
-            # O cabeçalho deve ser 'Bearer <token>'
-            token = request.headers['Authorization'].split(" ")[1]
-
-        if not token:
-            return jsonify({"status": "error", "message": "Token de autenticação está em falta!"}), 401
-
-        try:
-            # Valida o token com o Supabase e obtém os dados do utilizador
-            user_response = supabase.auth.get_user(token)
-            user = user_response.user
+        if request.method == 'OPTIONS':
+            return jsonify(), 200
             
-            if not user:
-                raise Exception("Token inválido ou expirado.")
-
-            # Verifica se o tipo de utilizador é 'delivery' (armazenado nos metadados do Supabase Auth)
-            if 'user_type' not in user.user_metadata or user.user_metadata['user_type'] != 'delivery':
-                return jsonify({"status": "error", "message": "Acesso não autorizado para este tipo de utilizador."}), 403
-
-            # Anexa os dados do utilizador ao contexto global da requisição (g)
-            g.user = user
-
-        except Exception as e:
-            return jsonify({"status": "error", "message": f"Erro de autenticação: {str(e)}"}), 401
+        auth_header = request.headers.get('Authorization')
+        user_id, user_type, error_response = get_user_id_from_token(auth_header)
+        
+        if error_response:
+            return error_response
+        
+        if user_type != 'admin':
+            return jsonify({"error": "Acesso negado. Apenas administradores."}), 403
+        
+        # Adiciona user_id ao contexto da requisição para uso posterior, se necessário
+        request.user_id = user_id
         
         return f(*args, **kwargs)
+    
+    return decorated_function
+
+def delivery_token_required(f):
+    """
+    Decorator que verifica se o token é válido e pertence a um usuário do tipo 'delivery'.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            return jsonify(), 200
+            
+        auth_header = request.headers.get('Authorization')
+        user_id, user_type, error_response = get_user_id_from_token(auth_header)
+        
+        if error_response:
+            return error_response
+        
+        if user_type != 'delivery':
+            return jsonify({"error": "Acesso negado. Apenas entregadores."}), 403
+        
+        # Adiciona user_id e user_type ao contexto da requisição
+        request.user_id = user_id
+        request.user_type = user_type
+        
+        return f(*args, **kwargs)
+    
+    return decorated_function
+
+def user_token_required(f):
+    """
+    Decorator genérico que apenas valida o token e anexa as informações do usuário à requisição.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            return jsonify(), 200
+            
+        auth_header = request.headers.get('Authorization')
+        user_id, user_type, error_response = get_user_id_from_token(auth_header)
+        
+        if error_response:
+            return error_response
+        
+        request.user_id = user_id
+        request.user_type = user_type
+        
+        return f(*args, **kwargs)
+    
     return decorated_function
