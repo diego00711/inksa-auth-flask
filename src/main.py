@@ -34,6 +34,7 @@ try:
     from src.routes.delivery_auth_profile import delivery_auth_profile_bp
     from src.routes.delivery_orders import delivery_orders_bp
     from src.routes.delivery_stats_earnings import delivery_stats_earnings_bp
+    from src.routes.banners import banners_bp
     from src.utils.helpers import supabase
     from src.routes.gamification_routes import gamification_bp
     from src.routes.categories import categories_bp
@@ -92,6 +93,7 @@ CORS(app, origins=allowed_origins, supports_credentials=True)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
 
 # --- REGISTRO DE BLUEPRINTS ---
+app.register_blueprint(banners_bp, url_prefix='/api/banners')
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
