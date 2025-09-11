@@ -1,16 +1,19 @@
-# inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO FINAL E ROBUSTA
+# inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO FINAL E CORRIGIDA
 
 from flask import Blueprint, request, jsonify
 from datetime import date, timedelta
 import psycopg2.extras
 import traceback
- # ✅ CORREÇÃO: cross_origin não é mais necessário aqui, pois o CORS é global
-from ..utils.helpers import get_db_connection, delivery_token_required
+
+# --- INÍCIO DA CORREÇÃO ---
+# Importa 'get_db_connection' de helpers e 'delivery_token_required' do novo arquivo de decoradores.
+from ..utils.helpers import get_db_connection
+from ..utils.decorators import delivery_token_required
+# --- FIM DA CORREÇÃO ---
 
 delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
 
 @delivery_stats_earnings_bp.route('/dashboard-stats', methods=['GET'])
-# ✅ CORREÇÃO: Decorador @cross_origin removido
 @delivery_token_required 
 def get_dashboard_stats(): 
     conn = None
@@ -23,7 +26,6 @@ def get_dashboard_stats():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             today = date.today()
             
-            # 1. Buscar perfil do entregador. Esta é a consulta mais crítica.
             cur.execute("""
                 SELECT id, is_available, daily_goal, rating, total_deliveries, online_minutes_today, distance_today
                 FROM delivery_profiles 
@@ -36,7 +38,6 @@ def get_dashboard_stats():
                 
             profile_id = delivery_profile['id']
 
-            # ✅ INICIALIZAÇÃO SEGURA DOS DADOS: Garante que sempre teremos valores padrão.
             response_data = {
                 "todayDeliveries": 0,
                 "todayEarnings": 0.0,
@@ -46,16 +47,15 @@ def get_dashboard_stats():
                 "weeklyEarnings": [],
                 "dailyGoal": float(delivery_profile.get('daily_goal') or 300.0),
                 "onlineMinutes": delivery_profile.get('online_minutes_today') or 0,
-                "ranking": 0, # Mockado por enquanto
+                "ranking": 0,
                 "totalDeliverers": 0,
                 "distanceToday": float(delivery_profile.get('distance_today') or 0.0),
                 "nextPayment": {"date": "--/--", "amount": 0.0},
-                "streak": 0, # Mockado por enquanto
-                "peakHours": {"start": "11:30", "end": "13:30", "bonus": 1.5}, # Mockado
+                "streak": 0,
+                "peakHours": {"start": "11:30", "end": "13:30", "bonus": 1.5},
                 "is_available": delivery_profile.get('is_available', False)
             }
 
-            # 2. Ganhos e Entregas de Hoje
             cur.execute("""
                 SELECT COALESCE(COUNT(id), 0) as count, COALESCE(SUM(delivery_fee), 0) as total
                 FROM orders WHERE delivery_id = %s AND status = 'delivered' AND DATE(created_at) = %s
@@ -65,7 +65,6 @@ def get_dashboard_stats():
                 response_data["todayDeliveries"] = today_stats['count']
                 response_data["todayEarnings"] = float(today_stats['total'])
 
-            # 3. Ganhos da Semana (para o gráfico)
             day_labels = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"]
             start_of_week = today - timedelta(days=today.weekday() + 1 if today.weekday() != 6 else 0)
             cur.execute("""
@@ -82,7 +81,6 @@ def get_dashboard_stats():
                     "value": earnings_by_day.get(current_day, 0.0)
                 })
 
-            # 4. Próximo Pagamento
             cur.execute("""
                 SELECT payment_date, amount FROM payouts
                 WHERE delivery_id = %s AND status = 'pending' ORDER BY payment_date ASC LIMIT 1;
@@ -94,13 +92,11 @@ def get_dashboard_stats():
                     "amount": float(next_payment_data['amount'])
                 }
 
-            # 5. Total de Entregadores
             cur.execute("SELECT COUNT(id) as total FROM delivery_profiles WHERE is_active = TRUE;")
             total_deliverers_data = cur.fetchone()
             if total_deliverers_data:
                 response_data["totalDeliverers"] = total_deliverers_data['total']
 
-            # 6. Pedidos Ativos
             cur.execute("""
                 SELECT o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, o.delivery_address,
                        CONCAT(cp.first_name, ' ', cp.last_name) as client_name, rp.restaurant_name,
@@ -129,7 +125,6 @@ def get_dashboard_stats():
                 })
             response_data["activeOrders"] = active_orders
 
-            # ✅ RETORNO SEGURO: Envia a estrutura de dados completa e preenchida.
             return jsonify({"status": "success", "data": response_data}), 200
             
     except psycopg2.Error as e:
@@ -143,7 +138,6 @@ def get_dashboard_stats():
             conn.close()
 
 @delivery_stats_earnings_bp.route('/earnings-history', methods=['GET'])
-# ✅ CORREÇÃO: Decorador @cross_origin removido
 @delivery_token_required
 def get_earnings_history():
     conn = None
