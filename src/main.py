@@ -1,5 +1,3 @@
-# src/main.py - VERSÃO FINAL E CORRIGIDA
-
 import os
 import sys
 import re
@@ -67,7 +65,6 @@ app.config.update(
 )
 
 # --- Configuração de CORS Global ---
-# Lista de origens de produção fixas
 production_origins = [
     "https://restaurante.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
@@ -75,23 +72,14 @@ production_origins = [
     "https://entregadores.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
 ]
-
-# --- INÍCIO DA CORREÇÃO ---
-# Adiciona a URL específica do preview da Vercel que está causando o problema
 vercel_preview_origins = [
     "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
 ]
-# --- FIM DA CORREÇÃO ---
-
-# Padrões para desenvolvimento local e previews da Vercel
 allowed_origins_patterns = [
     re.compile(r"http://localhost:\d+" ),
     re.compile(r"https://.*\.vercel\.app" ) 
 ]
-
-# Combina as listas
 allowed_origins = production_origins + vercel_preview_origins + allowed_origins_patterns
-
 CORS(app, origins=allowed_origins, supports_credentials=True)
 
 # --- Configuração do SocketIO ---
@@ -116,13 +104,13 @@ delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
 delivery_bp.register_blueprint(delivery_calculator_bp)
 app.register_blueprint(delivery_bp)
 
-# --- Rotas de Admin agrupadas sob /api/admin ---
-admin_api_bp = Blueprint('admin_api', __name__, url_prefix='/api/admin')
-admin_api_bp.register_blueprint(admin_bp)
-admin_api_bp.register_blueprint(payouts_bp, url_prefix='/payouts')
-admin_api_bp.register_blueprint(admin_logs_bp, url_prefix='/logs')
-admin_api_bp.register_blueprint(admin_users_bp, url_prefix='/users')
-app.register_blueprint(admin_api_bp)
+# --- INÍCIO DA CORREÇÃO ---
+# Registro simplificado dos blueprints de admin
+app.register_blueprint(admin_bp, url_prefix='/api/admin')
+app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
+app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
+app.register_blueprint(admin_users_bp, url_prefix='/api/admin/users')
+# --- FIM DA CORREÇÃO ---
 
 # --- Rotas com prefixos customizados ---
 app.register_blueprint(mp_payment_bp, url_prefix='/payment')
