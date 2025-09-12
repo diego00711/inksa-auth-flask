@@ -1,4 +1,4 @@
-# src/routes/banners.py - VERSÃO COMPLETA COM 'text_position'
+# src/routes/banners.py - VERSÃO COMPLETA E FINAL (Título Opcional)
 import uuid
 import json
 import logging
@@ -100,9 +100,10 @@ def create_banner():
             return jsonify({"error": "Apenas administradores podem criar banners"}), 403
         
         data = request.get_json()
-        required_fields = ['title', 'image_url']
-        if any(field not in data for field in required_fields):
-            return jsonify({"error": "Campos obrigatórios: title, image_url"}), 400
+        
+        # VALIDAÇÃO CORRIGIDA: Apenas image_url é obrigatório
+        if not data or 'image_url' not in data or not data['image_url']:
+            return jsonify({"error": "Campo obrigatório: image_url"}), 400
 
         conn = get_db_connection()
         if not conn:
@@ -114,13 +115,13 @@ def create_banner():
             
             banner_data = {
                 'id': str(uuid.uuid4()),
-                'title': data['title'],
-                'subtitle': data.get('subtitle'),
+                'title': data.get('title') or None,
+                'subtitle': data.get('subtitle') or None,
                 'image_url': data['image_url'],
                 'link_url': data.get('link_url'),
                 'is_active': data.get('is_active', True),
                 'display_order': data.get('display_order', next_order),
-                'text_position': data.get('text_position', 'center'),  # CAMPO ADICIONADO
+                'text_position': data.get('text_position', 'center'),
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
             }
@@ -219,12 +220,12 @@ def update_banner(banner_id):
             update_fields = []
             update_values = []
             
-            # CAMPO 'text_position' ADICIONADO À LISTA
             updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position']
             
             for field in updatable_fields:
                 if field in data:
                     update_fields.append(f"{field} = %s")
+                    # Permite salvar strings vazias, que serão convertidas para None se necessário no frontend/lógica
                     update_values.append(data[field])
             
             if not update_fields:
