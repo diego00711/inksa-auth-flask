@@ -104,6 +104,9 @@ app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
+# 🔧 CORREÇÃO: Blueprint de pagamento com prefixo correto
+app.register_blueprint(mp_payment_bp, url_prefix='/api')
+
 # --- Rotas de Delivery agrupadas sob /api/delivery ---
 delivery_bp = Blueprint('delivery', __name__, url_prefix='/api/delivery')
 delivery_bp.register_blueprint(delivery_auth_profile_bp)
@@ -117,9 +120,6 @@ app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
 app.register_blueprint(admin_users_bp, url_prefix='/api/admin/users')
-
-# --- Rotas com prefixos customizados ---
-app.register_blueprint(mp_payment_bp, url_prefix='/payment')
 
 # --- Rotas de Avaliação agrupadas sob /api/review ---
 app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')
