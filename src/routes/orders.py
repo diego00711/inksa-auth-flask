@@ -145,8 +145,11 @@ def handle_orders():
                 if not client_profile: return jsonify({"error": "Perfil do cliente não encontrado"}), 404
 
                 total_items = sum(item.get('price', 0) * item.get('quantity', 1) for item in data['items'])
-                delivery_fee = DEFAULT_DELIVERY_FEE
+                
+                # 🔧 CORREÇÃO: Usar delivery_fee do frontend se fornecido, senão usar padrão
+                delivery_fee = data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
 
+                # 🔧 CORREÇÃO: Criar pedido SEM delivery_id (será atribuído quando entregador aceitar)
                 order_data = {
                     'id': str(uuid.uuid4()),
                     'client_id': client_profile['id'],
@@ -157,25 +160,54 @@ def handle_orders():
                     'delivery_fee': delivery_fee,
                     'total_amount': total_items + delivery_fee,
                     'status': 'pending',
-                    'created_at': datetime.now(),
-                    'updated_at': datetime.now(),
                     'pickup_code': generate_verification_code(),
                     'delivery_code': generate_verification_code()
+                    # 🔧 REMOVIDO: delivery_id (causava o erro de foreign key)
+                    # 🔧 REMOVIDO: created_at e updated_at (banco gera automaticamente)
                 }
                 
-                columns = ', '.join(order_data.keys())
-                placeholders = ', '.join(['%s'] * len(order_data))
-                cur.execute(f"INSERT INTO orders ({columns}) VALUES ({placeholders}) RETURNING *", list(order_data.values()))
+                # 🔧 CORREÇÃO: SQL mais seguro especificando colunas explicitamente
+                insert_query = """
+                    INSERT INTO orders (
+                        id, client_id, restaurant_id, items, delivery_address,
+                        total_amount_items, delivery_fee, total_amount, status,
+                        pickup_code, delivery_code
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    ) RETURNING *
+                """
+                
+                insert_values = [
+                    order_data['id'],
+                    order_data['client_id'],
+                    order_data['restaurant_id'],
+                    order_data['items'],
+                    order_data['delivery_address'],
+                    order_data['total_amount_items'],
+                    order_data['delivery_fee'],
+                    order_data['total_amount'],
+                    order_data['status'],
+                    order_data['pickup_code'],
+                    order_data['delivery_code']
+                ]
+                
+                cur.execute(insert_query, insert_values)
                 new_order = cur.fetchone()
                 conn.commit()
 
+                # 🔧 CORREÇÃO: Não expor códigos de verificação na resposta
                 order_dict = dict(new_order)
                 order_dict.pop('pickup_code', None)
                 order_dict.pop('delivery_code', None)
                 order_dict['status_display'] = STATUS_DISPLAY.get(order_dict['status'], order_dict['status'])
                 
+                logger.info(f"Pedido criado com sucesso: {order_dict['id']}")
                 return jsonify({"status": "success", "message": "Pedido criado com sucesso", "data": order_dict}), 201
 
+    except psycopg2.Error as e:
+        logger.error(f"Erro de banco de dados em handle_orders: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return jsonify({"error": "Erro de banco de dados"}), 500
     except Exception as e:
         logger.error(f"Erro inesperado em handle_orders: {e}", exc_info=True)
         if conn: conn.rollback()
@@ -223,7 +255,7 @@ def update_order_status(order_id):
             if not is_valid_status_transition(current_status, new_status_internal):
                 return jsonify({"error": "Transição de status não permitida"}), 400
 
-            cur.execute("UPDATE orders SET status = %s, updated_at = %s WHERE id = %s RETURNING *", (new_status_internal, datetime.now(), str(order_id)))
+            cur.execute("UPDATE orders SET status = %s, updated_at = NOW() WHERE id = %s RETURNING *", (new_status_internal, str(order_id)))
             updated_order = cur.fetchone()
             conn.commit()
 
@@ -249,7 +281,7 @@ def pickup_order(order_id):
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
-        if user_type not in ['restaurant', 'driver']:
+        if user_type not in ['restaurant', 'delivery']:
             return jsonify({"error": "Acesso não autorizado para retirada"}), 403
 
         data = request.get_json()
@@ -265,7 +297,7 @@ def pickup_order(order_id):
             if order['status'] != 'ready': return jsonify({"error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY.get(order['status'])}"}), 400
             if order['pickup_code'] != data['pickup_code'].upper(): return jsonify({"error": "Código de retirada inválido"}), 403
 
-            cur.execute("UPDATE orders SET status = 'delivering', updated_at = %s WHERE id = %s", (datetime.now(), str(order_id)))
+            cur.execute("UPDATE orders SET status = 'delivering', updated_at = NOW() WHERE id = %s", (str(order_id),))
             conn.commit()
             logger.info(f"Pedido {order_id} retirado com sucesso.")
             return jsonify({"status": "success", "message": "Pedido retirado e em rota de entrega."}), 200
@@ -285,7 +317,7 @@ def complete_order(order_id):
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
-        if user_type not in ['restaurant', 'driver']:
+        if user_type not in ['restaurant', 'delivery']:
             return jsonify({"error": "Acesso não autorizado para completar a entrega"}), 403
 
         data = request.get_json()
@@ -301,7 +333,7 @@ def complete_order(order_id):
             if order['status'] != 'delivering': return jsonify({"error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY.get(order['status'])}"}), 400
             if order['delivery_code'] != data['delivery_code'].upper(): return jsonify({"error": "Código de entrega inválido"}), 403
 
-            cur.execute("UPDATE orders SET status = 'delivered', updated_at = %s, completed_at = %s WHERE id = %s", (datetime.now(), datetime.now(), str(order_id)))
+            cur.execute("UPDATE orders SET status = 'delivered', updated_at = NOW(), completed_at = NOW() WHERE id = %s", (str(order_id),))
             conn.commit()
             logger.info(f"Pedido {order_id} entregue com sucesso.")
             return jsonify({"status": "success", "message": "Pedido entregue com sucesso!"}), 200
