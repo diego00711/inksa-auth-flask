@@ -149,31 +149,39 @@ def handle_orders():
                 # 🔧 CORREÇÃO: Usar delivery_fee do frontend se fornecido, senão usar padrão
                 delivery_fee = data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
 
+                # 🔧 FORÇAR: Remover delivery_id dos dados se vier do frontend
+                data_clean = data.copy()
+                data_clean.pop('delivery_id', None)  # Remove se existir
+                
+                logger.info(f"Dados limpos recebidos: {list(data_clean.keys())}")
+
                 # 🔧 CORREÇÃO: Criar pedido SEM delivery_id (será atribuído quando entregador aceitar)
                 order_data = {
                     'id': str(uuid.uuid4()),
                     'client_id': client_profile['id'],
-                    'restaurant_id': data['restaurant_id'],
-                    'items': json.dumps(data['items']),
-                    'delivery_address': json.dumps(data['delivery_address']),
+                    'restaurant_id': data_clean['restaurant_id'],
+                    'items': json.dumps(data_clean['items']),
+                    'delivery_address': json.dumps(data_clean['delivery_address']),
                     'total_amount_items': total_items,
                     'delivery_fee': delivery_fee,
                     'total_amount': total_items + delivery_fee,
                     'status': 'pending',
                     'pickup_code': generate_verification_code(),
                     'delivery_code': generate_verification_code()
-                    # 🔧 REMOVIDO: delivery_id (causava o erro de foreign key)
-                    # 🔧 REMOVIDO: created_at e updated_at (banco gera automaticamente)
+                    # 🔧 GARANTIDO: Sem delivery_id, created_at ou updated_at
                 }
                 
+                logger.info(f"Dados do pedido a inserir: {list(order_data.keys())}")
+                
                 # 🔧 CORREÇÃO: SQL mais seguro especificando colunas explicitamente
+                # IMPORTANTE: delivery_id deve ser explicitamente NULL para evitar o DEFAULT gen_random_uuid()
                 insert_query = """
                     INSERT INTO orders (
                         id, client_id, restaurant_id, items, delivery_address,
                         total_amount_items, delivery_fee, total_amount, status,
-                        pickup_code, delivery_code
+                        pickup_code, delivery_code, delivery_id
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     ) RETURNING *
                 """
                 
@@ -188,9 +196,11 @@ def handle_orders():
                     order_data['total_amount'],
                     order_data['status'],
                     order_data['pickup_code'],
-                    order_data['delivery_code']
+                    order_data['delivery_code'],
+                    None  # 🔧 FORÇAR delivery_id = NULL para evitar gen_random_uuid()
                 ]
                 
+                logger.info(f"Executando INSERT com {len(insert_values)} valores")
                 cur.execute(insert_query, insert_values)
                 new_order = cur.fetchone()
                 conn.commit()
