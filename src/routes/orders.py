@@ -289,3 +289,61 @@ def get_pending_delivery_review():
         return jsonify({'error': 'Erro interno do servidor.'}), 500
     finally:
         if conn: conn.close()
+            
+@orders_bp.route('/available', methods=['GET'])
+def get_available_orders():
+    """
+    Retorna todos os pedidos com status 'ready' que ainda não foram
+    aceitos por nenhum entregador.
+    """
+    logger.info("=== INÍCIO get_available_orders ===")
+    conn = None
+    try:
+        # 1. Autenticação: Garante que apenas entregadores acessem
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'delivery':
+            return jsonify({'error': 'Acesso negado. Apenas para entregadores.'}), 403
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            
+            # 2. Lógica da Query: Busca pedidos prontos e sem entregador
+            sql_query = """
+                SELECT 
+                    o.id, 
+                    o.restaurant_id,
+                    rp.restaurant_name,
+                    rp.address as restaurant_address,
+                    o.delivery_address,
+                    o.total_amount,
+                    o.delivery_fee,
+                    o.created_at
+                FROM 
+                    orders o
+                JOIN 
+                    restaurant_profiles rp ON o.restaurant_id = rp.id
+                WHERE 
+                    o.status = 'ready' 
+                    AND o.delivery_id IS NULL
+                ORDER BY 
+                    o.created_at ASC;
+            """
+            
+            cur.execute(sql_query)
+            available_orders = [dict(row) for row in cur.fetchall()]
+            
+            logger.info(f"Encontradas {len(available_orders)} entregas disponíveis.")
+            
+            # 3. Retorno: Retorna a lista de pedidos disponíveis
+            return jsonify(available_orders), 200
+
+    except Exception as e:
+        logger.error(f"Erro em get_available_orders: {e}", exc_info=True)
+        return jsonify({'error': 'Erro interno do servidor ao buscar entregas disponíveis.'}), 500
+    finally:
+        if conn:
+            conn.close()
+            logger.info("Conexão com banco fechada em get_available_orders")
+
