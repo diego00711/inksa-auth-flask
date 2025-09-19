@@ -189,9 +189,15 @@ def update_order_status(order_id):
             if not order:
                 return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
 
-            current_status = order['status']
+            # ✅ CORREÇÃO DEFINITIVA: Limpa espaços em branco do status vindo do banco.
+            current_status = order['status'].strip() 
+
+            # Agora a validação funcionará corretamente.
             if not is_valid_status_transition(current_status, new_status_internal):
-                return jsonify({"error": f"Transição de status de '{current_status}' para '{new_status_internal}' não permitida"}), 400
+                # ✅ MELHORIA: A mensagem de erro agora mostra os status exatos que foram comparados.
+                error_message = f"Transição de status de '{current_status}' para '{new_status_internal}' não permitida"
+                logger.warning(error_message)
+                return jsonify({"error": error_message}), 400
 
             cur.execute("UPDATE orders SET status = %s, updated_at = NOW() WHERE id = %s RETURNING *", (new_status_internal, str(order_id)))
             updated_order = dict(cur.fetchone())
