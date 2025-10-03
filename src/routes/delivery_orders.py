@@ -403,7 +403,7 @@ def get_pending_orders():
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.status IN ('pending', 'accepted') AND o.delivery_id IS NULL
+                WHERE o.status IN ('pending', 'accepted', 'preparing', 'ready') AND o.delivery_id IS NULL
                 ORDER BY o.created_at DESC
             """)
             
