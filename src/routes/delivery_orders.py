@@ -195,37 +195,50 @@ def get_my_orders():
             conn.close()
 
 # --- Rota para buscar detalhes de um pedido específico ---
-@delivery_orders_bp.route('/orders/<order_id>', methods=['GET'])
+@delivery_orders_bp.route('/orders/pending', methods=['GET'])
 @cross_origin()
 @delivery_token_required
-def get_order_details(order_id):
+def get_pending_orders():
     conn = None
     try:
-        profile_id = g.profile_id
-        
         conn = get_db_connection()
         if not conn:
             return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
         
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # 🔧 CORREÇÃO: Buscar pedidos com status 'pending' OU 'accepted'
             cur.execute("""
                 SELECT o.*, 
                        cp.first_name || ' ' || cp.last_name AS client_name,
-                       cp.phone AS client_phone,
                        rp.restaurant_name,
                        rp.address_street as restaurant_street,
                        rp.address_number as restaurant_number,
                        rp.address_neighborhood as restaurant_neighborhood,
                        rp.address_city as restaurant_city,
                        rp.address_state as restaurant_state,
-                       rp.phone AS restaurant_phone
+                       rp.latitude as restaurant_latitude,
+                       rp.longitude as restaurant_longitude
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.id = %s AND o.delivery_id = %s
-            """, (order_id, profile_id))
+                WHERE o.status IN ('pending', 'accepted') AND o.delivery_id IS NULL
+                ORDER BY o.created_at DESC
+            """)
             
-            order = cur.fetchone()
+            orders = cur.fetchall()
+            
+            return jsonify({
+                "status": "success",
+                "data": serialize_data_with_encoder([dict(o) for o in orders])
+            }), 200
+            
+    except psycopg2.Error as e:
+        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
             
             if not order:
                 return jsonify({"status": "error", "message": "Pedido não encontrado"}), 404
