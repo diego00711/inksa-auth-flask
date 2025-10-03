@@ -15,10 +15,8 @@ from flask_cors import cross_origin
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from .gamification_routes import add_points_for_event
 
-# --- Blueprint e Rotas ---
 delivery_orders_bp = Blueprint('delivery_orders_bp', __name__)
 
-# --- Handler para requisições OPTIONS ---
 @delivery_orders_bp.before_request
 def handle_options():
     if request.method == "OPTIONS":
@@ -29,11 +27,9 @@ def handle_options():
         response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
 
-# --- Decorator de Autenticação CORRIGIDO ---
 def delivery_token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # ✅ CORREÇÃO: Permitir requisições OPTIONS sem autenticação
         if request.method == "OPTIONS":
             return f(*args, **kwargs)
             
@@ -43,13 +39,11 @@ def delivery_token_required(f):
             if not auth_header:
                 return jsonify({"status": "error", "message": "Token de autorização ausente"}), 401
             
-            # ✅ CORREÇÃO: Chama a função corretamente
             user_auth_id, user_type, error_response = get_user_id_from_token(auth_header)
             
             if error_response:
                 return error_response
             
-            # Verifica se o tipo de usuário é o correto
             if user_type != 'delivery':
                 return jsonify({"status": "error", "message": "Acesso não autorizado. Apenas para entregadores."}), 403
             
@@ -64,11 +58,9 @@ def delivery_token_required(f):
             if not profile:
                 return jsonify({"status": "error", "message": "Perfil de entregador não encontrado para este usuário"}), 404
             
-            # Armazena o ID do perfil no contexto global
             g.profile_id = str(profile['id'])
             g.user_auth_id = str(user_auth_id)
 
-            # ✅ CORREÇÃO: Executa a função original
             return f(*args, **kwargs)
 
         except psycopg2.Error as e:
@@ -83,7 +75,6 @@ def delivery_token_required(f):
     
     return decorated_function
 
-# --- Encoder JSON Customizado ---
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal): return float(obj)
@@ -94,12 +85,10 @@ class CustomJSONEncoder(json.JSONEncoder):
 def serialize_data_with_encoder(data):
     return json.loads(json.dumps(data, cls=CustomJSONEncoder))
 
-# --- Rota para buscar entregas por status (NOVA) ---
 @delivery_orders_bp.route('/orders-by-status', methods=['GET'])
 @cross_origin()
 @delivery_token_required
 def get_orders_by_status():
-    """Busca entregas por status - CORREÇÃO PARA O ERRO 'getDeliveriesByStatus is not a function'"""
     conn = None
     try:
         status = request.args.get('status', 'all')
@@ -147,7 +136,6 @@ def get_orders_by_status():
         if conn:
             conn.close()
 
-# --- Rota para buscar pedidos do entregador ---
 @delivery_orders_bp.route('/orders', methods=['GET'])
 @cross_origin()
 @delivery_token_required
@@ -194,56 +182,41 @@ def get_my_orders():
         if conn:
             conn.close()
 
-# --- Rota para buscar detalhes de um pedido específico ---
-@delivery_orders_bp.route('/orders/pending', methods=['GET'])
+@delivery_orders_bp.route('/orders/<order_id>', methods=['GET'])
 @cross_origin()
 @delivery_token_required
-def get_pending_orders():
+def get_order_details(order_id):
     conn = None
     try:
+        profile_id = g.profile_id
+        
         conn = get_db_connection()
         if not conn:
             return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
         
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # 🔧 CORREÇÃO: Buscar pedidos com status 'pending' OU 'accepted'
             cur.execute("""
                 SELECT o.*, 
                        cp.first_name || ' ' || cp.last_name AS client_name,
+                       cp.phone AS client_phone,
                        rp.restaurant_name,
                        rp.address_street as restaurant_street,
                        rp.address_number as restaurant_number,
                        rp.address_neighborhood as restaurant_neighborhood,
                        rp.address_city as restaurant_city,
                        rp.address_state as restaurant_state,
-                       rp.latitude as restaurant_latitude,
-                       rp.longitude as restaurant_longitude
+                       rp.phone AS restaurant_phone
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.status IN ('pending', 'accepted') AND o.delivery_id IS NULL
-                ORDER BY o.created_at DESC
-            """)
+                WHERE o.id = %s AND o.delivery_id = %s
+            """, (order_id, profile_id))
             
-            orders = cur.fetchall()
-            
-            return jsonify({
-                "status": "success",
-                "data": serialize_data_with_encoder([dict(o) for o in orders])
-            }), 200
-            
-    except psycopg2.Error as e:
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
-    finally:
-        if conn:
-            conn.close()
+            order = cur.fetchone()
             
             if not order:
                 return jsonify({"status": "error", "message": "Pedido não encontrado"}), 404
             
-            # Buscar itens do pedido
             cur.execute("""
                 SELECT oi.*, mi.name as item_name
                 FROM order_items oi
@@ -268,7 +241,6 @@ def get_pending_orders():
         if conn:
             conn.close()
 
-# --- Rota para aceitar uma entrega ---
 @delivery_orders_bp.route('/orders/<order_id>/accept', methods=['POST'])
 @cross_origin()
 @delivery_token_required
@@ -282,7 +254,6 @@ def accept_delivery(order_id):
             return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
         
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Verificar se o pedido está disponível para aceitação
             cur.execute("""
                 SELECT status FROM orders 
                 WHERE id = %s AND (delivery_id IS NULL OR delivery_id = %s)
@@ -293,13 +264,12 @@ def accept_delivery(order_id):
             if not order:
                 return jsonify({"status": "error", "message": "Pedido não encontrado ou já atribuído"}), 404
             
-            if order['status'] != 'Pendente':
+            if order['status'] not in ['pending', 'accepted']:
                 return jsonify({"status": "error", "message": "Pedido não está disponível para aceitação"}), 400
             
-            # Atualizar o pedido
             cur.execute("""
                 UPDATE orders 
-                SET delivery_id = %s, status = 'Aceito', updated_at = NOW()
+                SET delivery_id = %s, status = 'accepted', updated_at = NOW()
                 WHERE id = %s
                 RETURNING *
             """, (profile_id, order_id))
@@ -307,7 +277,6 @@ def accept_delivery(order_id):
             updated_order = cur.fetchone()
             conn.commit()
             
-            # Adicionar pontos de gamificação
             try:
                 add_points_for_event(profile_id, 'order_accepted', {
                     'order_id': order_id,
@@ -315,7 +284,6 @@ def accept_delivery(order_id):
                 })
             except Exception as gamification_error:
                 print(f"Erro na gamificação: {gamification_error}")
-                # Não falha a operação principal por causa da gamificação
             
             return jsonify({
                 "status": "success",
@@ -335,7 +303,6 @@ def accept_delivery(order_id):
         if conn:
             conn.close()
 
-# --- Rota para completar uma entrega ---
 @delivery_orders_bp.route('/orders/<order_id>/complete', methods=['POST'])
 @cross_origin()
 @delivery_token_required
@@ -349,7 +316,6 @@ def complete_delivery(order_id):
             return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
         
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Verificar se o pedido pertence ao entregador e pode ser completado
             cur.execute("""
                 SELECT status, delivery_id FROM orders 
                 WHERE id = %s
@@ -363,20 +329,18 @@ def complete_delivery(order_id):
             if order['delivery_id'] != profile_id:
                 return jsonify({"status": "error", "message": "Este pedido não pertence a você"}), 403
             
-            if order['status'] not in ['Aceito', 'A caminho']:
+            if order['status'] not in ['accepted', 'delivering']:
                 return jsonify({"status": "error", "message": "Pedido não pode ser marcado como entregue"}), 400
             
-            # Atualizar o pedido
             cur.execute("""
                 UPDATE orders 
-                SET status = 'Concluído', updated_at = NOW(), completed_at = NOW()
+                SET status = 'delivered', updated_at = NOW(), completed_at = NOW()
                 WHERE id = %s
                 RETURNING *
             """, (order_id,))
             
             updated_order = cur.fetchone()
             
-            # Atualizar estatísticas do entregador
             cur.execute("""
                 UPDATE delivery_profiles 
                 SET total_deliveries = total_deliveries + 1,
@@ -387,7 +351,6 @@ def complete_delivery(order_id):
             
             conn.commit()
             
-            # Adicionar pontos de gamificação
             try:
                 add_points_for_event(profile_id, 'order_completed', {
                     'order_id': order_id,
@@ -396,7 +359,6 @@ def complete_delivery(order_id):
                 })
             except Exception as gamification_error:
                 print(f"Erro na gamificação: {gamification_error}")
-                # Não falha a operação principal por causa da gamificação
             
             return jsonify({
                 "status": "success",
@@ -416,7 +378,6 @@ def complete_delivery(order_id):
         if conn:
             conn.close()
 
-# --- Rota para buscar pedidos pendentes (disponíveis para aceitação) ---
 @delivery_orders_bp.route('/orders/pending', methods=['GET'])
 @cross_origin()
 @delivery_token_required
@@ -442,7 +403,7 @@ def get_pending_orders():
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.status = 'Pendente' AND o.delivery_id IS NULL
+                WHERE o.status IN ('pending', 'accepted') AND o.delivery_id IS NULL
                 ORDER BY o.created_at DESC
             """)
             
