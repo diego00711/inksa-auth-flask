@@ -319,13 +319,19 @@ def get_available_orders():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             
             # 2. Lógica da Query: Busca pedidos prontos e sem entregador
-            # ✅ CORREÇÃO: Tratamento correto de campos JSON
+            # ✅ CORREÇÃO: Concatenar campos de endereço do restaurante
             sql_query = """
                 SELECT 
                     o.id, 
                     o.restaurant_id,
                     COALESCE(rp.restaurant_name, 'Restaurante') as restaurant_name,
-                    COALESCE(rp.address, '{}') as restaurant_address,
+                    CONCAT_WS(', ', 
+                        rp.address_street, 
+                        rp.address_number, 
+                        rp.address_neighborhood,
+                        rp.address_city, 
+                        rp.address_state
+                    ) as restaurant_address,
                     o.delivery_address,
                     COALESCE(o.total_amount, 0) as total_amount,
                     COALESCE(o.delivery_fee, 0) as delivery_fee,
@@ -397,4 +403,3 @@ def get_available_orders():
         if conn:
             conn.close()
             logger.info("Conexão com banco fechada em get_available_orders")
-
