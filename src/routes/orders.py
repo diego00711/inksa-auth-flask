@@ -408,4 +408,115 @@ def get_available_orders():
     finally:
         if conn:
             conn.close()
+            # Adicionar este endpoint no final do arquivo src/routes/orders.py
+
+@orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
+def accept_order_by_delivery(order_id):
+    """
+    Endpoint para entregador aceitar um pedido disponível.
+    Atribui o pedido ao entregador e muda status para 'accepted'.
+    """
+    logger.info(f"=== INÍCIO accept_order_by_delivery para {order_id} ===")
+    conn = None
+    try:
+        # 1. Autenticação
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            logger.error(f"Erro de autenticação: {error}")
+            return error
+        
+        if user_type != 'delivery':
+            logger.warning(f"Acesso negado para user_type: {user_type}")
+            return jsonify({'error': 'Apenas entregadores podem aceitar pedidos'}), 403
+
+        logger.info(f"Entregador autenticado: user_id={user_id}")
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Falha ao conectar ao banco de dados")
+            return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
+            
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            
+            # 2. Buscar o ID do perfil do entregador
+            cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
+            delivery_profile = cur.fetchone()
+            
+            if not delivery_profile:
+                logger.error(f"Perfil de entregador não encontrado para user_id={user_id}")
+                return jsonify({'error': 'Perfil de entregador não encontrado'}), 404
+            
+            delivery_profile_id = delivery_profile['id']
+            logger.info(f"Delivery profile ID: {delivery_profile_id}")
+            
+            # 3. Verificar se o pedido existe e está disponível
+            cur.execute("""
+                SELECT id, status, delivery_id 
+                FROM orders 
+                WHERE id = %s
+            """, (str(order_id),))
+            
+            order = cur.fetchone()
+            
+            if not order:
+                logger.error(f"Pedido {order_id} não encontrado")
+                return jsonify({'error': 'Pedido não encontrado'}), 404
+            
+            # 4. Validar se o pedido pode ser aceito
+            if order['status'] != 'ready':
+                logger.warning(f"Pedido {order_id} não está pronto. Status atual: {order['status']}")
+                return jsonify({'error': f'Pedido não está disponível. Status: {order["status"]}'}), 400
+            
+            if order['delivery_id'] is not None:
+                logger.warning(f"Pedido {order_id} já foi aceito por outro entregador")
+                return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
+            
+            # 5. Aceitar o pedido: atribuir ao entregador e mudar status
+            cur.execute("""
+                UPDATE orders 
+                SET delivery_id = %s, 
+                    status = 'accepted',
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (delivery_profile_id, str(order_id)))
+            
+            updated_order = dict(cur.fetchone())
+            conn.commit()
+            
+            logger.info(f"✅ Pedido {order_id} aceito com sucesso pelo entregador {delivery_profile_id}")
+            
+            # 6. Formatar resposta
+            if updated_order.get('id'):
+                updated_order['id'] = str(updated_order['id'])
+            if updated_order.get('restaurant_id'):
+                updated_order['restaurant_id'] = str(updated_order['restaurant_id'])
+            if updated_order.get('delivery_id'):
+                updated_order['delivery_id'] = str(updated_order['delivery_id'])
+            if updated_order.get('client_id'):
+                updated_order['client_id'] = str(updated_order['client_id'])
+            if updated_order.get('created_at'):
+                updated_order['created_at'] = updated_order['created_at'].isoformat()
+            if updated_order.get('updated_at'):
+                updated_order['updated_at'] = updated_order['updated_at'].isoformat()
+            
+            # Remove códigos sensíveis
+            updated_order.pop('pickup_code', None)
+            updated_order.pop('delivery_code', None)
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Pedido aceito com sucesso!',
+                'order': updated_order
+            }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Erro crítico em accept_order_by_delivery: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({'error': 'Erro interno do servidor ao aceitar pedido'}), 500
+    finally:
+        if conn:
+            conn.close()
+            logger.info("Conexão com banco fechada em accept_order_by_delivery")
             logger.info("Conexão com banco fechada em get_available_orders")
