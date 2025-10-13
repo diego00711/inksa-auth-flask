@@ -299,7 +299,7 @@ def get_available_orders():
     logger.info("=== INÍCIO get_available_orders ===")
     conn = None
     try:
-        # 1. Autenticação: Garante que apenas entregadores acessem
+        # 1. Autenticação
         user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
             logger.error(f"Erro de autenticação: {error}")
@@ -318,8 +318,7 @@ def get_available_orders():
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             
-            # 2. Lógica da Query: Busca pedidos prontos e sem entregador
-            # ✅ CORREÇÃO: Concatenar campos de endereço do restaurante
+            # 2. Query SQL
             sql_query = """
                 SELECT 
                     o.id, 
@@ -353,39 +352,26 @@ def get_available_orders():
             
             logger.info(f"Query executada. Total de linhas: {len(rows)}")
             
-            # ✅ CORREÇÃO: Serialização manual com tratamento de JSON
+            # 3. Serialização
             available_orders = []
             for row in rows:
                 try:
-                    # Converte o row para dict
                     order_dict = dict(row)
                     
-                    # ✅ Trata o campo delivery_address se for string JSON
+                    # Trata delivery_address JSON
                     if isinstance(order_dict.get('delivery_address'), str):
                         try:
                             order_dict['delivery_address'] = json.loads(order_dict['delivery_address'])
                         except (json.JSONDecodeError, TypeError):
-                            # Se não for JSON válido, mantém como string
                             pass
                     
-                    # ✅ Trata o campo restaurant_address se for string JSON
-                    if isinstance(order_dict.get('restaurant_address'), str):
-                        try:
-                            order_dict['restaurant_address'] = json.loads(order_dict['restaurant_address'])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    
-                    # ✅ Converte created_at para string ISO
+                    # Converte tipos
                     if order_dict.get('created_at'):
                         order_dict['created_at'] = order_dict['created_at'].isoformat()
-                    
-                    # ✅ Converte UUIDs para string
                     if order_dict.get('id'):
                         order_dict['id'] = str(order_dict['id'])
                     if order_dict.get('restaurant_id'):
                         order_dict['restaurant_id'] = str(order_dict['restaurant_id'])
-                    
-                    # ✅ CORREÇÃO CRÍTICA: Converter valores monetários para float
                     if order_dict.get('total_amount'):
                         order_dict['total_amount'] = float(order_dict['total_amount'])
                     if order_dict.get('delivery_fee'):
@@ -398,8 +384,6 @@ def get_available_orders():
                     continue
             
             logger.info(f"✅ Processados {len(available_orders)} pedidos disponíveis com sucesso")
-            
-            # 3. Retorno: Retorna a lista de pedidos disponíveis
             return jsonify(available_orders), 200
 
     except Exception as e:
@@ -408,8 +392,10 @@ def get_available_orders():
     finally:
         if conn:
             conn.close()
-            # Adicionar este endpoint no final do arquivo src/routes/orders.py
+            logger.info("Conexão com banco fechada em get_available_orders")
 
+
+# ✅ ENDPOINT SEPARADO PARA ACEITAR PEDIDO
 @orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
 def accept_order_by_delivery(order_id):
     """
@@ -438,7 +424,7 @@ def accept_order_by_delivery(order_id):
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             
-            # 2. Buscar o ID do perfil do entregador
+            # 2. Buscar perfil do entregador
             cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
             delivery_profile = cur.fetchone()
             
@@ -449,7 +435,7 @@ def accept_order_by_delivery(order_id):
             delivery_profile_id = delivery_profile['id']
             logger.info(f"Delivery profile ID: {delivery_profile_id}")
             
-            # 3. Verificar se o pedido existe e está disponível
+            # 3. Verificar pedido
             cur.execute("""
                 SELECT id, status, delivery_id 
                 FROM orders 
@@ -462,16 +448,16 @@ def accept_order_by_delivery(order_id):
                 logger.error(f"Pedido {order_id} não encontrado")
                 return jsonify({'error': 'Pedido não encontrado'}), 404
             
-            # 4. Validar se o pedido pode ser aceito
+            # 4. Validações
             if order['status'] != 'ready':
-                logger.warning(f"Pedido {order_id} não está pronto. Status atual: {order['status']}")
+                logger.warning(f"Pedido {order_id} não está pronto. Status: {order['status']}")
                 return jsonify({'error': f'Pedido não está disponível. Status: {order["status"]}'}), 400
             
             if order['delivery_id'] is not None:
-                logger.warning(f"Pedido {order_id} já foi aceito por outro entregador")
+                logger.warning(f"Pedido {order_id} já aceito por outro entregador")
                 return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
             
-            # 5. Aceitar o pedido: atribuir ao entregador e mudar status
+            # 5. Aceitar pedido
             cur.execute("""
                 UPDATE orders 
                 SET delivery_id = %s, 
@@ -519,4 +505,3 @@ def accept_order_by_delivery(order_id):
         if conn:
             conn.close()
             logger.info("Conexão com banco fechada em accept_order_by_delivery")
-            logger.info("Conexão com banco fechada em get_available_orders")
