@@ -385,6 +385,12 @@ def get_available_orders():
                     if order_dict.get('restaurant_id'):
                         order_dict['restaurant_id'] = str(order_dict['restaurant_id'])
                     
+                    # ✅ CORREÇÃO CRÍTICA: Converter valores monetários para float
+                    if order_dict.get('total_amount'):
+                        order_dict['total_amount'] = float(order_dict['total_amount'])
+                    if order_dict.get('delivery_fee'):
+                        order_dict['delivery_fee'] = float(order_dict['delivery_fee'])
+                    
                     available_orders.append(order_dict)
                     
                 except Exception as row_error:
