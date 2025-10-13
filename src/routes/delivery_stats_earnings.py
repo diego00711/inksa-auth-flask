@@ -1,15 +1,12 @@
-# inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO FINAL E CORRIGIDA
+# inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO CORRIGIDA
 
 from flask import Blueprint, request, jsonify
 from datetime import date, timedelta
 import psycopg2.extras
 import traceback
 
-# --- INÍCIO DA CORREÇÃO ---
-# Importa 'get_db_connection' de helpers e 'delivery_token_required' do novo arquivo de decoradores.
 from ..utils.helpers import get_db_connection
 from ..utils.decorators import delivery_token_required
-# --- FIM DA CORREÇÃO ---
 
 delivery_stats_earnings_bp = Blueprint('delivery_stats_earnings_bp', __name__)
 
@@ -43,6 +40,7 @@ def get_dashboard_stats():
                 "todayEarnings": 0.0,
                 "avgRating": float(delivery_profile.get('rating') or 0.0),
                 "totalDeliveries": delivery_profile.get('total_deliveries') or 0,
+                "available": 0,  # ✅ Número de pedidos disponíveis
                 "activeOrders": [],
                 "weeklyEarnings": [],
                 "dailyGoal": float(delivery_profile.get('daily_goal') or 300.0),
@@ -56,6 +54,7 @@ def get_dashboard_stats():
                 "is_available": delivery_profile.get('is_available', False)
             }
 
+            # Ganhos de hoje
             cur.execute("""
                 SELECT COALESCE(COUNT(id), 0) as count, COALESCE(SUM(delivery_fee), 0) as total
                 FROM orders WHERE delivery_id = %s AND status = 'delivered' AND DATE(created_at) = %s
@@ -65,6 +64,18 @@ def get_dashboard_stats():
                 response_data["todayDeliveries"] = today_stats['count']
                 response_data["todayEarnings"] = float(today_stats['total'])
 
+            # ✅ CORREÇÃO 1: Buscar pedidos DISPONÍVEIS (sem entregador)
+            cur.execute("""
+                SELECT COUNT(*) as available_count
+                FROM orders
+                WHERE status IN ('pending', 'accepted', 'preparing', 'ready') 
+                AND delivery_id IS NULL
+            """)
+            available_result = cur.fetchone()
+            if available_result:
+                response_data["available"] = available_result['available_count']
+
+            # Ganhos semanais
             day_labels = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"]
             start_of_week = today - timedelta(days=today.weekday() + 1 if today.weekday() != 6 else 0)
             cur.execute("""
@@ -81,6 +92,7 @@ def get_dashboard_stats():
                     "value": earnings_by_day.get(current_day, 0.0)
                 })
 
+            # Próximo pagamento
             cur.execute("""
                 SELECT payment_date, amount FROM payouts
                 WHERE delivery_id = %s AND status = 'pending' ORDER BY payment_date ASC LIMIT 1;
@@ -92,18 +104,20 @@ def get_dashboard_stats():
                     "amount": float(next_payment_data['amount'])
                 }
 
+            # Total de entregadores
             cur.execute("SELECT COUNT(id) as total FROM delivery_profiles WHERE is_active = TRUE;")
             total_deliverers_data = cur.fetchone()
             if total_deliverers_data:
                 response_data["totalDeliverers"] = total_deliverers_data['total']
 
+            # ✅ CORREÇÃO 2: Pedidos ativos DO ENTREGADOR (já aceitos por ele)
             cur.execute("""
                 SELECT o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, o.delivery_address,
                        CONCAT(cp.first_name, ' ', cp.last_name) as client_name, rp.restaurant_name,
                        rp.address_street, rp.address_number, rp.address_neighborhood
                 FROM orders o
-                LEFT JOIN client_profiles cp ON o.client_id = cp.user_id
-                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.user_id
+                LEFT JOIN client_profiles cp ON o.client_id = cp.id
+                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE o.delivery_id = %s AND o.status IN ('accepted', 'preparing', 'ready', 'delivering')
                 ORDER BY o.created_at ASC
             """, (profile_id,))
@@ -111,7 +125,7 @@ def get_dashboard_stats():
             active_orders = []
             for order in cur.fetchall():
                 active_orders.append({
-                    'id': order['id'],
+                    'id': str(order['id']),
                     'status': order['status'],
                     'total_amount': float(order.get('total_amount') or 0.0),
                     'delivery_fee': float(order.get('delivery_fee') or 0.0),
@@ -194,12 +208,13 @@ def get_earnings_history():
             
             ordered_daily_earnings = [{"earning_date": date_str, **data} for date_str, data in sorted(full_period_earnings.items())]
 
+            # ✅ CORREÇÃO 3: JOINs corrigidos aqui também
             cur.execute("""
                 SELECT o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, o.delivery_address,
                        CONCAT(cp.first_name, ' ', cp.last_name) as client_name, rp.restaurant_name
                 FROM orders o
-                LEFT JOIN client_profiles cp ON o.client_id = cp.user_id
-                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.user_id
+                LEFT JOIN client_profiles cp ON o.client_id = cp.id
+                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE o.delivery_id = %s AND o.status = 'delivered'
                   AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 ORDER BY o.created_at DESC;
@@ -208,7 +223,7 @@ def get_earnings_history():
             detailed_deliveries = []
             for delivery in cur.fetchall():
                 detailed_deliveries.append({
-                    'id': delivery['id'],
+                    'id': str(delivery['id']),
                     'status': delivery['status'],
                     'total_amount': float(delivery.get('total_amount') or 0.0),
                     'delivery_fee': float(delivery.get('delivery_fee') or 0.0),
