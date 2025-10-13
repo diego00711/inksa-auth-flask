@@ -302,27 +302,37 @@ def get_available_orders():
         # 1. Autenticação: Garante que apenas entregadores acessem
         user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
+            logger.error(f"Erro de autenticação: {error}")
             return error
+        
         if user_type != 'delivery':
+            logger.warning(f"Acesso negado para user_type: {user_type}")
             return jsonify({'error': 'Acesso negado. Apenas para entregadores.'}), 403
 
+        logger.info(f"Entregador autenticado: user_id={user_id}")
+        
         conn = get_db_connection()
+        if not conn:
+            logger.error("Falha ao conectar ao banco de dados")
+            return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
+            
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             
             # 2. Lógica da Query: Busca pedidos prontos e sem entregador
+            # ✅ CORREÇÃO: Tratamento correto de campos JSON
             sql_query = """
                 SELECT 
                     o.id, 
                     o.restaurant_id,
-                    rp.restaurant_name,
-                    rp.address as restaurant_address,
+                    COALESCE(rp.restaurant_name, 'Restaurante') as restaurant_name,
+                    COALESCE(rp.address, '{}') as restaurant_address,
                     o.delivery_address,
-                    o.total_amount,
-                    o.delivery_fee,
+                    COALESCE(o.total_amount, 0) as total_amount,
+                    COALESCE(o.delivery_fee, 0) as delivery_fee,
                     o.created_at
                 FROM 
                     orders o
-                JOIN 
+                LEFT JOIN 
                     restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE 
                     o.status = 'ready' 
@@ -331,16 +341,57 @@ def get_available_orders():
                     o.created_at ASC;
             """
             
+            logger.info("Executando query para buscar pedidos disponíveis...")
             cur.execute(sql_query)
-            available_orders = [dict(row) for row in cur.fetchall()]
+            rows = cur.fetchall()
             
-            logger.info(f"Encontradas {len(available_orders)} entregas disponíveis.")
+            logger.info(f"Query executada. Total de linhas: {len(rows)}")
+            
+            # ✅ CORREÇÃO: Serialização manual com tratamento de JSON
+            available_orders = []
+            for row in rows:
+                try:
+                    # Converte o row para dict
+                    order_dict = dict(row)
+                    
+                    # ✅ Trata o campo delivery_address se for string JSON
+                    if isinstance(order_dict.get('delivery_address'), str):
+                        try:
+                            order_dict['delivery_address'] = json.loads(order_dict['delivery_address'])
+                        except (json.JSONDecodeError, TypeError):
+                            # Se não for JSON válido, mantém como string
+                            pass
+                    
+                    # ✅ Trata o campo restaurant_address se for string JSON
+                    if isinstance(order_dict.get('restaurant_address'), str):
+                        try:
+                            order_dict['restaurant_address'] = json.loads(order_dict['restaurant_address'])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    
+                    # ✅ Converte created_at para string ISO
+                    if order_dict.get('created_at'):
+                        order_dict['created_at'] = order_dict['created_at'].isoformat()
+                    
+                    # ✅ Converte UUIDs para string
+                    if order_dict.get('id'):
+                        order_dict['id'] = str(order_dict['id'])
+                    if order_dict.get('restaurant_id'):
+                        order_dict['restaurant_id'] = str(order_dict['restaurant_id'])
+                    
+                    available_orders.append(order_dict)
+                    
+                except Exception as row_error:
+                    logger.error(f"Erro ao processar linha: {row_error}", exc_info=True)
+                    continue
+            
+            logger.info(f"✅ Processados {len(available_orders)} pedidos disponíveis com sucesso")
             
             # 3. Retorno: Retorna a lista de pedidos disponíveis
             return jsonify(available_orders), 200
 
     except Exception as e:
-        logger.error(f"Erro em get_available_orders: {e}", exc_info=True)
+        logger.error(f"❌ Erro crítico em get_available_orders: {e}", exc_info=True)
         return jsonify({'error': 'Erro interno do servidor ao buscar entregas disponíveis.'}), 500
     finally:
         if conn:
