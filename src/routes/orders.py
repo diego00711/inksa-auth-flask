@@ -91,12 +91,11 @@ def handle_orders():
                 total_items = sum(item.get('price', 0) * item.get('quantity', 1) for item in data['items'])
                 delivery_fee = data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
                 
-                # ✅ CORREÇÃO: Garantir que o status inicial seja salvo em INGLÊS.
                 order_data = {
                     'id': str(uuid.uuid4()), 'client_id': client_profile['id'], 'restaurant_id': data['restaurant_id'],
                     'items': json.dumps(data['items']), 'delivery_address': json.dumps(data['delivery_address']),
                     'total_amount_items': total_items, 'delivery_fee': delivery_fee, 'total_amount': total_items + delivery_fee,
-                    'status': 'pending', # <-- AQUI ESTÁ A MUDANÇA CRUCIAL
+                    'status': 'pending',
                     'pickup_code': generate_verification_code(), 'delivery_code': generate_verification_code()
                 }
                 
@@ -132,7 +131,6 @@ def update_order_status(order_id):
             order = cur.fetchone()
             if not order: return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
             
-            # ✅ CORREÇÃO: Usa o status do banco (que agora estará em inglês) diretamente.
             current_status = order['status'].strip()
             
             if not is_valid_status_transition(current_status, new_status_internal):
@@ -395,12 +393,12 @@ def get_available_orders():
             logger.info("Conexão com banco fechada em get_available_orders")
 
 
-# ✅ ENDPOINT SEPARADO PARA ACEITAR PEDIDO
+# ✅ ENDPOINT SEPARADO PARA ACEITAR PEDIDO - CORRIGIDO
 @orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
 def accept_order_by_delivery(order_id):
     """
     Endpoint para entregador aceitar um pedido disponível.
-    Atribui o pedido ao entregador e muda status para 'accepted'.
+    Atribui o pedido ao entregador e muda status para 'delivering' (saiu para entrega).
     """
     logger.info(f"=== INÍCIO accept_order_by_delivery para {order_id} ===")
     conn = None
@@ -457,11 +455,11 @@ def accept_order_by_delivery(order_id):
                 logger.warning(f"Pedido {order_id} já aceito por outro entregador")
                 return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
             
-            # 5. Aceitar pedido
+            # 5. Aceitar pedido - ✅ CORRIGIDO AQUI: status='delivering' em vez de 'accepted'
             cur.execute("""
                 UPDATE orders 
                 SET delivery_id = %s, 
-                    status = 'accepted',
+                    status = 'delivering',
                     updated_at = NOW()
                 WHERE id = %s
                 RETURNING *
@@ -471,6 +469,7 @@ def accept_order_by_delivery(order_id):
             conn.commit()
             
             logger.info(f"✅ Pedido {order_id} aceito com sucesso pelo entregador {delivery_profile_id}")
+            logger.info(f"✅ Status alterado para: delivering (saiu para entrega)")
             
             # 6. Formatar resposta
             if updated_order.get('id'):
@@ -492,7 +491,7 @@ def accept_order_by_delivery(order_id):
             
             return jsonify({
                 'status': 'success',
-                'message': 'Pedido aceito com sucesso!',
+                'message': 'Pedido aceito com sucesso! Saiu para entrega.',
                 'order': updated_order
             }), 200
 
