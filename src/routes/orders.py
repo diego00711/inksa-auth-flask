@@ -1,4 +1,4 @@
-# src/routes/orders.py (VERSÃO FINAL E CORRIGIDA)
+# src/routes/orders.py (VERSÃO FINAL COM SUPORTE A ARCHIVED)
 
 import uuid
 import json
@@ -18,22 +18,31 @@ orders_bp = Blueprint('orders', __name__)
 
 DEFAULT_DELIVERY_FEE = 5.0
 
-VALID_STATUSES_INTERNAL = {'pending', 'accepted', 'preparing', 'ready', 'delivering', 'delivered', 'cancelled'}
+# ✅ ADICIONADO 'archived'
+VALID_STATUSES_INTERNAL = {'pending', 'accepted', 'preparing', 'ready', 'delivering', 'delivered', 'cancelled', 'archived'}
+
+# ✅ ADICIONADO tradução de 'archived'
 STATUS_DISPLAY_MAP = {
     'pending': 'Pendente', 'accepted': 'Aceito', 'preparing': 'Preparando',
     'ready': 'Pronto', 'delivering': 'Saiu para Entrega', 'delivered': 'Entregue',
-    'cancelled': 'Cancelado'
+    'cancelled': 'Cancelado', 'archived': 'Arquivado'
 }
 
 def generate_verification_code(length=4):
     chars = string.ascii_uppercase.replace('I', '').replace('O', '') + string.digits.replace('0', '').replace('1', '')
     return ''.join(random.choice(chars) for _ in range(length))
 
+# ✅ ATUALIZADO para permitir arquivar pedidos entregues ou cancelados
 def is_valid_status_transition(current_status, new_status):
     valid_transitions = {
-        'pending': ['accepted', 'cancelled'], 'accepted': ['preparing', 'cancelled'],
-        'preparing': ['ready', 'cancelled'], 'ready': ['delivering', 'cancelled'],
-        'delivering': ['delivered'], 'delivered': [], 'cancelled': []
+        'pending': ['accepted', 'cancelled'],
+        'accepted': ['preparing', 'cancelled'],
+        'preparing': ['ready', 'cancelled'],
+        'ready': ['delivering', 'cancelled'],
+        'delivering': ['delivered'],
+        'delivered': ['archived'],  # ✅ Pode arquivar entregue
+        'cancelled': ['archived'],  # ✅ Pode arquivar cancelado
+        'archived': []  # Arquivados não mudam mais
     }
     return new_status in valid_transitions.get(current_status, [])
 
@@ -124,6 +133,7 @@ def update_order_status(order_id):
         if not data or 'new_status' not in data: return jsonify({"error": "Campo 'new_status' é obrigatório"}), 400
         new_status_internal = data['new_status']
         if new_status_internal not in VALID_STATUSES_INTERNAL: return jsonify({"error": f"Status inválido: '{new_status_internal}'"}), 400
+        # ✅ ATUALIZADO: permite 'archived', mas não 'delivering'/'delivered'
         if new_status_internal in ['delivering', 'delivered']: return jsonify({"error": "Use o endpoint de código para esta transição."}), 400
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -297,7 +307,6 @@ def get_available_orders():
     logger.info("=== INÍCIO get_available_orders ===")
     conn = None
     try:
-        # 1. Autenticação
         user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
             logger.error(f"Erro de autenticação: {error}")
@@ -316,7 +325,6 @@ def get_available_orders():
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             
-            # 2. Query SQL
             sql_query = """
                 SELECT 
                     o.id, 
@@ -350,20 +358,17 @@ def get_available_orders():
             
             logger.info(f"Query executada. Total de linhas: {len(rows)}")
             
-            # 3. Serialização
             available_orders = []
             for row in rows:
                 try:
                     order_dict = dict(row)
                     
-                    # Trata delivery_address JSON
                     if isinstance(order_dict.get('delivery_address'), str):
                         try:
                             order_dict['delivery_address'] = json.loads(order_dict['delivery_address'])
                         except (json.JSONDecodeError, TypeError):
                             pass
                     
-                    # Converte tipos
                     if order_dict.get('created_at'):
                         order_dict['created_at'] = order_dict['created_at'].isoformat()
                     if order_dict.get('id'):
@@ -393,17 +398,15 @@ def get_available_orders():
             logger.info("Conexão com banco fechada em get_available_orders")
 
 
-# ✅ ENDPOINT SEPARADO PARA ACEITAR PEDIDO - CORRIGIDO
 @orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
 def accept_order_by_delivery(order_id):
     """
     Endpoint para entregador aceitar um pedido disponível.
-    Atribui o pedido ao entregador e muda status para 'delivering' (saiu para entrega).
+    Atribui o pedido ao entregador e muda status para 'delivering'.
     """
     logger.info(f"=== INÍCIO accept_order_by_delivery para {order_id} ===")
     conn = None
     try:
-        # 1. Autenticação
         user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
             logger.error(f"Erro de autenticação: {error}")
@@ -422,7 +425,6 @@ def accept_order_by_delivery(order_id):
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             
-            # 2. Buscar perfil do entregador
             cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
             delivery_profile = cur.fetchone()
             
@@ -433,7 +435,6 @@ def accept_order_by_delivery(order_id):
             delivery_profile_id = delivery_profile['id']
             logger.info(f"Delivery profile ID: {delivery_profile_id}")
             
-            # 3. Verificar pedido
             cur.execute("""
                 SELECT id, status, delivery_id 
                 FROM orders 
@@ -446,7 +447,6 @@ def accept_order_by_delivery(order_id):
                 logger.error(f"Pedido {order_id} não encontrado")
                 return jsonify({'error': 'Pedido não encontrado'}), 404
             
-            # 4. Validações
             if order['status'] != 'ready':
                 logger.warning(f"Pedido {order_id} não está pronto. Status: {order['status']}")
                 return jsonify({'error': f'Pedido não está disponível. Status: {order["status"]}'}), 400
@@ -455,7 +455,7 @@ def accept_order_by_delivery(order_id):
                 logger.warning(f"Pedido {order_id} já aceito por outro entregador")
                 return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
             
-            # 5. Aceitar pedido - ✅ CORRIGIDO AQUI: status='delivering' em vez de 'accepted'
+            # ✅ Status 'delivering' quando entregador aceita
             cur.execute("""
                 UPDATE orders 
                 SET delivery_id = %s, 
@@ -469,9 +469,8 @@ def accept_order_by_delivery(order_id):
             conn.commit()
             
             logger.info(f"✅ Pedido {order_id} aceito com sucesso pelo entregador {delivery_profile_id}")
-            logger.info(f"✅ Status alterado para: delivering (saiu para entrega)")
+            logger.info(f"✅ Status alterado para: delivering")
             
-            # 6. Formatar resposta
             if updated_order.get('id'):
                 updated_order['id'] = str(updated_order['id'])
             if updated_order.get('restaurant_id'):
@@ -485,7 +484,6 @@ def accept_order_by_delivery(order_id):
             if updated_order.get('updated_at'):
                 updated_order['updated_at'] = updated_order['updated_at'].isoformat()
             
-            # Remove códigos sensíveis
             updated_order.pop('pickup_code', None)
             updated_order.pop('delivery_code', None)
             
