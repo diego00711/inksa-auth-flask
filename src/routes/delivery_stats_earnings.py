@@ -40,7 +40,7 @@ def get_dashboard_stats():
                 "todayEarnings": 0.0,
                 "avgRating": float(delivery_profile.get('rating') or 0.0),
                 "totalDeliveries": delivery_profile.get('total_deliveries') or 0,
-                "available": 0,  # ✅ Número de pedidos disponíveis
+                "available": 0,
                 "activeOrders": [],
                 "weeklyEarnings": [],
                 "dailyGoal": float(delivery_profile.get('daily_goal') or 300.0),
@@ -64,7 +64,7 @@ def get_dashboard_stats():
                 response_data["todayDeliveries"] = today_stats['count']
                 response_data["todayEarnings"] = float(today_stats['total'])
 
-            # ✅ CORREÇÃO 1: Buscar pedidos DISPONÍVEIS (sem entregador)
+            # Buscar pedidos DISPONÍVEIS (sem entregador)
             cur.execute("""
                 SELECT COUNT(*) as available_count
                 FROM orders
@@ -110,15 +110,16 @@ def get_dashboard_stats():
             if total_deliverers_data:
                 response_data["totalDeliverers"] = total_deliverers_data['total']
 
-            # ✅ CORREÇÃO 2: Pedidos ativos DO ENTREGADOR (já aceitos por ele)
+            # ✅ CORRIGIDO: Pedidos ativos DO ENTREGADOR incluindo 'accepted_by_delivery'
             cur.execute("""
-                SELECT o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, o.delivery_address,
+                SELECT o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, o.delivery_address, o.pickup_code,
                        CONCAT(cp.first_name, ' ', cp.last_name) as client_name, rp.restaurant_name,
                        rp.address_street, rp.address_number, rp.address_neighborhood
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.delivery_id = %s AND o.status IN ('accepted', 'preparing', 'ready', 'delivering')
+                WHERE o.delivery_id = %s 
+                AND o.status IN ('accepted', 'accepted_by_delivery', 'preparing', 'ready', 'delivering')
                 ORDER BY o.created_at ASC
             """, (profile_id,))
             
@@ -135,7 +136,8 @@ def get_dashboard_stats():
                     'restaurant_name': order.get('restaurant_name'),
                     'restaurant_street': order.get('address_street'),
                     'restaurant_number': order.get('address_number'),
-                    'restaurant_neighborhood': order.get('address_neighborhood')
+                    'restaurant_neighborhood': order.get('address_neighborhood'),
+                    'pickup_code': order.get('pickup_code')  # ✅ Incluir pickup_code
                 })
             response_data["activeOrders"] = active_orders
 
@@ -208,7 +210,6 @@ def get_earnings_history():
             
             ordered_daily_earnings = [{"earning_date": date_str, **data} for date_str, data in sorted(full_period_earnings.items())]
 
-            # ✅ CORREÇÃO 3: JOINs corrigidos aqui também
             cur.execute("""
                 SELECT o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, o.delivery_address,
                        CONCAT(cp.first_name, ' ', cp.last_name) as client_name, rp.restaurant_name
