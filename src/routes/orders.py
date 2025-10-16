@@ -516,3 +516,60 @@ def accept_order_by_delivery(order_id):
         if conn:
             conn.close()
             logger.info("Conexão com banco fechada em accept_order_by_delivery")
+            @orders_bp.route('/<uuid:order_id>/codes', methods=['GET'])
+def get_order_codes(order_id):
+    """
+    Endpoint para cliente buscar os códigos (pickup_code e delivery_code) 
+    do seu próprio pedido
+    """
+    logger.info(f"=== INÍCIO get_order_codes para {order_id} ===")
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            logger.error(f"Erro de autenticação: {error}")
+            return error
+        
+        # Apenas o cliente pode ver os códigos do seu próprio pedido
+        if user_type != 'client':
+            logger.warning(f"Acesso negado para user_type: {user_type}")
+            return jsonify({'error': 'Apenas o cliente pode acessar os códigos do pedido'}), 403
+
+        logger.info(f"Cliente autenticado: user_id={user_auth_id}")
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Falha ao conectar ao banco de dados")
+            return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
+            
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Buscar o pedido e verificar se pertence ao cliente
+            cur.execute("""
+                SELECT o.id, o.status, o.pickup_code, o.delivery_code, o.client_id
+                FROM orders o
+                JOIN client_profiles cp ON o.client_id = cp.id
+                WHERE o.id = %s AND cp.user_id = %s
+            """, (str(order_id), user_auth_id))
+            
+            order = cur.fetchone()
+            
+            if not order:
+                logger.error(f"Pedido {order_id} não encontrado ou não pertence ao cliente")
+                return jsonify({'error': 'Pedido não encontrado'}), 404
+            
+            logger.info(f"✅ Códigos retornados para pedido {order_id}")
+            
+            return jsonify({
+                'order_id': str(order['id']),
+                'status': order['status'],
+                'pickup_code': order['pickup_code'],
+                'delivery_code': order['delivery_code']
+            }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Erro crítico em get_order_codes: {e}", exc_info=True)
+        return jsonify({'error': 'Erro interno do servidor'}), 500
+    finally:
+        if conn:
+            conn.close()
+            logger.info("Conexão com banco fechada em get_order_codes")
