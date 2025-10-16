@@ -1,4 +1,4 @@
-# src/routes/orders.py (VERSÃO FINAL COM SUPORTE A ARCHIVED)
+# src/routes/orders.py - COM STATUS INTERMEDIÁRIO PARA RETIRADA
 
 import uuid
 import json
@@ -18,31 +18,42 @@ orders_bp = Blueprint('orders', __name__)
 
 DEFAULT_DELIVERY_FEE = 5.0
 
-# ✅ ADICIONADO 'archived'
-VALID_STATUSES_INTERNAL = {'pending', 'accepted', 'preparing', 'ready', 'delivering', 'delivered', 'cancelled', 'archived'}
+# ✅ ADICIONADO 'accepted_by_delivery' e 'archived'
+VALID_STATUSES_INTERNAL = {
+    'pending', 'accepted', 'preparing', 'ready', 
+    'accepted_by_delivery', 'delivering', 'delivered', 
+    'cancelled', 'archived'
+}
 
-# ✅ ADICIONADO tradução de 'archived'
+# ✅ ADICIONADO tradução
 STATUS_DISPLAY_MAP = {
-    'pending': 'Pendente', 'accepted': 'Aceito', 'preparing': 'Preparando',
-    'ready': 'Pronto', 'delivering': 'Saiu para Entrega', 'delivered': 'Entregue',
-    'cancelled': 'Cancelado', 'archived': 'Arquivado'
+    'pending': 'Pendente',
+    'accepted': 'Aceito',
+    'preparing': 'Preparando',
+    'ready': 'Pronto',
+    'accepted_by_delivery': 'Aguardando Retirada',  # ✅ NOVO STATUS
+    'delivering': 'Saiu para Entrega',
+    'delivered': 'Entregue',
+    'cancelled': 'Cancelado',
+    'archived': 'Arquivado'
 }
 
 def generate_verification_code(length=4):
     chars = string.ascii_uppercase.replace('I', '').replace('O', '') + string.digits.replace('0', '').replace('1', '')
     return ''.join(random.choice(chars) for _ in range(length))
 
-# ✅ ATUALIZADO para permitir arquivar pedidos entregues ou cancelados
+# ✅ ATUALIZADO: Transições incluem accepted_by_delivery
 def is_valid_status_transition(current_status, new_status):
     valid_transitions = {
         'pending': ['accepted', 'cancelled'],
         'accepted': ['preparing', 'cancelled'],
         'preparing': ['ready', 'cancelled'],
-        'ready': ['delivering', 'cancelled'],
+        'ready': ['accepted_by_delivery', 'cancelled'],  # ✅ ready → accepted_by_delivery
+        'accepted_by_delivery': ['delivering', 'cancelled'],  # ✅ accepted_by_delivery → delivering
         'delivering': ['delivered'],
-        'delivered': ['archived'],  # ✅ Pode arquivar entregue
-        'cancelled': ['archived'],  # ✅ Pode arquivar cancelado
-        'archived': []  # Arquivados não mudam mais
+        'delivered': ['archived'],
+        'cancelled': ['archived'],
+        'archived': []
     }
     return new_status in valid_transitions.get(current_status, [])
 
@@ -133,7 +144,6 @@ def update_order_status(order_id):
         if not data or 'new_status' not in data: return jsonify({"error": "Campo 'new_status' é obrigatório"}), 400
         new_status_internal = data['new_status']
         if new_status_internal not in VALID_STATUSES_INTERNAL: return jsonify({"error": f"Status inválido: '{new_status_internal}'"}), 400
-        # ✅ ATUALIZADO: permite 'archived', mas não 'delivering'/'delivered'
         if new_status_internal in ['delivering', 'delivered']: return jsonify({"error": "Use o endpoint de código para esta transição."}), 400
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -175,10 +185,18 @@ def pickup_order(order_id):
             cur.execute("SELECT status, pickup_code FROM orders WHERE id = %s", (str(order_id),))
             order = cur.fetchone()
             if not order: return jsonify({"error": "Pedido não encontrado"}), 404
-            if order['status'] != 'ready': return jsonify({"error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"}), 400
-            if order['pickup_code'] != data['pickup_code'].upper(): return jsonify({"error": "Código de retirada inválido"}), 403
+            
+            # ✅ CORRIGIDO: Aceita tanto 'ready' quanto 'accepted_by_delivery'
+            if order['status'] not in ['ready', 'accepted_by_delivery']:
+                return jsonify({"error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"}), 400
+            
+            if order['pickup_code'] != data['pickup_code'].upper():
+                return jsonify({"error": "Código de retirada inválido"}), 403
+            
+            # ✅ Muda para 'delivering' após validar código
             cur.execute("UPDATE orders SET status = 'delivering', updated_at = NOW() WHERE id = %s", (str(order_id),))
             conn.commit()
+            logger.info(f"✅ Pedido {order_id} confirmado como retirado. Status: delivering")
             return jsonify({"status": "success", "message": "Pedido retirado e em rota de entrega."}), 200
     except Exception as e:
         logger.error(f"Erro em pickup_order: {e}", exc_info=True)
@@ -300,10 +318,7 @@ def get_pending_delivery_review():
             
 @orders_bp.route('/available', methods=['GET'])
 def get_available_orders():
-    """
-    Retorna todos os pedidos com status 'ready' que ainda não foram
-    aceitos por nenhum entregador.
-    """
+    """Retorna pedidos com status 'ready' sem entregador"""
     logger.info("=== INÍCIO get_available_orders ===")
     conn = None
     try:
@@ -324,7 +339,6 @@ def get_available_orders():
             return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            
             sql_query = """
                 SELECT 
                     o.id, 
@@ -398,11 +412,12 @@ def get_available_orders():
             logger.info("Conexão com banco fechada em get_available_orders")
 
 
+# ✅ CORRIGIDO: Endpoint /accept agora usa status 'accepted_by_delivery'
 @orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
 def accept_order_by_delivery(order_id):
     """
-    Endpoint para entregador aceitar um pedido disponível.
-    Atribui o pedido ao entregador e muda status para 'delivering'.
+    Endpoint para entregador aceitar pedido.
+    Atribui ao entregador e muda status para 'accepted_by_delivery'.
     """
     logger.info(f"=== INÍCIO accept_order_by_delivery para {order_id} ===")
     conn = None
@@ -424,7 +439,6 @@ def accept_order_by_delivery(order_id):
             return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            
             cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
             delivery_profile = cur.fetchone()
             
@@ -455,11 +469,11 @@ def accept_order_by_delivery(order_id):
                 logger.warning(f"Pedido {order_id} já aceito por outro entregador")
                 return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
             
-            # ✅ Status 'delivering' quando entregador aceita
+            # ✅ CORRIGIDO: Status 'accepted_by_delivery' em vez de 'delivering'
             cur.execute("""
                 UPDATE orders 
                 SET delivery_id = %s, 
-                    status = 'delivering',
+                    status = 'accepted_by_delivery',
                     updated_at = NOW()
                 WHERE id = %s
                 RETURNING *
@@ -468,8 +482,8 @@ def accept_order_by_delivery(order_id):
             updated_order = dict(cur.fetchone())
             conn.commit()
             
-            logger.info(f"✅ Pedido {order_id} aceito com sucesso pelo entregador {delivery_profile_id}")
-            logger.info(f"✅ Status alterado para: delivering")
+            logger.info(f"✅ Pedido {order_id} aceito pelo entregador {delivery_profile_id}")
+            logger.info(f"✅ Status: accepted_by_delivery (aguardando retirada)")
             
             if updated_order.get('id'):
                 updated_order['id'] = str(updated_order['id'])
@@ -489,7 +503,7 @@ def accept_order_by_delivery(order_id):
             
             return jsonify({
                 'status': 'success',
-                'message': 'Pedido aceito com sucesso! Saiu para entrega.',
+                'message': 'Pedido aceito! Vá ao restaurante para retirar.',
                 'order': updated_order
             }), 200
 
