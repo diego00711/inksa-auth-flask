@@ -31,7 +31,7 @@ STATUS_DISPLAY_MAP = {
     'accepted': 'Aceito',
     'preparing': 'Preparando',
     'ready': 'Pronto',
-    'accepted_by_delivery': 'Aguardando Retirada',  # ✅ NOVO STATUS
+    'accepted_by_delivery': 'Aguardando Retirada',
     'delivering': 'Saiu para Entrega',
     'delivered': 'Entregue',
     'cancelled': 'Cancelado',
@@ -42,14 +42,13 @@ def generate_verification_code(length=4):
     chars = string.ascii_uppercase.replace('I', '').replace('O', '') + string.digits.replace('0', '').replace('1', '')
     return ''.join(random.choice(chars) for _ in range(length))
 
-# ✅ ATUALIZADO: Transições incluem accepted_by_delivery
 def is_valid_status_transition(current_status, new_status):
     valid_transitions = {
         'pending': ['accepted', 'cancelled'],
         'accepted': ['preparing', 'cancelled'],
         'preparing': ['ready', 'cancelled'],
-        'ready': ['accepted_by_delivery', 'cancelled'],  # ✅ ready → accepted_by_delivery
-        'accepted_by_delivery': ['delivering', 'cancelled'],  # ✅ accepted_by_delivery → delivering
+        'ready': ['accepted_by_delivery', 'cancelled'],
+        'accepted_by_delivery': ['delivering', 'cancelled'],
         'delivering': ['delivered'],
         'delivered': ['archived'],
         'cancelled': ['archived'],
@@ -186,14 +185,12 @@ def pickup_order(order_id):
             order = cur.fetchone()
             if not order: return jsonify({"error": "Pedido não encontrado"}), 404
             
-            # ✅ CORRIGIDO: Aceita tanto 'ready' quanto 'accepted_by_delivery'
             if order['status'] not in ['ready', 'accepted_by_delivery']:
                 return jsonify({"error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"}), 400
             
             if order['pickup_code'] != data['pickup_code'].upper():
                 return jsonify({"error": "Código de retirada inválido"}), 403
             
-            # ✅ Muda para 'delivering' após validar código
             cur.execute("UPDATE orders SET status = 'delivering', updated_at = NOW() WHERE id = %s", (str(order_id),))
             conn.commit()
             logger.info(f"✅ Pedido {order_id} confirmado como retirado. Status: delivering")
@@ -212,19 +209,43 @@ def complete_order(order_id):
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
-        if user_type not in ['restaurant', 'delivery']: return jsonify({"error": "Acesso não autorizado para completar a entrega"}), 403
+        if user_type not in ['restaurant', 'delivery']: 
+            return jsonify({"error": "Acesso não autorizado para completar a entrega"}), 403
+        
         data = request.get_json()
-        if not data or 'delivery_code' not in data: return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
+        if not data or 'delivery_code' not in data: 
+            return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
+        
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT status, delivery_code FROM orders WHERE id = %s", (str(order_id),))
             order = cur.fetchone()
-            if not order: return jsonify({"error": "Pedido não encontrado"}), 404
-            if order['status'] != 'delivering': return jsonify({"error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"}), 400
-            if order['delivery_code'] != data['delivery_code'].upper(): return jsonify({"error": "Código de entrega inválido"}), 403
-            cur.execute("UPDATE orders SET status = 'delivered', updated_at = NOW(), completed_at = NOW() WHERE id = %s", (str(order_id),))
+            
+            if not order: 
+                return jsonify({"error": "Pedido não encontrado"}), 404
+            
+            if order['status'] != 'delivering': 
+                return jsonify({
+                    "error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"
+                }), 400
+            
+            if order['delivery_code'] != data['delivery_code'].upper(): 
+                return jsonify({"error": "Código de entrega inválido"}), 403
+            
+            # ✅ CORRIGIDO: Removido completed_at que não existe
+            cur.execute(
+                "UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = %s", 
+                (str(order_id),)
+            )
             conn.commit()
-            return jsonify({"status": "success", "message": "Pedido entregue com sucesso!"}), 200
+            
+            logger.info(f"✅ Pedido {order_id} marcado como entregue!")
+            
+            return jsonify({
+                "status": "success", 
+                "message": "Pedido entregue com sucesso!"
+            }), 200
+            
     except Exception as e:
         logger.error(f"Erro em complete_order: {e}", exc_info=True)
         if conn: conn.rollback()
@@ -411,14 +432,9 @@ def get_available_orders():
             conn.close()
             logger.info("Conexão com banco fechada em get_available_orders")
 
-
-# ✅ CORRIGIDO: Endpoint /accept agora usa status 'accepted_by_delivery'
 @orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
 def accept_order_by_delivery(order_id):
-    """
-    Endpoint para entregador aceitar pedido.
-    Atribui ao entregador e muda status para 'accepted_by_delivery'.
-    """
+    """Endpoint para entregador aceitar pedido"""
     logger.info(f"=== INÍCIO accept_order_by_delivery para {order_id} ===")
     conn = None
     try:
@@ -469,7 +485,6 @@ def accept_order_by_delivery(order_id):
                 logger.warning(f"Pedido {order_id} já aceito por outro entregador")
                 return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
             
-            # ✅ CORRIGIDO: Status 'accepted_by_delivery' em vez de 'delivering'
             cur.execute("""
                 UPDATE orders 
                 SET delivery_id = %s, 
@@ -516,12 +531,11 @@ def accept_order_by_delivery(order_id):
         if conn:
             conn.close()
             logger.info("Conexão com banco fechada em accept_order_by_delivery")
-            @orders_bp.route('/<uuid:order_id>/codes', methods=['GET'])
+
+# ✅ CORRIGIDO: Função agora está no nível correto (não dentro de outra função)
+@orders_bp.route('/<uuid:order_id>/codes', methods=['GET'])
 def get_order_codes(order_id):
-    """
-    Endpoint para cliente buscar os códigos (pickup_code e delivery_code) 
-    do seu próprio pedido
-    """
+    """Endpoint para cliente buscar os códigos do seu próprio pedido"""
     logger.info(f"=== INÍCIO get_order_codes para {order_id} ===")
     conn = None
     try:
@@ -530,7 +544,6 @@ def get_order_codes(order_id):
             logger.error(f"Erro de autenticação: {error}")
             return error
         
-        # Apenas o cliente pode ver os códigos do seu próprio pedido
         if user_type != 'client':
             logger.warning(f"Acesso negado para user_type: {user_type}")
             return jsonify({'error': 'Apenas o cliente pode acessar os códigos do pedido'}), 403
@@ -543,7 +556,6 @@ def get_order_codes(order_id):
             return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
             
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Buscar o pedido e verificar se pertence ao cliente
             cur.execute("""
                 SELECT o.id, o.status, o.pickup_code, o.delivery_code, o.client_id
                 FROM orders o
