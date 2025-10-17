@@ -123,9 +123,18 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
+        # ✅ ATUALIZADO: Configuração completa com PIX e todos os métodos de pagamento
         preference_data = {
             "items": items_mp,
-            "payer": {"email": dados_pedido.get('cliente_email', 'comprador@exemplo.com.br')},
+            "payer": {
+                "email": dados_pedido.get('cliente_email', 'comprador@exemplo.com.br')
+            },
+            "payment_methods": {
+                "excluded_payment_methods": [],      # ✅ Não exclui nenhum método específico
+                "excluded_payment_types": [],        # ✅ Permite todos: PIX, cartão, boleto, etc
+                "installments": 12,                  # ✅ Até 12x no cartão
+                "default_installments": 1            # ✅ Padrão: à vista
+            },
             "back_urls": {
                 "success": urls_retorno.get('sucesso', f"{FRONTEND_URL}/pagamento/sucesso"),
                 "failure": urls_retorno.get('falha', f"{FRONTEND_URL}/pagamento/falha"),
@@ -133,7 +142,9 @@ def criar_preferencia_mercado_pago():
             },
             "auto_return": "approved",
             "external_reference": dados_pedido.get('pedido_id', 'id_pedido_temp'),
-            "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp"
+            "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp",
+            "statement_descriptor": "INKSA DELIVERY",  # ✅ Nome que aparece na fatura do cartão
+            "binary_mode": False                       # ✅ Permite pagamentos pendentes (PIX, boleto)
         }
         
         logging.info(f"🚀 Enviando preferência para Mercado Pago...")
@@ -201,7 +212,7 @@ def mercadopago_webhook():
             external_reference = payment_data.get("external_reference")
             
             if status == 'approved':
-                logging.info(f"Pagamento {resource_id} APROVADO. Iniciando cálculos de repasse.")
+                logging.info(f"💰 Pagamento {resource_id} APROVADO! Iniciando cálculos de repasse.")
                 response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).single().execute()
                 if response_supabase.data:
                     pedido_do_bd = response_supabase.data
@@ -211,6 +222,7 @@ def mercadopago_webhook():
                     
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
                     valor_para_entregador = float(pedido_do_bd.get('delivery_fee', 0.0))
+                    
                     update_data = {
                         'status_pagamento': status,
                         'comissao_plataforma': round(comissao_plataforma, 2),
@@ -218,15 +230,24 @@ def mercadopago_webhook():
                         'valor_repassado_entregador': round(valor_para_entregador, 2),
                         'id_transacao_mp': resource_id
                     }
+                    
                     supabase_client.table('orders').update(update_data).eq('id', external_reference).execute()
-                    logging.info(f"Pedido {external_reference} atualizado no Supabase com status e repasses.")
+                    
+                    logging.info(f"✅ Pedido {external_reference} atualizado com repasses:")
+                    logging.info(f"   💵 Comissão plataforma: R$ {update_data['comissao_plataforma']}")
+                    logging.info(f"   🍽️ Valor restaurante: R$ {update_data['valor_repassado_restaurante']}")
+                    logging.info(f"   🚴 Valor entregador: R$ {update_data['valor_repassado_entregador']}")
                 else:
-                    logging.warning("Não foi possível calcular repasses: Pedido não encontrado no Supabase.")
+                    logging.warning("⚠️ Não foi possível calcular repasses: Pedido não encontrado no Supabase.")
             
             elif status in ['pending', 'in_process', 'rejected']:
-                supabase_client.table('orders').update({'status_pagamento': status, 'id_transacao_mp': resource_id}).eq('id', external_reference).execute()
+                logging.info(f"📝 Pagamento {resource_id} com status: {status}")
+                supabase_client.table('orders').update({
+                    'status_pagamento': status, 
+                    'id_transacao_mp': resource_id
+                }).eq('id', external_reference).execute()
 
         except Exception as e:
-            logging.error(f"Erro ao processar webhook de pagamento: {e}", exc_info=True)
+            logging.error(f"❌ Erro ao processar webhook de pagamento: {e}", exc_info=True)
             
     return jsonify({"status": "ok"}), 200
