@@ -8,7 +8,6 @@ import logging
 import hmac
 import hashlib
 import time
-# from src import config  # <<< MUDANÇA: REMOVIDA a importação problemática
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -67,30 +66,63 @@ def verify_mp_signature(req, secret):
 
 @mp_payment_bp.route('/pagamentos/criar_preferencia', methods=['POST'])
 def criar_preferencia_mercado_pago():
+    logging.info("🎯 === INICIANDO CRIAÇÃO DE PREFERÊNCIA DE PAGAMENTO ===")
     try:
         sdk = current_app.mp_sdk
         if sdk is None:
+            logging.error("❌ SDK do Mercado Pago não inicializado!")
             return jsonify({"erro": "Serviço de pagamento indisponível. Credenciais do Mercado Pago ausentes."}), 503
+        
         dados_pedido = request.json
+        logging.info(f"📦 Dados recebidos: {dados_pedido}")
+        
         if not dados_pedido:
+            logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
+        
+        # ✅ CORREÇÃO: Converte strings para números e valida tipos
         items_mp = []
         items_from_request = dados_pedido.get('itens', [])
-        for item in items_from_request:
-            preco = item.get('unit_price')
-            if preco is not None:
-                try:
-                    if float(preco) > 0:
-                        items_mp.append(item)
-                except (ValueError, TypeError):
-                    pass
+        
+        logging.info(f"📋 Processando {len(items_from_request)} itens...")
+        
+        for idx, item in enumerate(items_from_request):
+            try:
+                # Converte valores para os tipos corretos
+                preco = float(item.get('unit_price', 0))
+                quantidade = int(item.get('quantity', 1))
+                titulo = str(item.get('title', f'Item {idx + 1}'))
+                
+                if preco > 0 and quantidade > 0:
+                    # Cria item com tipos corretos (número, não string)
+                    item_corrigido = {
+                        'title': titulo,
+                        'quantity': quantidade,
+                        'unit_price': preco  # ✅ Sempre número float
+                    }
+                    items_mp.append(item_corrigido)
+                    logging.info(f"✅ Item {idx + 1} adicionado: {titulo} - R$ {preco} x {quantidade}")
+                else:
+                    logging.warning(f"⚠️ Item {idx + 1} ignorado (preço ou quantidade inválidos): {item}")
+                    
+            except (ValueError, TypeError) as e:
+                logging.error(f"❌ Erro ao processar item {idx + 1}: {e} - Item: {item}")
+                continue
+        
         if not items_mp:
+            logging.error("❌ Nenhum item válido para processar!")
             return jsonify({"erro": "A lista de itens está vazia ou todos os itens têm valor zero."}), 400
+        
+        logging.info(f"✅ Total de itens válidos: {len(items_mp)}")
+        
         urls_retorno = dados_pedido.get('urls_retorno', {})
         FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
         notification_url_mp_base = os.environ.get("MERCADO_PAGO_WEBHOOK_URL")
+        
         if not notification_url_mp_base:
+            logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
+        
         preference_data = {
             "items": items_mp,
             "payer": {"email": dados_pedido.get('cliente_email', 'comprador@exemplo.com.br')},
@@ -103,20 +135,33 @@ def criar_preferencia_mercado_pago():
             "external_reference": dados_pedido.get('pedido_id', 'id_pedido_temp'),
             "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp"
         }
+        
+        logging.info(f"🚀 Enviando preferência para Mercado Pago...")
+        logging.info(f"📋 Preference data: {preference_data}")
+        
         preference_response = sdk.preference().create(preference_data)
+        
         if "response" not in preference_response or preference_response.get("status", 200) >= 400:
+            erro_detalhes = preference_response.get("response", {}).get("message", "Erro desconhecido do MP.")
+            logging.error(f"❌ Mercado Pago recusou a criação: {erro_detalhes}")
+            logging.error(f"❌ Resposta completa do MP: {preference_response}")
             return jsonify({
                 "erro": "O Mercado Pago recusou a criação do pagamento.", 
-                "detalhes": preference_response.get("response", {}).get("message", "Erro desconhecido do MP.")
+                "detalhes": erro_detalhes
             }), 400
+        
         preference = preference_response["response"]
+        logging.info(f"✅ Preferência criada com sucesso! ID: {preference['id']}")
+        logging.info(f"✅ Link de checkout: {preference['init_point']}")
+        
         return jsonify({
             "mensagem": "Preferência de pagamento criada com sucesso!",
             "checkout_link": preference["init_point"],
             "preference_id": preference["id"]
         }), 200
+        
     except Exception as e:
-        logging.error(f"Erro CRÍTICO ao criar preferência de pagamento: {e}", exc_info=True)
+        logging.error(f"❌ ERRO CRÍTICO ao criar preferência de pagamento: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
 
 
@@ -162,7 +207,6 @@ def mercadopago_webhook():
                     pedido_do_bd = response_supabase.data
                     valor_total_itens = float(pedido_do_bd.get('total_amount_items', 0.0))
                     
-                    # <<< MUDANÇA: Usando a configuração carregada na aplicação
                     comissao_plataforma = valor_total_itens * current_app.config['PLATFORM_COMMISSION_RATE']
                     
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
