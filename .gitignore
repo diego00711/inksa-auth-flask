@@ -119,3 +119,8 @@ npm-debug.log*
 supabase/.temp/
 # Do NOT ignore migrations:
 # supabase/migrations/ (keep tracked)
+.env
+.env.*
+.env.local
+.env.production
+*.env
