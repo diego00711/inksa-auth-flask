@@ -16,14 +16,16 @@ def get_date_range_for_cycle(cycle_type: str):
     elif cycle_type == 'bi-weekly':
         start_date = end_date - timedelta(days=15)
     elif cycle_type == 'monthly':
-        # Aproximação simples para mensal
         start_date = end_date - timedelta(days=30)
     else:
         raise ValueError("Tipo de ciclo inválido. Use 'weekly', 'bi-weekly', ou 'monthly'.")
+    
+    logging.info(f"📅 Período calculado: {start_date.date()} até {end_date.date()}")
     return start_date, end_date
 
 
 def _to_decimal(val: Any) -> Decimal:
+    """Converte qualquer valor para Decimal de forma segura."""
     if val is None:
         return Decimal('0')
     if isinstance(val, Decimal):
@@ -31,7 +33,9 @@ def _to_decimal(val: Any) -> Decimal:
     try:
         return Decimal(str(val))
     except Exception:
+        logging.warning(f"⚠️ Não foi possível converter {val} para Decimal. Usando 0.")
         return Decimal('0')
+
 
 def process_payouts_for_cycle(
     cycle_type: str,
@@ -41,25 +45,41 @@ def process_payouts_for_cycle(
     Processa e gera registros de 'payout' para todos os parceiros de um determinado tipo e ciclo.
     Retorna (generated_payouts, count) em caso de sucesso, ou ({"error": ...}, 0) em caso de erro.
     """
+    logging.info(f"🎯 === INICIANDO PROCESSAMENTO DE PAYOUTS ===")
+    logging.info(f"📋 Tipo: {partner_type} | Ciclo: {cycle_type}")
+    
     if partner_type not in ['restaurant', 'delivery']:
         raise ValueError("Tipo de parceiro inválido. Use 'restaurant' ou 'delivery'.")
 
     start_date, end_date = get_date_range_for_cycle(cycle_type)
     conn = get_db_connection()
+    
     if not conn:
-        logging.error("Não foi possível conectar à base de dados para processar pagamentos.")
+        logging.error("❌ Não foi possível conectar à base de dados!")
         return {"error": "DB connection failed"}, 0
 
     generated_payouts: List[Dict[str, Any]] = []
     payouts_generated_count = 0
 
+    # ✅ CORREÇÃO: Nomes corretos das colunas
     profile_table = f"{partner_type}_profiles"
-    amount_column = f"valor_repassado_{partner_type}"
+    
+    # Para delivery: usa 'valor_repassado_entregador', não 'valor_repassado_delivery'
+    if partner_type == 'delivery':
+        amount_column = "valor_repassado_entregador"
+    else:
+        amount_column = f"valor_repassado_{partner_type}"
+    
     payout_id_column = f"{partner_type}_payout_id"
     partner_id_column = f"{partner_type}_id"
+    
+    logging.info(f"📊 Configuração:")
+    logging.info(f"   - Tabela: {profile_table}")
+    logging.info(f"   - Coluna de valor: {amount_column}")
+    logging.info(f"   - Coluna de payout: {payout_id_column}")
+    logging.info(f"   - Coluna de parceiro: {partner_id_column}")
 
     try:
-        # Transação explícita para garantir atomicidade (insert payout + update orders)
         with conn:
             with conn.cursor() as cur:
                 # 1) Encontrar todos os parceiros elegíveis para este ciclo
@@ -68,21 +88,26 @@ def process_payouts_for_cycle(
                     (cycle_type,)
                 )
                 eligible_partners = cur.fetchall()
-                logging.info(
-                    f"Encontrados {len(eligible_partners)} parceiros do tipo '{partner_type}' para o ciclo '{cycle_type}'."
-                )
+                
+                logging.info(f"✅ Encontrados {len(eligible_partners)} parceiros elegíveis")
 
-                # 2) Para cada parceiro, calcular o valor a ser repassado e criar payout
-                for partner in eligible_partners:
+                if not eligible_partners:
+                    logging.warning(f"⚠️ Nenhum parceiro encontrado com ciclo '{cycle_type}'")
+                    return [], 0
+
+                # 2) Para cada parceiro, calcular o valor a ser repassado
+                for idx, partner in enumerate(eligible_partners, 1):
                     partner_id = partner[0]
+                    logging.info(f"🔄 Processando parceiro {idx}/{len(eligible_partners)}: {partner_id}")
 
-                    # 3) Buscar todos os pedidos pagos, concluídos e ainda não repassados dentro do período, com locking para evitar corrida
+                    # 3) Buscar pedidos pagos e entregues ainda não repassados
+                    # ✅ CORREÇÃO: status = 'delivered' (não 'Concluído')
                     cur.execute(
                         f"""
                         SELECT id, {amount_column}
                         FROM orders
                         WHERE {partner_id_column} = %s
-                          AND status = 'Concluído' -- status finalizado
+                          AND status = 'delivered'
                           AND status_pagamento = 'approved'
                           AND created_at BETWEEN %s AND %s
                           AND {payout_id_column} IS NULL
@@ -90,17 +115,24 @@ def process_payouts_for_cycle(
                         """,
                         (partner_id, start_date, end_date)
                     )
+                    
                     unpaid_orders = cur.fetchall()
+                    
                     if not unpaid_orders:
-                        continue  # Nenhum pedido elegível neste período
+                        logging.info(f"   ⏭️ Nenhum pedido elegível para este parceiro")
+                        continue
 
                     total_amount = sum(_to_decimal(row[1]) for row in unpaid_orders)
+                    
                     if total_amount <= 0:
+                        logging.warning(f"   ⚠️ Valor total é zero ou negativo: {total_amount}")
                         continue
 
                     order_ids_included = [row[0] for row in unpaid_orders]
+                    
+                    logging.info(f"   💰 Total: R$ {total_amount} ({len(order_ids_included)} pedidos)")
 
-                    # 4) Inserir o registro de payout mantendo o schema atual
+                    # 4) Inserir o registro de payout
                     payout_data = {
                         "partner_id": partner_id,
                         "partner_type": partner_type,
@@ -118,7 +150,9 @@ def process_payouts_for_cycle(
                             amount,
                             period_start,
                             period_end,
-                            order_ids_included
+                            order_ids_included,
+                            status,
+                            created_at
                         )
                         VALUES (
                             %(partner_id)s,
@@ -126,24 +160,30 @@ def process_payouts_for_cycle(
                             %(amount)s,
                             %(period_start)s,
                             %(period_end)s,
-                            %(order_ids_included)s
+                            %(order_ids_included)s,
+                            'pending',
+                            NOW()
                         )
                         RETURNING id;
                         """,
                         payout_data
                     )
+                    
                     new_payout_id = cur.fetchone()[0]
+                    logging.info(f"   ✅ Payout criado: {new_payout_id}")
 
                     # 5) Vincular pedidos ao payout
                     cur.execute(
                         f"UPDATE orders SET {payout_id_column} = %s WHERE id = ANY(%s)",
                         (new_payout_id, order_ids_included)
                     )
+                    
+                    logging.info(f"   ✅ {len(order_ids_included)} pedidos vinculados ao payout")
 
                     payouts_generated_count += 1
                     generated_payouts.append({
-                        "payout_id": new_payout_id,
-                        "partner_id": partner_id,
+                        "payout_id": str(new_payout_id),
+                        "partner_id": str(partner_id),
                         "partner_type": partner_type,
                         "cycle_type": cycle_type,
                         "period_start": start_date.isoformat(),
@@ -154,16 +194,17 @@ def process_payouts_for_cycle(
                         "status": "pending",
                     })
 
-                logging.info("Processamento de payouts concluído com sucesso.")
+                logging.info(f"🎉 Processamento concluído! {payouts_generated_count} payouts gerados.")
 
         return generated_payouts, payouts_generated_count
 
     except Exception as e:
-        logging.error(f"Erro ao processar payouts: {e}", exc_info=True)
+        logging.error(f"❌ ERRO CRÍTICO ao processar payouts: {e}", exc_info=True)
         return {"error": str(e)}, 0
 
     finally:
         try:
             conn.close()
+            logging.info("🔒 Conexão com banco fechada")
         except Exception:
             pass
