@@ -1,4 +1,4 @@
-# src/routes/payment.py
+# src/routes/payment.py - VERSÃO CORRIGIDA: WEBHOOK ATIVA PEDIDO APÓS PAGAMENTO
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -30,12 +30,10 @@ else:
         logging.error(f"ERRO ao inicializar cliente Supabase: {e}")
 
 
-# ✅ FUNÇÃO CORRIGIDA - Aceita webhooks mesmo sem assinatura
 def verify_mp_signature(req, secret):
     """Verifica a assinatura da notificação de webhook do Mercado Pago."""
     signature_header = req.headers.get('X-Signature')
     
-    # ✅ CORREÇÃO: Se não tem assinatura, aceita mas loga warning
     if not signature_header:
         logging.warning("⚠️ Webhook recebido SEM X-Signature - processando mesmo assim")
         return True
@@ -72,7 +70,7 @@ def verify_mp_signature(req, secret):
         else:
             logging.warning("⚠️ Assinatura do webhook INVÁLIDA - mas processando mesmo assim")
             
-        return True  # ✅ Sempre retorna True para processar
+        return True
         
     except Exception as e:
         logging.error(f"❌ Erro ao validar assinatura: {e} - processando mesmo assim")
@@ -95,7 +93,6 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
         
-        # ✅ CORREÇÃO: Converte strings para números e valida tipos
         items_mp = []
         items_from_request = dados_pedido.get('itens', [])
         
@@ -103,17 +100,15 @@ def criar_preferencia_mercado_pago():
         
         for idx, item in enumerate(items_from_request):
             try:
-                # Converte valores para os tipos corretos
                 preco = float(item.get('unit_price', 0))
                 quantidade = int(item.get('quantity', 1))
                 titulo = str(item.get('title', f'Item {idx + 1}'))
                 
                 if preco > 0 and quantidade > 0:
-                    # Cria item com tipos corretos (número, não string)
                     item_corrigido = {
                         'title': titulo,
                         'quantity': quantidade,
-                        'unit_price': preco  # ✅ Sempre número float
+                        'unit_price': preco
                     }
                     items_mp.append(item_corrigido)
                     logging.info(f"✅ Item {idx + 1} adicionado: {titulo} - R$ {preco} x {quantidade}")
@@ -138,17 +133,16 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
-        # ✅ ATUALIZADO: Configuração completa com PIX e todos os métodos de pagamento
         preference_data = {
             "items": items_mp,
             "payer": {
                 "email": dados_pedido.get('cliente_email', 'comprador@exemplo.com.br')
             },
             "payment_methods": {
-                "excluded_payment_methods": [],      # ✅ Não exclui nenhum método específico
-                "excluded_payment_types": [],        # ✅ Permite todos: PIX, cartão, boleto, etc
-                "installments": 12,                  # ✅ Até 12x no cartão
-                "default_installments": 1            # ✅ Padrão: à vista
+                "excluded_payment_methods": [],
+                "excluded_payment_types": [],
+                "installments": 12,
+                "default_installments": 1
             },
             "back_urls": {
                 "success": urls_retorno.get('sucesso', f"{FRONTEND_URL}/pagamento/sucesso"),
@@ -191,14 +185,13 @@ def criar_preferencia_mercado_pago():
         return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
 
 
-# ✅ WEBHOOK CORRIGIDO - Sempre processa mesmo sem assinatura válida
+# ✅ WEBHOOK CORRIGIDO - AGORA MUDA O STATUS DO PEDIDO PARA 'PENDING' APÓS PAGAMENTO
 @mp_payment_bp.route('/pagamentos/webhook_mp', methods=['POST'])
 def mercadopago_webhook():
     webhook_secret = os.environ.get("MERCADO_PAGO_WEBHOOK_SECRET")
     
-    # ✅ CORREÇÃO: Valida mas sempre processa
     if webhook_secret:
-        verify_mp_signature(request, webhook_secret)  # Apenas loga, não bloqueia
+        verify_mp_signature(request, webhook_secret)
     
     logging.info("✅ === WEBHOOK DO MERCADO PAGO RECEBIDO ===")
     
@@ -240,7 +233,7 @@ def mercadopago_webhook():
             logging.info(f"💳 Pagamento {resource_id} - Status: {status} - Pedido: {external_reference}")
             
             if status == 'approved':
-                logging.info(f"✅ Pagamento {resource_id} APROVADO! Iniciando cálculos de repasse.")
+                logging.info(f"✅ Pagamento {resource_id} APROVADO! Ativando pedido e calculando repasses.")
                 
                 response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).single().execute()
                 
@@ -252,7 +245,9 @@ def mercadopago_webhook():
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
                     valor_para_entregador = float(pedido_do_bd.get('delivery_fee', 0.0))
                     
+                    # ✅ CORREÇÃO CRÍTICA: Agora atualiza o 'status' para 'pending'
                     update_data = {
+                        'status': 'pending',  # ✅ ISSO ATIVA O PEDIDO PARA O RESTAURANTE!
                         'status_pagamento': status,
                         'comissao_plataforma': round(comissao_plataforma, 2),
                         'valor_repassado_restaurante': round(valor_para_restaurante, 2),
@@ -262,20 +257,31 @@ def mercadopago_webhook():
                     
                     supabase_client.table('orders').update(update_data).eq('id', external_reference).execute()
                     
-                    logging.info(f"✅ Pedido {external_reference} atualizado com repasses:")
+                    logging.info(f"✅ Pedido {external_reference} ATIVADO e atualizado com repasses:")
+                    logging.info(f"   🎯 Status mudou para: pending (agora aparece para o restaurante!)")
                     logging.info(f"   💵 Comissão plataforma: R$ {update_data['comissao_plataforma']}")
                     logging.info(f"   🍽️ Valor restaurante: R$ {update_data['valor_repassado_restaurante']}")
                     logging.info(f"   🚴 Valor entregador: R$ {update_data['valor_repassado_entregador']}")
                 else:
                     logging.warning(f"⚠️ Pedido {external_reference} não encontrado no Supabase")
             
-            elif status in ['pending', 'in_process', 'rejected']:
-                logging.info(f"📝 Pagamento {resource_id} com status: {status}")
+            elif status in ['pending', 'in_process']:
+                logging.info(f"📝 Pagamento {resource_id} com status: {status} - mantendo pedido aguardando")
+                # ✅ NÃO muda o status do pedido, mantém 'awaiting_payment'
                 supabase_client.table('orders').update({
                     'status_pagamento': status, 
                     'id_transacao_mp': resource_id
                 }).eq('id', external_reference).execute()
-                logging.info(f"✅ Status do pedido {external_reference} atualizado para: {status}")
+                logging.info(f"✅ Status de pagamento do pedido {external_reference} atualizado para: {status}")
+                
+            elif status == 'rejected':
+                logging.warning(f"❌ Pagamento {resource_id} REJEITADO")
+                # ✅ Pedido continua 'awaiting_payment' (não aparece para restaurante)
+                supabase_client.table('orders').update({
+                    'status_pagamento': status,
+                    'id_transacao_mp': resource_id
+                }).eq('id', external_reference).execute()
+                logging.info(f"✅ Pedido {external_reference} marcado como pagamento rejeitado")
 
         except Exception as e:
             logging.error(f"❌ Erro ao processar webhook de pagamento: {e}", exc_info=True)
