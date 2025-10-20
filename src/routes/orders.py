@@ -1,4 +1,4 @@
-# src/routes/orders.py - COM STATUS INTERMEDIÁRIO PARA RETIRADA
+# src/routes/orders.py - COM STATUS INTERMEDIÁRIO PARA RETIRADA + AGUARDANDO PAGAMENTO
 
 import uuid
 import json
@@ -18,15 +18,16 @@ orders_bp = Blueprint('orders', __name__)
 
 DEFAULT_DELIVERY_FEE = 5.0
 
-# ✅ ADICIONADO 'accepted_by_delivery' e 'archived'
+# ✅ ADICIONADO 'awaiting_payment', 'accepted_by_delivery' e 'archived'
 VALID_STATUSES_INTERNAL = {
-    'pending', 'accepted', 'preparing', 'ready', 
+    'awaiting_payment', 'pending', 'accepted', 'preparing', 'ready', 
     'accepted_by_delivery', 'delivering', 'delivered', 
     'cancelled', 'archived'
 }
 
-# ✅ ADICIONADO tradução
+# ✅ ADICIONADO tradução para 'awaiting_payment'
 STATUS_DISPLAY_MAP = {
+    'awaiting_payment': 'Aguardando Pagamento',
     'pending': 'Pendente',
     'accepted': 'Aceito',
     'preparing': 'Preparando',
@@ -44,6 +45,7 @@ def generate_verification_code(length=4):
 
 def is_valid_status_transition(current_status, new_status):
     valid_transitions = {
+        'awaiting_payment': ['pending', 'cancelled'],  # ✅ Webhook pode mudar para pending
         'pending': ['accepted', 'cancelled'],
         'accepted': ['preparing', 'cancelled'],
         'preparing': ['ready', 'cancelled'],
@@ -81,6 +83,7 @@ def handle_orders():
             status_filter = request.args.get('status')
             query = "SELECT o.*, rp.restaurant_name, rp.logo_url as restaurant_logo, cp.first_name as client_first_name, cp.last_name as client_last_name FROM orders o LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id LEFT JOIN client_profiles cp ON o.client_id = cp.id WHERE 1=1"
             params = []
+            
             if user_type == 'restaurant':
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                     cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_auth_id,))
@@ -88,12 +91,20 @@ def handle_orders():
                     if not profile: return jsonify({"error": "Perfil do restaurante não encontrado"}), 404
                     query += " AND o.restaurant_id = %s"
                     params.append(profile['id'])
+                    
+                    # ✅ CORREÇÃO: Restaurante NÃO vê pedidos 'awaiting_payment'
+                    query += " AND o.status != 'awaiting_payment'"
+                    logger.info("🔒 Filtrando pedidos não pagos para restaurante")
+                    
             elif user_type == 'client':
                 query += " AND o.client_id = (SELECT id FROM client_profiles WHERE user_id = %s)"
                 params.append(user_auth_id)
+                # Cliente VÊ todos os seus pedidos, incluindo os não pagos
+                
             if status_filter:
                 query += " AND o.status = %s"
                 params.append(status_filter)
+                
             query += f" ORDER BY o.{sort_by} {sort_order}"
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(query, tuple(params))
@@ -111,12 +122,20 @@ def handle_orders():
                 delivery_fee = data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
                 
                 order_data = {
-                    'id': str(uuid.uuid4()), 'client_id': client_profile['id'], 'restaurant_id': data['restaurant_id'],
-                    'items': json.dumps(data['items']), 'delivery_address': json.dumps(data['delivery_address']),
-                    'total_amount_items': total_items, 'delivery_fee': delivery_fee, 'total_amount': total_items + delivery_fee,
-                    'status': 'pending',
-                    'pickup_code': generate_verification_code(), 'delivery_code': generate_verification_code()
+                    'id': str(uuid.uuid4()), 
+                    'client_id': client_profile['id'], 
+                    'restaurant_id': data['restaurant_id'],
+                    'items': json.dumps(data['items']), 
+                    'delivery_address': json.dumps(data['delivery_address']),
+                    'total_amount_items': total_items, 
+                    'delivery_fee': delivery_fee, 
+                    'total_amount': total_items + delivery_fee,
+                    'status': 'awaiting_payment',  # ✅ CORRIGIDO: Agora começa como 'awaiting_payment'
+                    'pickup_code': generate_verification_code(), 
+                    'delivery_code': generate_verification_code()
                 }
+                
+                logger.info(f"🆕 Criando pedido {order_data['id']} com status: awaiting_payment")
                 
                 insert_query = "INSERT INTO orders (id, client_id, restaurant_id, items, delivery_address, total_amount_items, delivery_fee, total_amount, status, pickup_code, delivery_code, delivery_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL) RETURNING *"
                 cur.execute(insert_query, list(order_data.values()))
@@ -124,6 +143,9 @@ def handle_orders():
                 conn.commit()
                 new_order.pop('pickup_code', None)
                 new_order.pop('delivery_code', None)
+                
+                logger.info(f"✅ Pedido {new_order['id']} criado com sucesso! Aguardando pagamento...")
+                
                 return jsonify(new_order), 201
     except Exception as e:
         logger.error(f"Erro em handle_orders: {e}", exc_info=True)
@@ -232,7 +254,6 @@ def complete_order(order_id):
             if order['delivery_code'] != data['delivery_code'].upper(): 
                 return jsonify({"error": "Código de entrega inválido"}), 403
             
-            # ✅ CORRIGIDO: Removido completed_at que não existe
             cur.execute(
                 "UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = %s", 
                 (str(order_id),)
@@ -532,7 +553,6 @@ def accept_order_by_delivery(order_id):
             conn.close()
             logger.info("Conexão com banco fechada em accept_order_by_delivery")
 
-# ✅ CORRIGIDO: Função agora está no nível correto (não dentro de outra função)
 @orders_bp.route('/<uuid:order_id>/codes', methods=['GET'])
 def get_order_codes(order_id):
     """Endpoint para cliente buscar os códigos do seu próprio pedido"""
