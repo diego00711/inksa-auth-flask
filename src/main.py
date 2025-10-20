@@ -8,6 +8,7 @@ from flask_cors import CORS
 from flask_socketio import SocketIO
 import mercadopago
 import logging
+from datetime import datetime
 
 # --- Configuração de Path e Logging ---
 current_dir = Path(__file__).parent
@@ -141,6 +142,19 @@ else:
 def index():
     return jsonify({"status": "online", "message": "Servidor Inksa funcionando!"})
 
+@app.route('/health')
+def health_check_simple():
+    """
+    Endpoint simplificado para keep-alive do UptimeRobot.
+    Não faz consultas externas - apenas confirma que o servidor está respondendo.
+    """
+    return jsonify({
+        "status": "ok",
+        "message": "Server is running",
+        "timestamp": datetime.now().isoformat(),
+        "service": "Inksa Delivery API"
+    }), 200
+
 @app.route('/api/debug/routes')
 def debug_routes():
     rules = []
@@ -151,6 +165,10 @@ def debug_routes():
 
 @app.route('/api/health')
 def health_check():
+    """
+    Endpoint completo de health check com verificações de serviços externos.
+    Use este para monitoramento detalhado.
+    """
     return jsonify({
         "status": "healthy",
         "database": "connected" if supabase else "disconnected",
