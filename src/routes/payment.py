@@ -1,4 +1,4 @@
-# src/routes/payment.py - VERSÃO CORRIGIDA COM BUSCA VIA CLIENT_PROFILES
+# src/routes/payment.py - VERSÃO SIMPLES E FUNCIONAL
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -32,11 +32,10 @@ else:
 def verify_mp_signature(req, secret):
     """Verifica a assinatura da notificação de webhook do Mercado Pago."""
     signature_header = req.headers.get('X-Signature')
-    
     if not signature_header:
         logging.warning("⚠️ Webhook recebido SEM X-Signature - processando mesmo assim")
         return True
-    
+
     try:
         parts = {p.split('=')[0]: p.split('=')[1] for p in signature_header.split(',')}
         ts = parts.get('ts')
@@ -92,98 +91,29 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
         
-        # ✅ CORREÇÃO 1: Buscar order_id
-        order_id = dados_pedido.get('order_id') or dados_pedido.get('pedido_id')
+        # ✅ VALIDAÇÃO DO EMAIL (BLOQUEIA EMAILS DE TESTE)
+        cliente_email = dados_pedido.get('cliente_email', '')
         
-        if not order_id:
-            logging.error("❌ order_id não fornecido!")
-            return jsonify({"erro": "ID do pedido não fornecido."}), 400
+        if not cliente_email:
+            logging.error("❌ Email do cliente não fornecido!")
+            return jsonify({"erro": "Email do cliente é obrigatório."}), 400
         
-        # ✅ PASSO 1: Buscar o pedido para pegar o client_id (que é o ID do client_profiles)
-        try:
-            if supabase_client is None:
-                logging.error("❌ Cliente Supabase não disponível")
-                return jsonify({"erro": "Serviço de banco de dados indisponível."}), 500
-                
-            logging.info(f"🔍 Buscando pedido {order_id}...")
-            order_response = supabase_client.table('orders').select('client_id').eq('id', order_id).single().execute()
-            
-            if not order_response.data:
-                logging.error(f"❌ Pedido {order_id} não encontrado!")
-                return jsonify({"erro": "Pedido não encontrado."}), 404
-            
-            # Este é o ID do client_profiles, não do users!
-            client_profile_id = order_response.data.get('client_id')
-            
-            if not client_profile_id:
-                logging.error(f"❌ Pedido {order_id} não tem client_id!")
-                return jsonify({"erro": "Pedido sem cliente associado."}), 400
-            
-            logging.info(f"✅ Client Profile ID encontrado: {client_profile_id}")
-            
-        except Exception as e:
-            logging.error(f"❌ Erro ao buscar pedido: {e}", exc_info=True)
-            return jsonify({"erro": "Erro ao buscar pedido."}), 500
+        # Verificar se email contém palavras de teste
+        email_lower = cliente_email.lower()
+        palavras_proibidas = ['test', 'teste', 'exemplo', 'example', 'demo', 'testuser']
         
-        # ✅ PASSO 2: Buscar em client_profiles para pegar o user_id
-        try:
-            logging.info(f"🔍 Buscando perfil do cliente {client_profile_id}...")
-            profile_response = supabase_client.table('client_profiles').select('user_id').eq('id', client_profile_id).single().execute()
-            
-            if not profile_response.data:
-                logging.error(f"❌ Perfil do cliente {client_profile_id} não encontrado!")
-                return jsonify({"erro": "Perfil do cliente não encontrado."}), 404
-            
-            user_id = profile_response.data.get('user_id')
-            
-            if not user_id:
-                logging.error(f"❌ Perfil {client_profile_id} não tem user_id!")
-                return jsonify({"erro": "Perfil sem usuário associado."}), 400
-            
-            logging.info(f"✅ User ID encontrado: {user_id}")
-            
-        except Exception as e:
-            logging.error(f"❌ Erro ao buscar perfil do cliente: {e}", exc_info=True)
-            return jsonify({"erro": "Erro ao buscar perfil do cliente."}), 500
+        if any(palavra in email_lower for palavra in palavras_proibidas):
+            logging.error(f"❌ Email inválido (contém palavra de teste): {cliente_email}")
+            return jsonify({
+                "erro": "Email inválido. Por favor, use um email real para realizar o pagamento.",
+                "detalhes": f"O email '{cliente_email}' parece ser um email de teste. Use seu email real."
+            }), 400
         
-        # ✅ PASSO 3: Buscar email em users usando o user_id
-        try:
-            logging.info(f"🔍 Buscando email do usuário {user_id}...")
-            user_response = supabase_client.table('users').select('email').eq('id', user_id).single().execute()
-            
-            if not user_response.data:
-                logging.error(f"❌ Usuário {user_id} não encontrado!")
-                return jsonify({"erro": "Usuário não encontrado."}), 404
-            
-            user_email = user_response.data.get('email')
-            user_name = "Cliente Inksa"  # Nome genérico (tabela não tem full_name)
-            
-            # ✅ CORREÇÃO 4: Validação rigorosa de email
-            if not user_email:
-                logging.error(f"❌ Email do usuário está vazio!")
-                return jsonify({"erro": "Email do usuário não encontrado."}), 400
-            
-            # Verificar se email contém palavras de teste
-            email_lower = user_email.lower()
-            palavras_proibidas = ['test', 'teste', 'exemplo', 'example', 'demo']
-            
-            if any(palavra in email_lower for palavra in palavras_proibidas):
-                logging.error(f"❌ Email inválido (contém palavra de teste): {user_email}")
-                return jsonify({
-                    "erro": "Email inválido. Por favor, use um email real para realizar o pagamento.",
-                    "detalhes": "Emails de teste não são permitidos em pagamentos reais."
-                }), 400
-            
-            logging.info(f"✅ Email do usuário validado: {user_email}")
-            logging.info(f"📧 Usando email: {user_email} | Nome: {user_name}")
-            
-        except Exception as e:
-            logging.error(f"❌ Erro ao buscar usuário: {e}", exc_info=True)
-            return jsonify({"erro": "Erro ao buscar dados do usuário."}), 500
+        logging.info(f"✅ Email validado: {cliente_email}")
         
-        # ✅ Processar itens do pedido
+        # ✅ Processar itens
         items_mp = []
-        items_from_request = dados_pedido.get('itens', []) or dados_pedido.get('items', [])
+        items_from_request = dados_pedido.get('itens', [])
         
         logging.info(f"📋 Processando {len(items_from_request)} itens...")
         
@@ -224,19 +154,17 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
-        # ✅ CORREÇÃO 5: Usar email REAL e nome genérico
+        # ✅ Configuração da preferência com email VALIDADO
         preference_data = {
             "items": items_mp,
             "payer": {
-                "email": user_email,  # ✅ EMAIL REAL DO BANCO!
-                "name": "Cliente",
-                "surname": "Inksa"
+                "email": cliente_email  # ✅ Email que passou pela validação!
             },
             "payment_methods": {
-                "excluded_payment_methods": [],
-                "excluded_payment_types": [],
-                "installments": 12,
-                "default_installments": 1
+                "excluded_payment_methods": [],      # ✅ Não exclui nenhum método específico
+                "excluded_payment_types": [],        # ✅ Permite todos: PIX, cartão, boleto, etc
+                "installments": 12,                  # ✅ Até 12x no cartão
+                "default_installments": 1            # ✅ Padrão: à vista
             },
             "back_urls": {
                 "success": urls_retorno.get('sucesso', f"{FRONTEND_URL}/pagamento/sucesso"),
@@ -244,15 +172,14 @@ def criar_preferencia_mercado_pago():
                 "pending": urls_retorno.get('pendente', f"{FRONTEND_URL}/pagamento/pendente")
             },
             "auto_return": "approved",
-            "external_reference": order_id,
+            "external_reference": dados_pedido.get('pedido_id', 'id_pedido_temp'),
             "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp",
-            "statement_descriptor": "INKSA DELIVERY",
-            "binary_mode": False
+            "statement_descriptor": "INKSA DELIVERY",  # ✅ Nome que aparece na fatura do cartão
+            "binary_mode": False                       # ✅ Permite pagamentos pendentes (PIX, boleto)
         }
         
         logging.info(f"🚀 Enviando preferência para Mercado Pago...")
-        logging.info(f"📧 Usando email REAL do usuário: {user_email}")
-        logging.info(f"👤 Nome: Cliente Inksa")
+        logging.info(f"📧 Email do cliente: {cliente_email}")
         logging.info(f"📋 Preference data: {preference_data}")
         
         preference_response = sdk.preference().create(preference_data)
@@ -281,7 +208,7 @@ def criar_preferencia_mercado_pago():
         return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
 
 
-# ✅ WEBHOOK CORRIGIDO - AGORA MUDA O STATUS DO PEDIDO PARA 'PENDING' APÓS PAGAMENTO
+# ✅ WEBHOOK ATUALIZADO - MUDA STATUS PARA 'PENDING' APÓS PAGAMENTO APROVADO
 @mp_payment_bp.route('/pagamentos/webhook_mp', methods=['POST'])
 def mercadopago_webhook():
     webhook_secret = os.environ.get("MERCADO_PAGO_WEBHOOK_SECRET")
