@@ -1,4 +1,4 @@
-# src/routes/payment.py - VERSÃO CORRIGIDA: USA client_id AO INVÉS DE user_id
+# src/routes/payment.py - VERSÃO FINAL: USA client_id E BUSCA APENAS EMAIL
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -125,16 +125,17 @@ def criar_preferencia_mercado_pago():
             logging.error(f"❌ Erro ao buscar pedido: {e}", exc_info=True)
             return jsonify({"erro": "Erro ao buscar pedido."}), 500
         
-        # ✅ CORREÇÃO 2: Buscar email REAL do usuário no banco usando client_id
+        # ✅ CORREÇÃO 2: Buscar APENAS EMAIL (tabela não tem full_name)
         try:
-            user_response = supabase_client.table('users').select('email, full_name').eq('id', client_id).single().execute()
+            # Buscar apenas email da tabela users
+            user_response = supabase_client.table('users').select('email').eq('id', client_id).single().execute()
             
             if not user_response.data:
                 logging.error(f"❌ Usuário {client_id} não encontrado!")
                 return jsonify({"erro": "Usuário não encontrado."}), 404
             
             user_email = user_response.data.get('email')
-            user_name = user_response.data.get('full_name', '')
+            user_name = "Cliente Inksa"  # Nome genérico (tabela não tem full_name)
             
             # ✅ CORREÇÃO 3: Validação rigorosa de email
             if not user_email:
@@ -198,18 +199,13 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
-        # ✅ CORREÇÃO 4: Usar email REAL e nome completo do usuário
-        # Separar primeiro nome e sobrenome
-        nome_partes = user_name.split() if user_name else ['Cliente', 'Inksa']
-        primeiro_nome = nome_partes[0] if nome_partes else "Cliente"
-        sobrenome = " ".join(nome_partes[1:]) if len(nome_partes) > 1 else "Inksa"
-        
+        # ✅ CORREÇÃO 4: Usar email REAL e nome genérico
         preference_data = {
             "items": items_mp,
             "payer": {
                 "email": user_email,  # ✅ EMAIL REAL DO BANCO!
-                "name": primeiro_nome,
-                "surname": sobrenome
+                "name": "Cliente",
+                "surname": "Inksa"
             },
             "payment_methods": {
                 "excluded_payment_methods": [],
@@ -231,7 +227,7 @@ def criar_preferencia_mercado_pago():
         
         logging.info(f"🚀 Enviando preferência para Mercado Pago...")
         logging.info(f"📧 Usando email REAL do usuário: {user_email}")
-        logging.info(f"👤 Nome: {primeiro_nome} {sobrenome}")
+        logging.info(f"👤 Nome: Cliente Inksa")
         logging.info(f"📋 Preference data: {preference_data}")
         
         preference_response = sdk.preference().create(preference_data)
