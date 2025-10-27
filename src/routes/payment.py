@@ -1,4 +1,4 @@
-# src/routes/payment.py - VERSÃO FINAL: USA client_id E BUSCA APENAS EMAIL
+# src/routes/payment.py - VERSÃO CORRIGIDA COM BUSCA VIA CLIENT_PROFILES
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -92,52 +92,73 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
         
-        # ✅ CORREÇÃO 1: Buscar CLIENT_ID através do ORDER_ID
+        # ✅ CORREÇÃO 1: Buscar order_id
         order_id = dados_pedido.get('order_id') or dados_pedido.get('pedido_id')
         
         if not order_id:
             logging.error("❌ order_id não fornecido!")
             return jsonify({"erro": "ID do pedido não fornecido."}), 400
         
-        # Buscar o pedido para pegar o client_id
+        # ✅ PASSO 1: Buscar o pedido para pegar o client_id (que é o ID do client_profiles)
         try:
             if supabase_client is None:
                 logging.error("❌ Cliente Supabase não disponível")
                 return jsonify({"erro": "Serviço de banco de dados indisponível."}), 500
                 
-            # ✅ CORREÇÃO: Usar 'client_id' ao invés de 'user_id'
+            logging.info(f"🔍 Buscando pedido {order_id}...")
             order_response = supabase_client.table('orders').select('client_id').eq('id', order_id).single().execute()
             
             if not order_response.data:
                 logging.error(f"❌ Pedido {order_id} não encontrado!")
                 return jsonify({"erro": "Pedido não encontrado."}), 404
             
-            # ✅ CORREÇÃO: Pegar 'client_id'
-            client_id = order_response.data.get('client_id')
+            # Este é o ID do client_profiles, não do users!
+            client_profile_id = order_response.data.get('client_id')
             
-            if not client_id:
+            if not client_profile_id:
                 logging.error(f"❌ Pedido {order_id} não tem client_id!")
-                return jsonify({"erro": "Pedido sem usuário associado."}), 400
+                return jsonify({"erro": "Pedido sem cliente associado."}), 400
             
-            logging.info(f"✅ Client ID encontrado: {client_id}")
+            logging.info(f"✅ Client Profile ID encontrado: {client_profile_id}")
             
         except Exception as e:
             logging.error(f"❌ Erro ao buscar pedido: {e}", exc_info=True)
             return jsonify({"erro": "Erro ao buscar pedido."}), 500
         
-        # ✅ CORREÇÃO 2: Buscar APENAS EMAIL (tabela não tem full_name)
+        # ✅ PASSO 2: Buscar em client_profiles para pegar o user_id
         try:
-            # Buscar apenas email da tabela users
-            user_response = supabase_client.table('users').select('email').eq('id', client_id).single().execute()
+            logging.info(f"🔍 Buscando perfil do cliente {client_profile_id}...")
+            profile_response = supabase_client.table('client_profiles').select('user_id').eq('id', client_profile_id).single().execute()
+            
+            if not profile_response.data:
+                logging.error(f"❌ Perfil do cliente {client_profile_id} não encontrado!")
+                return jsonify({"erro": "Perfil do cliente não encontrado."}), 404
+            
+            user_id = profile_response.data.get('user_id')
+            
+            if not user_id:
+                logging.error(f"❌ Perfil {client_profile_id} não tem user_id!")
+                return jsonify({"erro": "Perfil sem usuário associado."}), 400
+            
+            logging.info(f"✅ User ID encontrado: {user_id}")
+            
+        except Exception as e:
+            logging.error(f"❌ Erro ao buscar perfil do cliente: {e}", exc_info=True)
+            return jsonify({"erro": "Erro ao buscar perfil do cliente."}), 500
+        
+        # ✅ PASSO 3: Buscar email em users usando o user_id
+        try:
+            logging.info(f"🔍 Buscando email do usuário {user_id}...")
+            user_response = supabase_client.table('users').select('email').eq('id', user_id).single().execute()
             
             if not user_response.data:
-                logging.error(f"❌ Usuário {client_id} não encontrado!")
+                logging.error(f"❌ Usuário {user_id} não encontrado!")
                 return jsonify({"erro": "Usuário não encontrado."}), 404
             
             user_email = user_response.data.get('email')
             user_name = "Cliente Inksa"  # Nome genérico (tabela não tem full_name)
             
-            # ✅ CORREÇÃO 3: Validação rigorosa de email
+            # ✅ CORREÇÃO 4: Validação rigorosa de email
             if not user_email:
                 logging.error(f"❌ Email do usuário está vazio!")
                 return jsonify({"erro": "Email do usuário não encontrado."}), 400
@@ -154,11 +175,13 @@ def criar_preferencia_mercado_pago():
                 }), 400
             
             logging.info(f"✅ Email do usuário validado: {user_email}")
+            logging.info(f"📧 Usando email: {user_email} | Nome: {user_name}")
             
         except Exception as e:
             logging.error(f"❌ Erro ao buscar usuário: {e}", exc_info=True)
             return jsonify({"erro": "Erro ao buscar dados do usuário."}), 500
         
+        # ✅ Processar itens do pedido
         items_mp = []
         items_from_request = dados_pedido.get('itens', []) or dados_pedido.get('items', [])
         
@@ -166,15 +189,17 @@ def criar_preferencia_mercado_pago():
         
         for idx, item in enumerate(items_from_request):
             try:
+                # Converte valores para os tipos corretos
                 preco = float(item.get('unit_price', 0))
                 quantidade = int(item.get('quantity', 1))
                 titulo = str(item.get('title', f'Item {idx + 1}'))
                 
                 if preco > 0 and quantidade > 0:
+                    # Cria item com tipos corretos (número, não string)
                     item_corrigido = {
                         'title': titulo,
                         'quantity': quantidade,
-                        'unit_price': preco
+                        'unit_price': preco  # ✅ Sempre número float
                     }
                     items_mp.append(item_corrigido)
                     logging.info(f"✅ Item {idx + 1} adicionado: {titulo} - R$ {preco} x {quantidade}")
@@ -199,7 +224,7 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
-        # ✅ CORREÇÃO 4: Usar email REAL e nome genérico
+        # ✅ CORREÇÃO 5: Usar email REAL e nome genérico
         preference_data = {
             "items": items_mp,
             "payer": {
