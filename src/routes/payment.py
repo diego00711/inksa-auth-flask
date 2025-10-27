@@ -1,4 +1,4 @@
-# src/routes/payment.py - VERSÃO CORRIGIDA: EMAIL REAL DO USUÁRIO + WEBHOOK ATIVA PEDIDO
+# src/routes/payment.py - VERSÃO CORRIGIDA: BUSCA USER_ID PELO ORDER_ID
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -7,7 +7,6 @@ import os
 import logging
 import hmac
 import hashlib
-import time
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -93,19 +92,39 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
         
-        # ✅ CORREÇÃO 1: Buscar email REAL do usuário no banco
-        user_id = dados_pedido.get('user_id')
+        # ✅ CORREÇÃO 1: Buscar USER_ID através do ORDER_ID
+        order_id = dados_pedido.get('order_id') or dados_pedido.get('pedido_id')
         
-        if not user_id:
-            logging.error("❌ user_id não fornecido!")
-            return jsonify({"erro": "ID do usuário não fornecido."}), 400
+        if not order_id:
+            logging.error("❌ order_id não fornecido!")
+            return jsonify({"erro": "ID do pedido não fornecido."}), 400
         
-        # Buscar dados reais do usuário no Supabase
+        # Buscar o pedido para pegar o user_id
         try:
             if supabase_client is None:
                 logging.error("❌ Cliente Supabase não disponível")
                 return jsonify({"erro": "Serviço de banco de dados indisponível."}), 500
                 
+            order_response = supabase_client.table('orders').select('user_id').eq('id', order_id).single().execute()
+            
+            if not order_response.data:
+                logging.error(f"❌ Pedido {order_id} não encontrado!")
+                return jsonify({"erro": "Pedido não encontrado."}), 404
+            
+            user_id = order_response.data.get('user_id')
+            
+            if not user_id:
+                logging.error(f"❌ Pedido {order_id} não tem user_id!")
+                return jsonify({"erro": "Pedido sem usuário associado."}), 400
+            
+            logging.info(f"✅ User ID encontrado: {user_id}")
+            
+        except Exception as e:
+            logging.error(f"❌ Erro ao buscar pedido: {e}", exc_info=True)
+            return jsonify({"erro": "Erro ao buscar pedido."}), 500
+        
+        # ✅ CORREÇÃO 2: Buscar email REAL do usuário no banco
+        try:
             user_response = supabase_client.table('users').select('email, full_name').eq('id', user_id).single().execute()
             
             if not user_response.data:
@@ -115,7 +134,7 @@ def criar_preferencia_mercado_pago():
             user_email = user_response.data.get('email')
             user_name = user_response.data.get('full_name', '')
             
-            # ✅ CORREÇÃO 2: Validação rigorosa de email
+            # ✅ CORREÇÃO 3: Validação rigorosa de email
             if not user_email:
                 logging.error(f"❌ Email do usuário está vazio!")
                 return jsonify({"erro": "Email do usuário não encontrado."}), 400
@@ -138,7 +157,7 @@ def criar_preferencia_mercado_pago():
             return jsonify({"erro": "Erro ao buscar dados do usuário."}), 500
         
         items_mp = []
-        items_from_request = dados_pedido.get('itens', [])
+        items_from_request = dados_pedido.get('itens', []) or dados_pedido.get('items', [])
         
         logging.info(f"📋 Processando {len(items_from_request)} itens...")
         
@@ -177,7 +196,7 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
-        # ✅ CORREÇÃO 3: Usar email REAL e nome completo do usuário
+        # ✅ CORREÇÃO 4: Usar email REAL e nome completo do usuário
         # Separar primeiro nome e sobrenome
         nome_partes = user_name.split() if user_name else ['Cliente', 'Inksa']
         primeiro_nome = nome_partes[0] if nome_partes else "Cliente"
@@ -202,14 +221,14 @@ def criar_preferencia_mercado_pago():
                 "pending": urls_retorno.get('pendente', f"{FRONTEND_URL}/pagamento/pendente")
             },
             "auto_return": "approved",
-            "external_reference": dados_pedido.get('pedido_id', 'id_pedido_temp'),
+            "external_reference": order_id,
             "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp",
             "statement_descriptor": "INKSA DELIVERY",
             "binary_mode": False
         }
         
         logging.info(f"🚀 Enviando preferência para Mercado Pago...")
-        logging.info(f"📧 Usando email do usuário: {user_email}")
+        logging.info(f"📧 Usando email REAL do usuário: {user_email}")
         logging.info(f"👤 Nome: {primeiro_nome} {sobrenome}")
         logging.info(f"📋 Preference data: {preference_data}")
         
