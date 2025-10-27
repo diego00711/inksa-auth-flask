@@ -1,4 +1,4 @@
-# src/routes/payment.py - VERSÃO CORRIGIDA: BUSCA USER_ID PELO ORDER_ID
+# src/routes/payment.py - VERSÃO CORRIGIDA: USA client_id AO INVÉS DE user_id
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -92,43 +92,45 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
         
-        # ✅ CORREÇÃO 1: Buscar USER_ID através do ORDER_ID
+        # ✅ CORREÇÃO 1: Buscar CLIENT_ID através do ORDER_ID
         order_id = dados_pedido.get('order_id') or dados_pedido.get('pedido_id')
         
         if not order_id:
             logging.error("❌ order_id não fornecido!")
             return jsonify({"erro": "ID do pedido não fornecido."}), 400
         
-        # Buscar o pedido para pegar o user_id
+        # Buscar o pedido para pegar o client_id
         try:
             if supabase_client is None:
                 logging.error("❌ Cliente Supabase não disponível")
                 return jsonify({"erro": "Serviço de banco de dados indisponível."}), 500
                 
-            order_response = supabase_client.table('orders').select('user_id').eq('id', order_id).single().execute()
+            # ✅ CORREÇÃO: Usar 'client_id' ao invés de 'user_id'
+            order_response = supabase_client.table('orders').select('client_id').eq('id', order_id).single().execute()
             
             if not order_response.data:
                 logging.error(f"❌ Pedido {order_id} não encontrado!")
                 return jsonify({"erro": "Pedido não encontrado."}), 404
             
-            user_id = order_response.data.get('user_id')
+            # ✅ CORREÇÃO: Pegar 'client_id'
+            client_id = order_response.data.get('client_id')
             
-            if not user_id:
-                logging.error(f"❌ Pedido {order_id} não tem user_id!")
+            if not client_id:
+                logging.error(f"❌ Pedido {order_id} não tem client_id!")
                 return jsonify({"erro": "Pedido sem usuário associado."}), 400
             
-            logging.info(f"✅ User ID encontrado: {user_id}")
+            logging.info(f"✅ Client ID encontrado: {client_id}")
             
         except Exception as e:
             logging.error(f"❌ Erro ao buscar pedido: {e}", exc_info=True)
             return jsonify({"erro": "Erro ao buscar pedido."}), 500
         
-        # ✅ CORREÇÃO 2: Buscar email REAL do usuário no banco
+        # ✅ CORREÇÃO 2: Buscar email REAL do usuário no banco usando client_id
         try:
-            user_response = supabase_client.table('users').select('email, full_name').eq('id', user_id).single().execute()
+            user_response = supabase_client.table('users').select('email, full_name').eq('id', client_id).single().execute()
             
             if not user_response.data:
-                logging.error(f"❌ Usuário {user_id} não encontrado!")
+                logging.error(f"❌ Usuário {client_id} não encontrado!")
                 return jsonify({"erro": "Usuário não encontrado."}), 404
             
             user_email = user_response.data.get('email')
