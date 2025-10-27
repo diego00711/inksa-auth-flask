@@ -1,4 +1,4 @@
-# src/routes/payment.py - VERSÃO CORRIGIDA: WEBHOOK ATIVA PEDIDO APÓS PAGAMENTO
+# src/routes/payment.py - VERSÃO CORRIGIDA: EMAIL REAL DO USUÁRIO + WEBHOOK ATIVA PEDIDO
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -93,6 +93,50 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
         
+        # ✅ CORREÇÃO 1: Buscar email REAL do usuário no banco
+        user_id = dados_pedido.get('user_id')
+        
+        if not user_id:
+            logging.error("❌ user_id não fornecido!")
+            return jsonify({"erro": "ID do usuário não fornecido."}), 400
+        
+        # Buscar dados reais do usuário no Supabase
+        try:
+            if supabase_client is None:
+                logging.error("❌ Cliente Supabase não disponível")
+                return jsonify({"erro": "Serviço de banco de dados indisponível."}), 500
+                
+            user_response = supabase_client.table('users').select('email, full_name').eq('id', user_id).single().execute()
+            
+            if not user_response.data:
+                logging.error(f"❌ Usuário {user_id} não encontrado!")
+                return jsonify({"erro": "Usuário não encontrado."}), 404
+            
+            user_email = user_response.data.get('email')
+            user_name = user_response.data.get('full_name', '')
+            
+            # ✅ CORREÇÃO 2: Validação rigorosa de email
+            if not user_email:
+                logging.error(f"❌ Email do usuário está vazio!")
+                return jsonify({"erro": "Email do usuário não encontrado."}), 400
+            
+            # Verificar se email contém palavras de teste
+            email_lower = user_email.lower()
+            palavras_proibidas = ['test', 'teste', 'exemplo', 'example', 'demo']
+            
+            if any(palavra in email_lower for palavra in palavras_proibidas):
+                logging.error(f"❌ Email inválido (contém palavra de teste): {user_email}")
+                return jsonify({
+                    "erro": "Email inválido. Por favor, use um email real para realizar o pagamento.",
+                    "detalhes": "Emails de teste não são permitidos em pagamentos reais."
+                }), 400
+            
+            logging.info(f"✅ Email do usuário validado: {user_email}")
+            
+        except Exception as e:
+            logging.error(f"❌ Erro ao buscar usuário: {e}", exc_info=True)
+            return jsonify({"erro": "Erro ao buscar dados do usuário."}), 500
+        
         items_mp = []
         items_from_request = dados_pedido.get('itens', [])
         
@@ -133,10 +177,18 @@ def criar_preferencia_mercado_pago():
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
+        # ✅ CORREÇÃO 3: Usar email REAL e nome completo do usuário
+        # Separar primeiro nome e sobrenome
+        nome_partes = user_name.split() if user_name else ['Cliente', 'Inksa']
+        primeiro_nome = nome_partes[0] if nome_partes else "Cliente"
+        sobrenome = " ".join(nome_partes[1:]) if len(nome_partes) > 1 else "Inksa"
+        
         preference_data = {
             "items": items_mp,
             "payer": {
-                "email": dados_pedido.get('cliente_email', 'comprador@exemplo.com.br')
+                "email": user_email,  # ✅ EMAIL REAL DO BANCO!
+                "name": primeiro_nome,
+                "surname": sobrenome
             },
             "payment_methods": {
                 "excluded_payment_methods": [],
@@ -157,6 +209,8 @@ def criar_preferencia_mercado_pago():
         }
         
         logging.info(f"🚀 Enviando preferência para Mercado Pago...")
+        logging.info(f"📧 Usando email do usuário: {user_email}")
+        logging.info(f"👤 Nome: {primeiro_nome} {sobrenome}")
         logging.info(f"📋 Preference data: {preference_data}")
         
         preference_response = sdk.preference().create(preference_data)
