@@ -134,6 +134,7 @@ def criar_preferencia_mercado_pago():
             'id': pedido_id,
             'client_id': dados_pedido.get('client_id'),
             'restaurant_id': dados_pedido.get('restaurant_id'),
+            'delivery_id': None,  # ✅ NULL explícito - entregador será atribuído depois
             'status': 'awaiting_payment',  # ✅ Status correto
             'items': dados_pedido.get('itens', []),
             'total_amount_items': dados_pedido.get('total_amount_items', 0),
