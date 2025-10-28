@@ -1,14 +1,15 @@
 import os
 import sys
 import re
+import logging
 from pathlib import Path
+from datetime import datetime
 from flask import Flask, jsonify, request, Blueprint
-from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_socketio import SocketIO
+from dotenv import load_dotenv
 import mercadopago
-import logging
-from datetime import datetime
+import psycopg2
 
 # --- Configuração de Path e Logging ---
 current_dir = Path(__file__).parent
@@ -54,6 +55,10 @@ except ImportError as e:
 app = Flask(__name__)
 app.url_map.strict_slashes = False
 
+# --- Configuração do Banco para Gamificação ---
+app.config["DB_CONN_FACTORY"] = lambda: psycopg2.connect(os.environ["DATABASE_URL"])
+app.config["GAMIFICATION_INTERNAL_TOKEN"] = os.environ.get("GAMIFICATION_INTERNAL_TOKEN", "token-secreto-trocar")
+
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
 if os.path.exists(config_path):
     app.config.from_pyfile(config_path)
@@ -75,7 +80,6 @@ production_origins = [
     "https://app.inksadelivery.com.br",
 ]
 
-# CORREÇÃO: Domínios Vercel atualizados
 vercel_preview_origins = [
     "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
     "https://inksa-admin-v0-5pv7tmapd-inksas-projects.vercel.app",
@@ -83,8 +87,8 @@ vercel_preview_origins = [
 ]
 
 allowed_origins_patterns = [
-    re.compile(r"http://localhost:\d+" ),
-    re.compile(r"https://.*\.vercel\.app" ) 
+    re.compile(r"http://localhost:\d+"),
+    re.compile(r"https://.*\.vercel\.app"),
 ]
 
 allowed_origins = production_origins + vercel_preview_origins + allowed_origins_patterns
@@ -105,7 +109,7 @@ app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
-# 🔧 CORREÇÃO: Blueprint de pagamento com prefixo correto
+# Pagamento
 app.register_blueprint(mp_payment_bp, url_prefix='/api')
 
 # --- Rotas de Delivery agrupadas sob /api/delivery ---
@@ -116,7 +120,7 @@ delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
 delivery_bp.register_blueprint(delivery_calculator_bp)
 app.register_blueprint(delivery_bp)
 
-# --- Registro simplificado dos blueprints de admin ---
+# --- Rotas de Admin ---
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
@@ -144,10 +148,6 @@ def index():
 
 @app.route('/health')
 def health_check_simple():
-    """
-    Endpoint simplificado para keep-alive do UptimeRobot.
-    Não faz consultas externas - apenas confirma que o servidor está respondendo.
-    """
     return jsonify({
         "status": "ok",
         "message": "Server is running",
@@ -165,10 +165,6 @@ def debug_routes():
 
 @app.route('/api/health')
 def health_check():
-    """
-    Endpoint completo de health check com verificações de serviços externos.
-    Use este para monitoramento detalhado.
-    """
     return jsonify({
         "status": "healthy",
         "database": "connected" if supabase else "disconnected",
