@@ -112,7 +112,49 @@ def criar_preferencia_mercado_pago():
         
         logging.info(f"✅ Email validado: {cliente_email}")
         
-        # ✅ Processar itens
+        # 🆕 PASSO 1: CRIAR O PEDIDO NO BANCO PRIMEIRO!
+        import uuid
+        from datetime import datetime
+        
+        pedido_id = dados_pedido.get('pedido_id')
+        
+        # Se não tem ID, cria um novo
+        if not pedido_id:
+            pedido_id = str(uuid.uuid4())
+            logging.info(f"🆔 Gerando novo ID de pedido: {pedido_id}")
+        else:
+            logging.info(f"🆔 Usando ID de pedido existente: {pedido_id}")
+        
+        # Preparar dados do pedido para o banco
+        order_data = {
+            'id': pedido_id,
+            'client_id': dados_pedido.get('client_id'),
+            'restaurant_id': dados_pedido.get('restaurant_id'),
+            'status': 'awaiting_payment',  # ✅ Status correto
+            'items': dados_pedido.get('itens', []),
+            'total_amount_items': dados_pedido.get('total_amount_items', 0),
+            'delivery_fee': dados_pedido.get('delivery_fee', 0),
+            'total_amount': dados_pedido.get('total_amount', 0),
+            'delivery_address': dados_pedido.get('delivery_address', ''),
+            'notes': dados_pedido.get('notes', ''),
+            'client_latitude': dados_pedido.get('client_latitude'),
+            'client_longitude': dados_pedido.get('client_longitude'),
+            'delivery_distance_km': dados_pedido.get('delivery_distance_km'),
+            'created_at': datetime.utcnow().isoformat(),
+            'updated_at': datetime.utcnow().isoformat()
+        }
+        
+        logging.info(f"💾 PASSO 1: Criando pedido {pedido_id} no banco...")
+        
+        try:
+            # Criar pedido no Supabase
+            result = supabase_client.table('orders').insert(order_data).execute()
+            logging.info(f"✅ Pedido {pedido_id} criado com sucesso no banco!")
+        except Exception as e:
+            logging.error(f"❌ Erro ao criar pedido no banco: {e}")
+            return jsonify({"erro": "Erro ao criar pedido no banco de dados."}), 500
+        
+        # ✅ PASSO 2: Processar itens para o Mercado Pago
         items_mp = []
         items_from_request = dados_pedido.get('itens', [])
         
@@ -143,16 +185,21 @@ def criar_preferencia_mercado_pago():
         
         if not items_mp:
             logging.error("❌ Nenhum item válido para processar!")
+            # Deletar pedido que foi criado
+            supabase_client.table('orders').delete().eq('id', pedido_id).execute()
             return jsonify({"erro": "A lista de itens está vazia ou todos os itens têm valor zero."}), 400
         
         logging.info(f"✅ Total de itens válidos: {len(items_mp)}")
         
+        # ✅ PASSO 3: Criar preferência no Mercado Pago
         urls_retorno = dados_pedido.get('urls_retorno', {})
         FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
         notification_url_mp_base = os.environ.get("MERCADO_PAGO_WEBHOOK_URL")
         
         if not notification_url_mp_base:
             logging.error("❌ URL de notificação do Mercado Pago não configurada!")
+            # Deletar pedido que foi criado
+            supabase_client.table('orders').delete().eq('id', pedido_id).execute()
             return jsonify({"erro": "URL de notificação do Mercado Pago não configurada."}), 500
         
         # ✅ Configuração da preferência com email VALIDADO
@@ -173,15 +220,15 @@ def criar_preferencia_mercado_pago():
                 "pending": urls_retorno.get('pendente', f"{FRONTEND_URL}/pagamento/pendente")
             },
             "auto_return": "approved",
-            "external_reference": dados_pedido.get('pedido_id', 'id_pedido_temp'),
+            "external_reference": pedido_id,  # ✅ ID do pedido que JÁ EXISTE no banco!
             "notification_url": f"{notification_url_mp_base}/api/pagamentos/webhook_mp",
             "statement_descriptor": "INKSA DELIVERY",  # ✅ Nome que aparece na fatura do cartão
             "binary_mode": False                       # ✅ Permite pagamentos pendentes (PIX, boleto)
         }
         
-        logging.info(f"🚀 Enviando preferência para Mercado Pago...")
+        logging.info(f"🚀 PASSO 2: Enviando preferência para Mercado Pago...")
         logging.info(f"📧 Email do cliente: {cliente_email}")
-        logging.info(f"📋 Preference data: {preference_data}")
+        logging.info(f"🆔 ID do pedido (external_reference): {pedido_id}")
         
         preference_response = sdk.preference().create(preference_data)
         
@@ -189,6 +236,8 @@ def criar_preferencia_mercado_pago():
             erro_detalhes = preference_response.get("response", {}).get("message", "Erro desconhecido do MP.")
             logging.error(f"❌ Mercado Pago recusou a criação: {erro_detalhes}")
             logging.error(f"❌ Resposta completa do MP: {preference_response}")
+            # Deletar pedido que foi criado
+            supabase_client.table('orders').delete().eq('id', pedido_id).execute()
             return jsonify({
                 "erro": "O Mercado Pago recusou a criação do pagamento.", 
                 "detalhes": erro_detalhes
@@ -197,11 +246,13 @@ def criar_preferencia_mercado_pago():
         preference = preference_response["response"]
         logging.info(f"✅ Preferência criada com sucesso! ID: {preference['id']}")
         logging.info(f"✅ Link de checkout: {preference['init_point']}")
+        logging.info(f"✅ Pedido {pedido_id} criado NO BANCO e preferência MP vinculada!")
         
         return jsonify({
             "mensagem": "Preferência de pagamento criada com sucesso!",
             "checkout_link": preference["init_point"],
-            "preference_id": preference["id"]
+            "preference_id": preference["id"],
+            "pedido_id": pedido_id  # ✅ Retorna o ID do pedido criado
         }), 200
         
     except Exception as e:
@@ -267,9 +318,17 @@ def mercadopago_webhook():
             if status == 'approved':
                 logging.info(f"✅ Pagamento {resource_id} APROVADO! Iniciando atualização do pedido...")
                 
-                # 🔍 DIAGNÓSTICO: Buscar o pedido ANTES de atualizar
+                # 🔍 DIAGNÓSTICO: Buscar o pedido ANTES de atualizar (COM RETRY)
                 logging.info(f"🔍 PASSO 1: Buscando pedido {external_reference} no Supabase...")
                 response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).execute()
+                
+                # 🔄 RETRY: Se não encontrar, aguarda e tenta novamente (race condition)
+                if not response_supabase.data:
+                    logging.warning(f"⚠️ Pedido não encontrado na primeira tentativa. Aguardando 3 segundos...")
+                    import time
+                    time.sleep(3)
+                    logging.info(f"🔄 RETRY: Buscando pedido {external_reference} novamente...")
+                    response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).execute()
                 
                 logging.info(f"📊 Resposta do Supabase:")
                 logging.info(f"   Data: {response_supabase.data}")
@@ -349,19 +408,45 @@ def mercadopago_webhook():
             
             elif status in ['pending', 'in_process']:
                 logging.info(f"📝 Pagamento {resource_id} com status: {status} - mantendo pedido aguardando")
-                supabase_client.table('orders').update({
-                    'status_pagamento': status, 
-                    'id_transacao_mp': resource_id
-                }).eq('id', external_reference).execute()
-                logging.info(f"✅ Status de pagamento do pedido {external_reference} atualizado para: {status}")
+                
+                # 🔄 Verificar se pedido existe (com retry para race condition)
+                check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
+                if not check_order.data:
+                    logging.warning(f"⚠️ Pedido não encontrado. Aguardando 3 segundos...")
+                    import time
+                    time.sleep(3)
+                    logging.info(f"🔄 RETRY: Verificando pedido {external_reference} novamente...")
+                    check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
+                
+                if check_order.data:
+                    supabase_client.table('orders').update({
+                        'status_pagamento': status, 
+                        'id_transacao_mp': resource_id
+                    }).eq('id', external_reference).execute()
+                    logging.info(f"✅ Status de pagamento do pedido {external_reference} atualizado para: {status}")
+                else:
+                    logging.error(f"❌ Pedido {external_reference} não encontrado mesmo após retry!")
                 
             elif status == 'rejected':
                 logging.warning(f"❌ Pagamento {resource_id} REJEITADO")
-                supabase_client.table('orders').update({
-                    'status_pagamento': status,
-                    'id_transacao_mp': resource_id
-                }).eq('id', external_reference).execute()
-                logging.info(f"✅ Pedido {external_reference} marcado como pagamento rejeitado")
+                
+                # 🔄 Verificar se pedido existe (com retry para race condition)
+                check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
+                if not check_order.data:
+                    logging.warning(f"⚠️ Pedido não encontrado. Aguardando 3 segundos...")
+                    import time
+                    time.sleep(3)
+                    logging.info(f"🔄 RETRY: Verificando pedido {external_reference} novamente...")
+                    check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
+                
+                if check_order.data:
+                    supabase_client.table('orders').update({
+                        'status_pagamento': status,
+                        'id_transacao_mp': resource_id
+                    }).eq('id', external_reference).execute()
+                    logging.info(f"✅ Pedido {external_reference} marcado como pagamento rejeitado")
+                else:
+                    logging.error(f"❌ Pedido {external_reference} não encontrado mesmo após retry!")
 
         except Exception as e:
             logging.error("=" * 80)
