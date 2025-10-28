@@ -1,300 +1,296 @@
+# -*- coding: utf-8 -*-
 # inksa-auth-flask/src/routes/gamification_routes.py
+#
+# Gamificação – MVP sólido, seguro e idempotente.
+# Rotas:
+#   POST /gamification/add-points-internal     -> credita XP (somente serviço)
+#   GET  /gamification/<user_id>/points-level  -> saldo/nível
+#   GET  /gamification/rankings                -> ranking com paginação
+#
+# Requer:
+#   - app.config["DB_CONN_FACTORY"] -> callable -> psycopg2.connect(...)
+#   - app.config["GAMIFICATION_INTERNAL_TOKEN"] -> segredo do endpoint interno
+#
+# Tabelas usadas:
+#   public.levels(level_number, level_name, points_required)
+#   public.user_points(user_id, total_points, current_level, points_to_next_level, last_updated)
+#   public.points_history(id, user_id, points_earned, points_type, description, order_id, created_at)
+#   public.xp_events(id, user_id, event_type, order_id, points, created_at)  UNIQUE(event_type, order_id)
 
-import os
 import uuid
 import traceback
-import json
-from flask import Blueprint, request, jsonify, g, current_app
-import psycopg2
-import psycopg2.extras
-from datetime import date, timedelta, datetime, time
-from decimal import Decimal
 from functools import wraps
-# <<< CORREÇÃO: Removido o import do cross_origin, pois já é tratado globalmente >>>
-# from flask_cors import cross_origin 
-import logging
+from flask import Blueprint, request, jsonify, current_app
+import psycopg2.extras
 
-# Importa as funções e o cliente supabase do nosso helper centralizado
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+gamification_bp = Blueprint("gamification", __name__, url_prefix="/gamification")
 
-# --- Decorators e Encoders ---
-class CustomJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, Decimal): return float(obj)
-        if isinstance(obj, (datetime, date, timedelta, time)): return obj.isoformat()
-        if isinstance(obj, uuid.UUID): return str(obj)
-        return super().default(obj)
+# ---------- infraestrutura ----------
+def _db():
+    """
+    Usa a factory registrada no app:
+      app.config["DB_CONN_FACTORY"] = lambda: psycopg2.connect(DSN)
+    """
+    factory = current_app.config.get("DB_CONN_FACTORY")
+    if not factory:
+        raise RuntimeError("DB_CONN_FACTORY não configurado no app")
+    return factory()
 
-def serialize_data_with_encoder(data):
-    return json.loads(json.dumps(data, cls=CustomJSONEncoder))
+def _ok(data, code=200):
+    return jsonify({"status": "success", "data": data}), code
 
-def gamification_token_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # Este decorador já está correto, sem necessidade de alterações.
-        conn = None 
+def _err(message="internal_error", code=400, **extra):
+    payload = {"status": "error", "message": message}
+    payload.update(extra)
+    return jsonify(payload), code
+
+def _compute_level(cur, total_points: int):
+    cur.execute(
+        "SELECT MAX(level_number) AS lvl FROM public.levels WHERE points_required <= %s",
+        (total_points,),
+    )
+    row = cur.fetchone()
+    lvl = int(row["lvl"] or 1)
+    cur.execute(
+        "SELECT points_required FROM public.levels WHERE level_number = %s",
+        (lvl + 1,),
+    )
+    nxt = cur.fetchone()
+    to_next = (nxt["points_required"] - total_points) if nxt else 0
+    return lvl, max(int(to_next), 0)
+
+# ---------- proteção do endpoint interno ----------
+def internal_required(fn):
+    @wraps(fn)
+    def _wrap(*a, **kw):
+        token = request.headers.get("X-Internal-Token")
+        expected = current_app.config.get("GAMIFICATION_INTERNAL_TOKEN")
+        if not expected:
+            return _err("internal_token_not_configured", 500)
+        if token != expected:
+            return _err("unauthorized", 403)
+        return fn(*a, **kw)
+    return _wrap
+
+# ---------- core ----------
+def _add_points_event(*, user_id, points: int, event_type: str, description=None, order_id=None):
+    """
+    Fluxo idempotente (tudo na MESMA transação):
+      1) xp_events (ON CONFLICT DO NOTHING) -> se repetido, encerra
+      2) user_points (UPSERT somando pontos)
+      3) points_history (auditoria)
+      4) recalcula nível e 'points_to_next_level'
+    Retorna (ok, payload|erro)
+    """
+    if not points:
+        return True, {"message": "no-op"}
+
+    conn = _db()
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                # 1) ledger para idempotência
+                cur.execute(
+                    """
+                    INSERT INTO public.xp_events (id, user_id, event_type, order_id, points)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (event_type, order_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    (uuid.uuid4(), user_id, event_type, order_id, points),
+                )
+                if cur.fetchone() is None:
+                    # mesmo (event_type, order_id) já processado
+                    return True, {"message": "evento_ja_processado"}
+
+                # 2) carteira (soma idempotente)
+                cur.execute(
+                    """
+                    INSERT INTO public.user_points (user_id, total_points, last_updated)
+                    VALUES (%s,%s,NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                      SET total_points = public.user_points.total_points + EXCLUDED.total_points,
+                          last_updated = NOW()
+                    RETURNING total_points
+                    """,
+                    (user_id, points),
+                )
+                total = int(cur.fetchone()["total_points"])
+
+                # 3) histórico de pontos
+                cur.execute(
+                    """
+                    INSERT INTO public.points_history
+                      (id, user_id, points_earned, points_type, description, order_id)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        uuid.uuid4(),
+                        user_id,
+                        points,
+                        event_type,
+                        description or event_type,
+                        order_id,
+                    ),
+                )
+
+                # 4) nível atual + quanto falta pro próximo
+                lvl, to_next = _compute_level(cur, total)
+                cur.execute(
+                    """
+                    UPDATE public.user_points
+                       SET current_level=%s, points_to_next_level=%s
+                     WHERE user_id=%s
+                    """,
+                    (lvl, to_next, user_id),
+                )
+
+                return True, {
+                    "user_id": str(user_id),
+                    "total_points": total,
+                    "current_level": lvl,
+                    "points_to_next_level": to_next,
+                }
+    except Exception as e:
+        current_app.logger.exception("gamification._add_points_event failed")
+        traceback.print_exc()
+        return False, {"error": "db_error", "detail": str(e)}
+    finally:
         try:
-            auth_header = request.headers.get('Authorization')
-            user_auth_id, user_type, error_response = get_user_id_from_token(auth_header)
-            if error_response: return error_response
-            if user_type not in ['client', 'delivery', 'restaurant', 'admin']:
-                return jsonify({"status": "error", "message": "Acesso não autorizado"}), 403
-            conn = get_db_connection()
-            if not conn:
-                return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-            g.user_id = user_auth_id
-            g.user_type = user_type
-            return f(*args, **kwargs)
-        except psycopg2.Error as e:
-            traceback.print_exc()
-            return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
-        except Exception as e:
-            traceback.print_exc()
-            return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
-        finally:
-            if conn: conn.close()
-    return decorated_function
-
-gamification_bp = Blueprint('gamification_bp', __name__)
-
-# --- FUNÇÃO: add_points_for_event ---
-# (código sem alterações)
-def add_points_for_event(user_id, profile_type, points, event_type, conn=None, order_id=None):
-    should_close_conn = False
-    if conn is None:
-        conn = get_db_connection()
-        if not conn:
-            current_app.logger.error("Não foi possível obter conexão com o BD para adicionar pontos.")
-            return False 
-        should_close_conn = True
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("""
-                INSERT INTO user_points (user_id, total_points, last_updated) VALUES (%s, %s, NOW())
-                ON CONFLICT (user_id) DO UPDATE SET total_points = user_points.total_points + EXCLUDED.total_points, last_updated = NOW()
-                RETURNING total_points;
-            """, (user_id, points))
-            updated_total_points = cur.fetchone()['total_points']
-            cur.execute("""
-                INSERT INTO points_history (user_id, points_earned, points_type, description, order_id, created_at)
-                VALUES (%s, %s, %s, %s, %s, NOW());
-            """, (user_id, points, event_type, f"Pontos por {event_type}", order_id))
-            cur.execute("""
-                WITH level_info AS (SELECT MAX(level_number) as new_level FROM levels WHERE points_required <= %s)
-                UPDATE user_points SET 
-                    current_level = COALESCE((SELECT new_level FROM level_info), 1),
-                    points_to_next_level = COALESCE((SELECT points_required FROM levels WHERE level_number = (SELECT new_level FROM level_info) + 1) - %s, 0)
-                WHERE user_id = %s
-            """, (updated_total_points, updated_total_points, user_id))
-            if should_close_conn: conn.commit()
-            return True
-    except psycopg2.Error as e:
-        if should_close_conn: conn.rollback()
-        current_app.logger.error(f"Erro de DB ao adicionar pontos: {str(e)}")
-        traceback.print_exc()
-        return False
-    except Exception as e:
-        if should_close_conn: conn.rollback()
-        current_app.logger.error(f"Erro ao adicionar pontos: {str(e)}")
-        traceback.print_exc()
-        return False
-    finally:
-        if should_close_conn and conn: conn.close()
-
-# --- ROTAS DE GAMIFICAÇÃO ---
-
-@gamification_bp.route('/add-points-internal', methods=['POST'])
-def add_points_internal_route(): 
-    data = request.get_json()
-    user_id, profile_type, points, event_type = data.get('user_id'), data.get('profile_type'), data.get('points'), data.get('event_type')
-    order_id = data.get('order_id', None)
-    if not all([user_id, profile_type, points, event_type]):
-        return jsonify({"status": "error", "message": "Campos obrigatórios ausentes"}), 400
-    success = add_points_for_event(user_id, profile_type, points, event_type, order_id=order_id)
-    if success:
-        return jsonify({"status": "success", "message": "Pontos adicionados com sucesso."}), 200
-    else:
-        return jsonify({"status": "error", "message": "Falha ao adicionar pontos."}), 500
-
-@gamification_bp.route('/<string:user_id>/points-level', methods=['GET'])
-@gamification_token_required
-def get_user_points_and_level(user_id):
-    if g.user_type != 'admin' and user_id != g.user_id:
-        return jsonify({"status": "error", "message": "Acesso não autorizado"}), 403
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # <<< CORREÇÃO APLICADA AQUI: Removida a coluna 'l.description' que não existe >>>
-            cur.execute("""
-                SELECT 
-                    up.total_points,
-                    up.current_level,
-                    up.points_to_next_level,
-                    l.level_name
-                FROM user_points up
-                LEFT JOIN levels l ON up.current_level = l.level_number
-                WHERE up.user_id = %s
-            """, (user_id,))
-            
-            result = cur.fetchone()
-            
-            if not result:
-                cur.execute("""
-                    INSERT INTO user_points (user_id, total_points, current_level, points_to_next_level)
-                    VALUES (%s, 0, 1, 100)
-                    RETURNING total_points, current_level, points_to_next_level
-                """, (user_id,))
-                result = cur.fetchone()
-                conn.commit()
-                
-                cur.execute("SELECT level_name FROM levels WHERE level_number = 1")
-                level_info = cur.fetchone() or {'level_name': 'Iniciante'}
-                result_dict = dict(result)
-                result_dict.update(level_info)
-                result = result_dict
-            
-            return jsonify({
-                "status": "success",
-                "data": serialize_data_with_encoder(dict(result))
-            }), 200
-
-    except psycopg2.Error as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
-    finally:
-        if conn:
             conn.close()
+        except Exception:
+            pass
 
-@gamification_bp.route('/<string:user_id>/badges', methods=['GET'])
-@gamification_token_required
-def get_user_badges(user_id):
-    if g.user_type != 'admin' and user_id != g.user_id:
-        return jsonify({"status": "error", "message": "Acesso não autorizado"}), 403
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+# ---------- rotas ----------
+@gamification_bp.post("/add-points-internal")
+@internal_required
+def add_points_internal_route():
+    """
+    Endpoint interno para creditar XP (consumido pelo seu backend, ex.: webhook do Mercado Pago).
+    Body esperado:
+    {
+      "user_id": "<uuid>",
+      "points": 25,
+      "event_type": "pedido",        # pedido|avaliacao|entrega|indicacao|...
+      "order_id": "<uuid>",          # recomendado para idempotência
+      "description": "Pedido pago R$25,00"
+    }
+    """
+    body = request.get_json(silent=True) or {}
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("""
-                SELECT ub.id, ub.badge_id, ub.earned_at, b.name, b.description, b.icon_url, b.points_reward 
-                FROM user_badges ub JOIN badges b ON ub.badge_id = b.id
-                WHERE ub.user_id = %s ORDER BY ub.earned_at DESC
-            """, (user_id,))
-            badges = cur.fetchall()
-            return jsonify({
-                "status": "success",
-                "data": {"userId": user_id, "profileType": g.user_type, "badges": serialize_data_with_encoder([dict(b) for b in badges])}
-            }), 200
-    except psycopg2.Error as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
-    finally:
-        if conn: conn.close()
+        user_id = body["user_id"]
+        points = int(body["points"])
+        event_type = (body.get("event_type") or "pedido").strip()
+        order_id = body.get("order_id")
+        description = body.get("description")
+    except Exception:
+        return _err("invalid_body", 422)
 
-@gamification_bp.route('/rankings', methods=['GET'])
-@gamification_token_required
+    ok, payload = _add_points_event(
+        user_id=user_id,
+        points=points,
+        event_type=event_type,
+        description=description,
+        order_id=order_id,
+    )
+    return _ok(payload) if ok else _err(**payload)
+
+@gamification_bp.get("/<user_id>/points-level")
+def get_user_points_and_level(user_id):
+    """
+    Retorna a carteira/nível do usuário; se não existir registro,
+    responde com Bronze sem criar linha (útil para app).
+    """
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT up.user_id, up.total_points, up.current_level, up.points_to_next_level,
+                       l.level_name
+                  FROM public.user_points up
+             LEFT JOIN public.levels l ON l.level_number = up.current_level
+                 WHERE up.user_id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                # Retorno default (sem side-effect)
+                return _ok({
+                    "user_id": user_id,
+                    "total_points": 0,
+                    "current_level": 1,
+                    "points_to_next_level": 300,  # segundo nível por padrão
+                    "level_name": "Bronze",
+                })
+            data = dict(row)
+            data["user_id"] = str(data["user_id"])
+            return _ok(data)
+    except Exception as e:
+        current_app.logger.exception("gamification.points-level failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+@gamification_bp.get("/rankings")
 def get_global_rankings():
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    """
+    Ranking por pontos totais, com filtros opcionais:
+      ?type=client|delivery|restaurant
+      ?city=Lages
+      ?page=1&limit=50
+    """
+    page  = max(int(request.args.get("page", 1)), 1)
+    limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+    ftype = request.args.get("type")  # client|delivery|restaurant
+    city  = request.args.get("city")
+    offset = (page - 1) * limit
+
+    conn = _db()
     try:
-        filter_type = request.args.get('type')
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            sql_query = """
-                SELECT up.user_id, up.total_points, l.level_name,
-                    COALESCE(dp.first_name || ' ' || dp.last_name, cp.first_name || ' ' || cp.last_name, rp.restaurant_name, 'Anônimo') AS profile_name,
-                    CASE
-                        WHEN dp.user_id IS NOT NULL THEN 'delivery'
-                        WHEN cp.user_id IS NOT NULL THEN 'client'
-                        WHEN rp.id IS NOT NULL THEN 'restaurant'
-                        ELSE 'unknown'
-                    END AS profile_type
-                FROM user_points up
-                LEFT JOIN levels l ON up.current_level = l.level_number
-                LEFT JOIN delivery_profiles dp ON up.user_id = dp.user_id
-                LEFT JOIN client_profiles cp ON up.user_id = cp.user_id
-                LEFT JOIN restaurant_profiles rp ON up.user_id = rp.id
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            sql = """
+              SELECT up.user_id, up.total_points, l.level_name,
+                     COALESCE(dp.first_name || ' ' || dp.last_name,
+                              cp.first_name || ' ' || cp.last_name,
+                              rp.restaurant_name, 'Anônimo') AS profile_name,
+                     CASE WHEN dp.id IS NOT NULL THEN 'delivery'
+                          WHEN cp.id IS NOT NULL THEN 'client'
+                          WHEN rp.id IS NOT NULL THEN 'restaurant'
+                          ELSE 'unknown' END AS profile_type
+              FROM public.user_points up
+              LEFT JOIN public.levels l ON up.current_level = l.level_number
+              LEFT JOIN public.delivery_profiles   dp ON dp.id = up.user_id
+              LEFT JOIN public.client_profiles     cp ON cp.id = up.user_id
+              LEFT JOIN public.restaurant_profiles rp ON rp.id = up.user_id
             """
-            params = []
-            if filter_type in ['client', 'delivery', 'restaurant']:
-                if filter_type == 'restaurant':
-                    sql_query += " WHERE rp.id IS NOT NULL"
-                else:
-                    profile_table_alias = {'client': 'cp', 'delivery': 'dp'}[filter_type]
-                    sql_query += f" WHERE {profile_table_alias}.user_id IS NOT NULL"
-            sql_query += " ORDER BY up.total_points DESC LIMIT 100"
-            cur.execute(sql_query, tuple(params))
-            rankings = cur.fetchall()
-            return jsonify({"status": "success", "data": serialize_data_with_encoder([dict(r) for r in rankings])}), 200
-    except psycopg2.Error as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
+            where, params = [], []
+            if ftype in ("client","delivery","restaurant"):
+                where.append({
+                    "client": "cp.id IS NOT NULL",
+                    "delivery": "dp.id IS NOT NULL",
+                    "restaurant": "rp.id IS NOT NULL"
+                }[ftype])
+            if city:
+                where.append("(dp.city = %s OR cp.city = %s OR rp.city = %s)")
+                params += [city, city, city]
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY up.total_points DESC LIMIT %s OFFSET %s"
+            params += [limit, offset]
+
+            cur.execute(sql, tuple(params))
+            rows = [dict(r) for r in cur.fetchall()]
+            return _ok({"items": rows, "page": page, "limit": limit})
     except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
+        current_app.logger.exception("gamification.rankings failed")
+        return _err("db_error", 500, detail=str(e))
     finally:
-        if conn: conn.close()
-
-# --- Rotas de Admin ---
-@gamification_bp.route('/levels', methods=['GET', 'POST'])
-@gamification_token_required 
-def manage_levels():
-    if g.user_type != 'admin': return jsonify({"status": "error", "message": "Acesso não autorizado"}), 403
-    conn = get_db_connection()
-    if not conn: return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            if request.method == 'GET':
-                cur.execute("SELECT * FROM levels ORDER BY points_required ASC")
-                levels = cur.fetchall()
-                return jsonify({"status": "success", "data": serialize_data_with_encoder([dict(l) for l in levels])}), 200
-            elif request.method == 'POST':
-                data = request.get_json()
-                required = ['level_number', 'level_name', 'points_required']
-                if not all(k in data for k in required): return jsonify({"status": "error", "message": "Campos obrigatórios ausentes"}), 400
-                cur.execute("INSERT INTO levels (level_number, level_name, points_required) VALUES (%s, %s, %s) RETURNING *", (data['level_number'], data['level_name'], data['points_required']))
-                new_level = cur.fetchone()
-                conn.commit()
-                return jsonify({"status": "success", "message": "Nível criado com sucesso", "data": serialize_data_with_encoder(dict(new_level))}), 201
-    except psycopg2.Error as e:
-        conn.rollback()
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
-    finally:
-        if conn: conn.close()
-
-@gamification_bp.route('/badges', methods=['GET', 'POST'])
-@gamification_token_required 
-def manage_badges():
-    if g.user_type != 'admin': return jsonify({"status": "error", "message": "Acesso não autorizado"}), 403
-    conn = get_db_connection()
-    if not conn: return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            if request.method == 'GET':
-                cur.execute("SELECT * FROM badges ORDER BY name ASC")
-                badges = cur.fetchall()
-                return jsonify({"status": "success", "data": serialize_data_with_encoder([dict(b) for b in badges])}), 200
-            elif request.method == 'POST':
-                data = request.get_json()
-                required = ['name', 'description', 'icon_url', 'points_reward']
-                if not all(k in data for k in required): return jsonify({"status": "error", "message": "Campos obrigatórios ausentes"}), 400
-                cur.execute("INSERT INTO badges (name, description, icon_url, points_reward) VALUES (%s, %s, %s, %s) RETURNING *", (data['name'], data['description'], data['icon_url'], data['points_reward']))
-                new_badge = cur.fetchone()
-                conn.commit()
-                return jsonify({"status": "success", "message": "Emblema criado com sucesso", "data": serialize_data_with_encoder(dict(new_badge))}), 201
-    except psycopg2.Error as e:
-        conn.rollback()
-        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
-    finally:
-        if conn: conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
