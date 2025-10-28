@@ -1,4 +1,4 @@
-# src/routes/payment.py - VERSÃO SIMPLES E FUNCIONAL
+# src/routes/payment.py - VERSÃO COM LOGS DETALHADOS PARA DIAGNÓSTICO
 
 from flask import Blueprint, request, jsonify, current_app
 import mercadopago
@@ -208,7 +208,7 @@ def criar_preferencia_mercado_pago():
         return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
 
 
-# ✅ WEBHOOK ATUALIZADO - MUDA STATUS PARA 'PENDING' APÓS PAGAMENTO APROVADO
+# ✅ WEBHOOK COM LOGS DETALHADOS PARA DIAGNÓSTICO
 @mp_payment_bp.route('/pagamentos/webhook_mp', methods=['POST'])
 def mercadopago_webhook():
     webhook_secret = os.environ.get("MERCADO_PAGO_WEBHOOK_SECRET")
@@ -216,7 +216,9 @@ def mercadopago_webhook():
     if webhook_secret:
         verify_mp_signature(request, webhook_secret)
     
+    logging.info("=" * 80)
     logging.info("✅ === WEBHOOK DO MERCADO PAGO RECEBIDO ===")
+    logging.info("=" * 80)
     
     request_data = request.get_json(silent=True) or request.args.to_dict()
     topic = request_data.get('topic')
@@ -253,22 +255,40 @@ def mercadopago_webhook():
             status = payment_data.get("status")
             external_reference = payment_data.get("external_reference")
             
-            logging.info(f"💳 Pagamento {resource_id} - Status: {status} - Pedido: {external_reference}")
+            logging.info("=" * 80)
+            logging.info(f"💳 DADOS DO PAGAMENTO:")
+            logging.info(f"   ID: {resource_id}")
+            logging.info(f"   Status: {status}")
+            logging.info(f"   External Reference (ID do Pedido): {external_reference}")
+            logging.info(f"   Tipo: {type(external_reference)}")
+            logging.info("=" * 80)
             
             if status == 'approved':
-                logging.info(f"✅ Pagamento {resource_id} APROVADO! Ativando pedido e calculando repasses.")
+                logging.info(f"✅ Pagamento {resource_id} APROVADO! Iniciando atualização do pedido...")
                 
-                response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).single().execute()
+                # 🔍 DIAGNÓSTICO: Buscar o pedido ANTES de atualizar
+                logging.info(f"🔍 PASSO 1: Buscando pedido {external_reference} no Supabase...")
+                response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).execute()
+                
+                logging.info(f"📊 Resposta do Supabase:")
+                logging.info(f"   Data: {response_supabase.data}")
+                logging.info(f"   Count: {response_supabase.count if hasattr(response_supabase, 'count') else 'N/A'}")
                 
                 if response_supabase.data:
-                    pedido_do_bd = response_supabase.data
+                    pedido_do_bd = response_supabase.data[0] if isinstance(response_supabase.data, list) else response_supabase.data
+                    
+                    logging.info(f"✅ Pedido ENCONTRADO no banco!")
+                    logging.info(f"   ID do pedido no banco: {pedido_do_bd.get('id')}")
+                    logging.info(f"   Status atual no banco: {pedido_do_bd.get('status')}")
+                    logging.info(f"   Status pagamento atual: {pedido_do_bd.get('status_pagamento')}")
+                    
                     valor_total_itens = float(pedido_do_bd.get('total_amount_items', 0.0))
                     
                     comissao_plataforma = valor_total_itens * current_app.config['PLATFORM_COMMISSION_RATE']
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
                     valor_para_entregador = float(pedido_do_bd.get('delivery_fee', 0.0))
                     
-                    # ✅ CORREÇÃO CRÍTICA: Agora atualiza o 'status' para 'pending'
+                    # ✅ DADOS QUE SERÃO ATUALIZADOS
                     update_data = {
                         'status': 'pending',  # ✅ ISSO ATIVA O PEDIDO PARA O RESTAURANTE!
                         'status_pagamento': status,
@@ -278,19 +298,56 @@ def mercadopago_webhook():
                         'id_transacao_mp': resource_id
                     }
                     
-                    supabase_client.table('orders').update(update_data).eq('id', external_reference).execute()
+                    logging.info("=" * 80)
+                    logging.info(f"🔄 PASSO 2: Atualizando pedido com os seguintes dados:")
+                    for key, value in update_data.items():
+                        logging.info(f"   {key}: {value}")
+                    logging.info("=" * 80)
                     
-                    logging.info(f"✅ Pedido {external_reference} ATIVADO e atualizado com repasses:")
-                    logging.info(f"   🎯 Status mudou para: pending (agora aparece para o restaurante!)")
-                    logging.info(f"   💵 Comissão plataforma: R$ {update_data['comissao_plataforma']}")
-                    logging.info(f"   🍽️ Valor restaurante: R$ {update_data['valor_repassado_restaurante']}")
-                    logging.info(f"   🚴 Valor entregador: R$ {update_data['valor_repassado_entregador']}")
+                    # 🎯 ATUALIZAÇÃO
+                    update_response = supabase_client.table('orders').update(update_data).eq('id', external_reference).execute()
+                    
+                    logging.info(f"📊 Resposta da atualização:")
+                    logging.info(f"   Data: {update_response.data}")
+                    logging.info(f"   Count: {update_response.count if hasattr(update_response, 'count') else 'N/A'}")
+                    
+                    # 🔍 VERIFICAÇÃO: Buscar novamente para confirmar
+                    logging.info(f"🔍 PASSO 3: Verificando se a atualização funcionou...")
+                    verify_response = supabase_client.table('orders').select('status, status_pagamento, id_transacao_mp').eq('id', external_reference).execute()
+                    
+                    if verify_response.data:
+                        dados_verificacao = verify_response.data[0] if isinstance(verify_response.data, list) else verify_response.data
+                        logging.info("=" * 80)
+                        logging.info(f"✅ VERIFICAÇÃO PÓS-UPDATE:")
+                        logging.info(f"   Status no banco AGORA: {dados_verificacao.get('status')}")
+                        logging.info(f"   Status pagamento AGORA: {dados_verificacao.get('status_pagamento')}")
+                        logging.info(f"   ID transação MP: {dados_verificacao.get('id_transacao_mp')}")
+                        logging.info("=" * 80)
+                        
+                        if dados_verificacao.get('status') == 'pending':
+                            logging.info("🎉 SUCESSO TOTAL! Pedido atualizado corretamente!")
+                        else:
+                            logging.error(f"⚠️ PROBLEMA! Status esperado: 'pending', mas está: {dados_verificacao.get('status')}")
+                    else:
+                        logging.error("❌ ERRO: Não conseguiu verificar o pedido após update!")
+                    
                 else:
-                    logging.warning(f"⚠️ Pedido {external_reference} não encontrado no Supabase")
+                    logging.error("=" * 80)
+                    logging.error(f"❌ PROBLEMA CRÍTICO: Pedido {external_reference} NÃO ENCONTRADO no Supabase!")
+                    logging.error(f"   Tipo do external_reference: {type(external_reference)}")
+                    logging.error(f"   Valor do external_reference: '{external_reference}'")
+                    logging.error("=" * 80)
+                    
+                    # 🔍 Tentar buscar pedidos similares
+                    logging.info("🔍 Buscando pedidos recentes para diagnóstico...")
+                    recent_orders = supabase_client.table('orders').select('id, status, status_pagamento').limit(5).execute()
+                    if recent_orders.data:
+                        logging.info("📋 Últimos 5 pedidos no banco:")
+                        for order in recent_orders.data:
+                            logging.info(f"   - ID: {order.get('id')} | Status: {order.get('status')} | Pagamento: {order.get('status_pagamento')}")
             
             elif status in ['pending', 'in_process']:
                 logging.info(f"📝 Pagamento {resource_id} com status: {status} - mantendo pedido aguardando")
-                # ✅ NÃO muda o status do pedido, mantém 'awaiting_payment'
                 supabase_client.table('orders').update({
                     'status_pagamento': status, 
                     'id_transacao_mp': resource_id
@@ -299,7 +356,6 @@ def mercadopago_webhook():
                 
             elif status == 'rejected':
                 logging.warning(f"❌ Pagamento {resource_id} REJEITADO")
-                # ✅ Pedido continua 'awaiting_payment' (não aparece para restaurante)
                 supabase_client.table('orders').update({
                     'status_pagamento': status,
                     'id_transacao_mp': resource_id
@@ -307,7 +363,12 @@ def mercadopago_webhook():
                 logging.info(f"✅ Pedido {external_reference} marcado como pagamento rejeitado")
 
         except Exception as e:
-            logging.error(f"❌ Erro ao processar webhook de pagamento: {e}", exc_info=True)
+            logging.error("=" * 80)
+            logging.error(f"❌ ERRO CRÍTICO ao processar webhook de pagamento: {e}", exc_info=True)
+            logging.error("=" * 80)
             return jsonify({"status": "error", "message": "Erro ao processar webhook"}), 500
-            
+    
+    logging.info("=" * 80)
+    logging.info("✅ Webhook processado - retornando 200 OK")
+    logging.info("=" * 80)
     return jsonify({"status": "ok"}), 200
