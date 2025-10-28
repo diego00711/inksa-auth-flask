@@ -294,3 +294,21 @@ def get_global_rankings():
             conn.close()
         except Exception:
             pass
+# --- retrocompat: manter assinatura esperada por delivery_orders.py ---
+def add_points_for_event(user_id, profile_type=None, points=0, event_type="pedido",
+                         conn=None, order_id=None, description=None):
+    """
+    Wrapper compatível com a importação antiga:
+      from .gamification_routes import add_points_for_event
+
+    Ignora profile_type/conn (não são necessários no MVP).
+    Retorna True/False como antes.
+    """
+    ok, _ = _add_points_event(
+        user_id=user_id,
+        points=int(points or 0),
+        event_type=event_type,
+        description=description,
+        order_id=order_id,
+    )
+    return ok
