@@ -1,4 +1,4 @@
-# src/routes/auth.py - VERSÃO COM LOGOUT E FECHAMENTO AUTOMÁTICO
+# src/routes/auth.py - VERSÃO COM LOGOUT, ME E FECHAMENTO AUTOMÁTICO
 
 import logging
 from flask import Blueprint, request, jsonify
@@ -44,7 +44,59 @@ def login():
         return jsonify({"status": "error", "error": error_message}), 401
 
 
-# ✅ NOVA ROTA: LOGOUT COM FECHAMENTO AUTOMÁTICO DE RESTAURANTE
+# ✅ NOVO ENDPOINT: RETORNA DADOS DO USUÁRIO AUTENTICADO (INCLUI EMAIL)
+@auth_bp.route('/me', methods=['GET'])
+def get_current_user():
+    """
+    Retorna os dados do usuário autenticado incluindo email.
+    Usado pelo frontend para obter o email do usuário.
+    """
+    try:
+        # Valida e extrai o token do header
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({
+                "status": "error", 
+                "error": "Token de autenticação não fornecido"
+            }), 401
+        
+        token = auth_header.split('Bearer ')[1]
+        
+        # Busca o usuário usando o token
+        user_response = supabase.auth.get_user(token)
+        
+        if not user_response or not user_response.user:
+            return jsonify({
+                "status": "error",
+                "error": "Usuário não encontrado ou token inválido"
+            }), 401
+        
+        user = user_response.user
+        user_metadata = user.user_metadata or {}
+        user_type = user_metadata.get('user_type', 'unknown')
+        
+        logger.info(f"✅ Dados do usuário retornados: {user.id}")
+        
+        return jsonify({
+            "status": "success",
+            "data": {
+                "id": user.id,
+                "email": user.email,
+                "user_type": user_type,
+                "created_at": str(user.created_at) if user.created_at else None,
+                "user_metadata": user_metadata
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar usuário autenticado: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": "Erro ao buscar dados do usuário"
+        }), 500
+
+
+# ✅ ROTA: LOGOUT COM FECHAMENTO AUTOMÁTICO DE RESTAURANTE
 @auth_bp.route('/logout', methods=['POST'])
 def logout():
     """
