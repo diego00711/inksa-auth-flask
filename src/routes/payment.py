@@ -1,4 +1,3 @@
-
 # src/routes/payment.py - VERSÃO COM LOGS DETALHADOS PARA DIAGNÓSTICO
 
 from flask import Blueprint, request, jsonify, current_app
@@ -17,15 +16,20 @@ mp_payment_bp = Blueprint('mp_payment_bp', __name__)
 
 # Inicialização do Cliente Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+# ✅ Tentar ambos os nomes possíveis da variável
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
 supabase_client = None
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    logging.error("ERRO: SUPABASE_URL ou SUPABASE_SERVICE_KEY não configurados.")
+    logging.error("ERRO: SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurados.")
+    logging.error(f"SUPABASE_URL presente: {bool(SUPABASE_URL)}")
+    logging.error(f"SUPABASE_SERVICE_ROLE_KEY presente: {bool(os.environ.get('SUPABASE_SERVICE_ROLE_KEY'))}")
+    logging.error(f"SUPABASE_SERVICE_KEY presente: {bool(os.environ.get('SUPABASE_SERVICE_KEY'))}")
 else:
     try:
         supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
         logging.info("Cliente Supabase (payment.py) inicializado com sucesso.")
+        logging.info(f"🔑 Usando chave que começa com: {SUPABASE_SERVICE_KEY[:20]}...")
     except Exception as e:
         logging.error(f"ERRO ao inicializar cliente Supabase: {e}")
 
@@ -145,13 +149,38 @@ def criar_preferencia_mercado_pago():
         }
         
         logging.info(f"💾 PASSO 1: Criando pedido {pedido_id} no banco...")
+        logging.info(f"🔑 Cliente Supabase configurado: {bool(supabase_client)}")
         
         try:
-            # Criar pedido no Supabase
+            # 🔐 Usar o cliente Supabase com service_role (bypassa RLS)
+            if not supabase_client:
+                raise Exception("Cliente Supabase não inicializado! Verifique as variáveis de ambiente.")
+            
+            logging.info(f"📤 Enviando dados para o Supabase: {order_data}")
             result = supabase_client.table('orders').insert(order_data).execute()
+            
+            logging.info(f"📥 Resposta do Supabase: {result}")
+            
+            if not result.data:
+                raise Exception("Nenhum dado retornado após insert - possível erro de RLS")
+                
             logging.info(f"✅ Pedido {pedido_id} criado com sucesso no banco!")
+            logging.info(f"📊 Dados do pedido inserido: {result.data}")
+            
         except Exception as e:
-            logging.error(f"❌ Erro ao criar pedido no banco: {e}")
+            error_message = str(e)
+            logging.error(f"❌ Erro ao criar pedido no banco: {error_message}")
+            logging.error(f"❌ Tipo do erro: {type(e)}")
+            
+            # Mensagem mais específica para erro de RLS
+            if '42501' in error_message or 'row-level security' in error_message.lower():
+                logging.error("🔒 ERRO DE RLS! A SUPABASE_SERVICE_ROLE_KEY pode não estar configurada corretamente!")
+                logging.error("🔧 Verifique se você está usando a SERVICE ROLE KEY (não a anon key)!")
+                return jsonify({
+                    "erro": "Erro de permissão ao criar pedido.",
+                    "detalhes": "Configure a SUPABASE_SERVICE_ROLE_KEY nas variáveis de ambiente."
+                }), 500
+                
             return jsonify({"erro": "Erro ao criar pedido no banco de dados."}), 500
         
         # ✅ PASSO 2: Processar itens para o Mercado Pago
