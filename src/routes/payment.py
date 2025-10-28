@@ -1,3 +1,4 @@
+
 # src/routes/payment.py - VERSÃO COM LOGS DETALHADOS PARA DIAGNÓSTICO
 
 from flask import Blueprint, request, jsonify, current_app
