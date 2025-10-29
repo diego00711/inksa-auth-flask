@@ -670,7 +670,7 @@ def accept_order_by_delivery(order_id):
             conn.close()
             logger.info("Conexão com banco fechada em accept_order_by_delivery")
 
-# === NOVO: expor o código de retirada com permissão adequada
+# === MANTIDO: expor o pickup_code com permissão adequada
 @orders_bp.route('/<uuid:order_id>/pickup-code', methods=['GET'])
 def get_pickup_code_for_delivery_or_restaurant(order_id):
     conn = None
@@ -726,6 +726,85 @@ def get_pickup_code_for_delivery_or_restaurant(order_id):
 
     except Exception as e:
         logger.error(f"Erro em get_pickup_code_for_delivery_or_restaurant: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+# === NOVO: rota de compatibilidade usada pelo app do cliente
+# GET /api/orders/<order_id>/codes
+# - Cliente: retorna delivery_code
+# - Restaurante: retorna pickup_code
+# - Entregador: retorna pickup_code (se o pedido estiver atribuído a ele)
+@orders_bp.route('/<uuid:order_id>/codes', methods=['GET'])
+def get_order_codes_compatible(order_id):
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if user_type == 'client':
+                cur.execute("""
+                    SELECT o.delivery_code, o.status
+                    FROM orders o
+                    JOIN client_profiles cp ON o.client_id = cp.id
+                    WHERE o.id = %s AND cp.user_id = %s
+                """, (str(order_id), user_auth_id))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado"}), 404
+                return jsonify({
+                    "order_id": str(order_id),
+                    "status": row['status'],
+                    "delivery_code": row['delivery_code']
+                }), 200
+
+            if user_type == 'restaurant':
+                cur.execute("""
+                    SELECT o.pickup_code, o.status
+                    FROM orders o
+                    JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                    WHERE o.id = %s AND rp.user_id = %s
+                """, (str(order_id), user_auth_id))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
+                return jsonify({
+                    "order_id": str(order_id),
+                    "status": row['status'],
+                    "pickup_code": row['pickup_code']
+                }), 200
+
+            if user_type == 'delivery':
+                # entrega só enxerga o pickup_code se o pedido estiver atribuído a ele
+                cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
+                dprof = cur.fetchone()
+                if not dprof:
+                    return jsonify({"error": "Perfil de entregador não encontrado"}), 404
+
+                cur.execute("""
+                    SELECT pickup_code, status
+                    FROM orders
+                    WHERE id = %s AND delivery_id = %s
+                """, (str(order_id), dprof['id']))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado ou não atribuído a este entregador"}), 404
+                return jsonify({
+                    "order_id": str(order_id),
+                    "status": row['status'],
+                    "pickup_code": row['pickup_code']
+                }), 200
+
+            return jsonify({"error": "Acesso não autorizado"}), 403
+
+    except Exception as e:
+        logger.error(f"Erro em get_order_codes_compatible: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return jsonify({"error": "Erro interno do servidor"}), 500
