@@ -1,4 +1,4 @@
-# src/routes/orders.py - BACKEND CORRIGIDO
+# src/routes/orders.py
 import uuid
 import json
 import random
@@ -20,15 +20,13 @@ orders_bp = Blueprint('orders', __name__)
 
 DEFAULT_DELIVERY_FEE = 5.0
 
-# -----------------------------
-# Status internos e exibição
-# -----------------------------
+# Status internos aceitos
 VALID_STATUSES_INTERNAL = {
     'awaiting_payment', 'pending', 'accepted', 'preparing', 'ready',
-    'accepted_by_delivery', 'delivering', 'delivered',
-    'cancelled', 'archived'
+    'accepted_by_delivery', 'delivering', 'delivered', 'cancelled', 'archived'
 }
 
+# Mapa de exibição
 STATUS_DISPLAY_MAP = {
     'awaiting_payment': 'Aguardando Pagamento',
     'pending': 'Pendente',
@@ -42,32 +40,11 @@ STATUS_DISPLAY_MAP = {
     'archived': 'Arquivado'
 }
 
-# -----------------------------
-# Normalização / Aliases
-# -----------------------------
-STATUS_ALIASES = {
-    'ready_for_pickup': 'accepted_by_delivery',
-    'out_for_delivery': 'delivering',
-    'saiu_para_entrega': 'delivering',
-    'aguardando_retirada': 'accepted_by_delivery',
-    'pronto': 'ready',
-    'entregue': 'delivered',
-    'cancelado': 'cancelled',
-    'pendente': 'pending',
-    'aceito': 'accepted',
-    'preparando': 'preparing',
-}
+def generate_verification_code(length=4):
+    chars = string.ascii_uppercase.replace('I', '').replace('O', '')
+    chars += string.digits.replace('0', '').replace('1', '')
+    return ''.join(random.choice(chars) for _ in range(length))
 
-def normalize_status(value: str) -> str:
-    """Normaliza entrada (pt/en/alias), remove espaços, deixa minúsculo e aplica alias."""
-    if not value:
-        return ''
-    s = str(value).strip().lower()
-    return STATUS_ALIASES.get(s, s)
-
-# -----------------------------
-# Regras de transição
-# -----------------------------
 def is_valid_status_transition(current_status, new_status):
     valid_transitions = {
         'awaiting_payment': ['pending', 'cancelled'],
@@ -83,19 +60,6 @@ def is_valid_status_transition(current_status, new_status):
     }
     return new_status in valid_transitions.get(current_status, [])
 
-# -----------------------------
-# Utilidades
-# -----------------------------
-def generate_verification_code(length=4):
-    chars = (
-        string.ascii_uppercase.replace('I', '').replace('O', '') +
-        string.digits.replace('0', '').replace('1', '')
-    )
-    return ''.join(random.choice(chars) for _ in range(length))
-
-# -----------------------------
-# CORS para OPTIONS
-# -----------------------------
 @orders_bp.before_request
 def handle_options():
     if request.method == "OPTIONS":
@@ -106,9 +70,6 @@ def handle_options():
         response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
 
-# -----------------------------
-# GET/POST /api/orders
-# -----------------------------
 @orders_bp.route('/', methods=['GET', 'POST'])
 def handle_orders():
     conn = None
@@ -126,15 +87,17 @@ def handle_orders():
             sort_order = request.args.get('sort_order', 'desc')
             status_filter = request.args.get('status')
 
-            query = (
-                "SELECT o.*, "
-                "rp.restaurant_name, rp.logo_url as restaurant_logo, "
-                "cp.first_name as client_first_name, cp.last_name as client_last_name "
-                "FROM orders o "
-                "LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id "
-                "LEFT JOIN client_profiles cp ON o.client_id = cp.id "
-                "WHERE 1=1"
-            )
+            query = """
+                SELECT o.*,
+                       rp.restaurant_name,
+                       rp.logo_url as restaurant_logo,
+                       cp.first_name as client_first_name,
+                       cp.last_name as client_last_name
+                FROM orders o
+                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                LEFT JOIN client_profiles cp ON o.client_id = cp.id
+                WHERE 1=1
+            """
             params = []
 
             if user_type == 'restaurant':
@@ -145,7 +108,7 @@ def handle_orders():
                         return jsonify({"error": "Perfil do restaurante não encontrado"}), 404
                     query += " AND o.restaurant_id = %s"
                     params.append(profile['id'])
-                    # Restaurante não vê pedidos aguardando pagamento
+                    # Restaurante NÃO vê pedidos aguardando pagamento
                     query += " AND o.status != 'awaiting_payment'"
                     logger.info("🔒 Filtrando pedidos não pagos para restaurante")
 
@@ -164,12 +127,11 @@ def handle_orders():
                 orders = [dict(row) for row in cur.fetchall()]
             return jsonify(orders), 200
 
-        # POST /api/orders  (apenas cliente cria)
         elif request.method == 'POST':
             if user_type != 'client':
                 return jsonify({"error": "Apenas clientes podem criar pedidos"}), 403
-            data = request.get_json()
 
+            data = request.get_json()
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute("SELECT id FROM client_profiles WHERE user_id = %s", (user_auth_id,))
                 client_profile = cur.fetchone()
@@ -188,25 +150,27 @@ def handle_orders():
                     'total_amount_items': total_items,
                     'delivery_fee': delivery_fee,
                     'total_amount': total_items + delivery_fee,
-                    'status': 'awaiting_payment',  # inicia aguardando pagamento
+                    'status': 'awaiting_payment',
                     'pickup_code': generate_verification_code(),
                     'delivery_code': generate_verification_code()
                 }
 
                 logger.info(f"🆕 Criando pedido {order_data['id']} com status: awaiting_payment")
 
-                insert_query = (
-                    "INSERT INTO orders "
-                    "(id, client_id, restaurant_id, items, delivery_address, "
-                    " total_amount_items, delivery_fee, total_amount, status, pickup_code, delivery_code, delivery_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL) "
-                    "RETURNING *"
-                )
+                insert_query = """
+                    INSERT INTO orders
+                        (id, client_id, restaurant_id, items, delivery_address,
+                         total_amount_items, delivery_fee, total_amount, status,
+                         pickup_code, delivery_code, delivery_id)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    RETURNING *
+                """
                 cur.execute(insert_query, list(order_data.values()))
                 new_order = dict(cur.fetchone())
                 conn.commit()
 
-                # não expor códigos ao client app (aqui o caller é o app do cliente, se expõe tudo ok; ajuste conforme necessidade)
+                # nunca devolve os códigos no payload padrão
                 new_order.pop('pickup_code', None)
                 new_order.pop('delivery_code', None)
 
@@ -222,9 +186,6 @@ def handle_orders():
         if conn:
             conn.close()
 
-# -----------------------------
-# PUT /api/orders/<id>/status
-# -----------------------------
 @orders_bp.route('/<uuid:order_id>/status', methods=['PUT'])
 def update_order_status(order_id):
     conn = None
@@ -239,25 +200,21 @@ def update_order_status(order_id):
         if not data or 'new_status' not in data:
             return jsonify({"error": "Campo 'new_status' é obrigatório"}), 400
 
-        raw = data['new_status']
-        new_status_internal = normalize_status(raw)
-        logger.info(f"🔁 update_status {order_id}: recebido='{raw}' → normalizado='{new_status_internal}'")
-
+        new_status_internal = data['new_status']
         if new_status_internal not in VALID_STATUSES_INTERNAL:
-            return jsonify({"error": f"Status inválido: '{raw}'"}), 400
+            return jsonify({"error": f"Status inválido: '{new_status_internal}'"}), 400
 
-        # Transições para delivering/delivered exigem códigos
         if new_status_internal in ['delivering', 'delivered']:
             return jsonify({"error": "Use o endpoint de código para esta transição."}), 400
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(
-                "SELECT o.status FROM orders o "
-                "JOIN restaurant_profiles rp ON o.restaurant_id = rp.id "
-                "WHERE o.id = %s AND rp.user_id = %s",
-                (str(order_id), user_auth_id)
-            )
+            cur.execute("""
+                SELECT o.status
+                FROM orders o
+                JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                WHERE o.id = %s AND rp.user_id = %s
+            """, (str(order_id), user_auth_id))
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
@@ -283,14 +240,11 @@ def update_order_status(order_id):
         logger.error(f"Erro em update_order_status: {e}", exc_info=True)
         if conn:
             conn.rollback()
-        return jsonify({"error": "Erro interno no servidor"}), 500
+        return jsonify({"error": "Erro interno do servidor"}), 500
     finally:
         if conn:
             conn.close()
 
-# -----------------------------
-# POST /api/orders/<id>/pickup
-# -----------------------------
 @orders_bp.route('/<uuid:order_id>/pickup', methods=['POST'])
 def pickup_order(order_id):
     logger.info(f"=== INÍCIO PICKUP_ORDER para {order_id} ===")
@@ -306,6 +260,8 @@ def pickup_order(order_id):
         if not data or 'pickup_code' not in data:
             return jsonify({"error": "Código de retirada (pickup_code) é obrigatório"}), 400
 
+        code = str(data['pickup_code']).strip().upper()
+
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT status, pickup_code FROM orders WHERE id = %s", (str(order_id),))
@@ -314,9 +270,11 @@ def pickup_order(order_id):
                 return jsonify({"error": "Pedido não encontrado"}), 404
 
             if order['status'] not in ['ready', 'accepted_by_delivery']:
-                return jsonify({"error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"}), 400
+                return jsonify({
+                    "error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"
+                }), 400
 
-            if order['pickup_code'] != data['pickup_code'].upper():
+            if order['pickup_code'] != code:
                 return jsonify({"error": "Código de retirada inválido"}), 403
 
             cur.execute("UPDATE orders SET status = 'delivering', updated_at = NOW() WHERE id = %s", (str(order_id),))
@@ -333,9 +291,6 @@ def pickup_order(order_id):
         if conn:
             conn.close()
 
-# -----------------------------
-# POST /api/orders/<id>/complete
-# -----------------------------
 @orders_bp.route('/<uuid:order_id>/complete', methods=['POST'])
 def complete_order(order_id):
     logger.info(f"=== INÍCIO COMPLETE_ORDER para {order_id} ===")
@@ -351,6 +306,8 @@ def complete_order(order_id):
         if not data or 'delivery_code' not in data:
             return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
 
+        code = str(data['delivery_code']).strip().upper()
+
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT status, delivery_code FROM orders WHERE id = %s", (str(order_id),))
@@ -359,14 +316,18 @@ def complete_order(order_id):
                 return jsonify({"error": "Pedido não encontrado"}), 404
 
             if order['status'] != 'delivering':
-                return jsonify({"error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"}), 400
+                return jsonify({
+                    "error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"
+                }), 400
 
-            if order['delivery_code'] != data['delivery_code'].upper():
+            if order['delivery_code'] != code:
                 return jsonify({"error": "Código de entrega inválido"}), 403
 
-            cur.execute("UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = %s", (str(order_id),))
+            cur.execute(
+                "UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = %s",
+                (str(order_id),)
+            )
             conn.commit()
-
             logger.info(f"✅ Pedido {order_id} marcado como entregue!")
             return jsonify({"status": "success", "message": "Pedido entregue com sucesso!"}), 200
 
@@ -379,9 +340,6 @@ def complete_order(order_id):
         if conn:
             conn.close()
 
-# -----------------------------
-# GET /api/orders/valid-statuses
-# -----------------------------
 @orders_bp.route('/valid-statuses', methods=['GET'])
 def get_valid_statuses():
     logger.info("=== INÍCIO get_valid_statuses ===")
@@ -389,22 +347,17 @@ def get_valid_statuses():
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
             return error
-
         if user_type == 'restaurant':
             available_statuses = ['Aceito', 'Preparando', 'Pronto', 'Cancelado']
         elif user_type == 'client':
             available_statuses = ['Cancelado']
         else:
             available_statuses = []
-
         return jsonify({"status": "success", "valid_statuses": available_statuses}), 200
     except Exception as e:
         logger.error(f"Erro ao obter status válidos: {e}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
-# -----------------------------
-# GET /api/orders/<id>/status-history
-# -----------------------------
 @orders_bp.route('/<uuid:order_id>/status-history', methods=['GET'])
 def get_order_status_history(order_id):
     logger.info("=== INÍCIO get_order_status_history ===")
@@ -417,19 +370,17 @@ def get_order_status_history(order_id):
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             if user_type == 'restaurant':
-                cur.execute(
-                    "SELECT o.* FROM orders o "
-                    "JOIN restaurant_profiles rp ON o.restaurant_id = rp.id "
-                    "WHERE o.id = %s AND rp.user_id = %s",
-                    (str(order_id), user_auth_id)
-                )
+                cur.execute("""
+                    SELECT o.* FROM orders o
+                    JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                    WHERE o.id = %s AND rp.user_id = %s
+                """, (str(order_id), user_auth_id))
             elif user_type == 'client':
-                cur.execute(
-                    "SELECT o.* FROM orders o "
-                    "JOIN client_profiles cp ON o.client_id = cp.id "
-                    "WHERE o.id = %s AND cp.user_id = %s",
-                    (str(order_id), user_auth_id)
-                )
+                cur.execute("""
+                    SELECT o.* FROM orders o
+                    JOIN client_profiles cp ON o.client_id = cp.id
+                    WHERE o.id = %s AND cp.user_id = %s
+                """, (str(order_id), user_auth_id))
             else:
                 return jsonify({"error": "Acesso não autorizado"}), 403
 
@@ -451,9 +402,6 @@ def get_order_status_history(order_id):
         if conn:
             conn.close()
 
-# -----------------------------
-# GET /api/orders/pending-client-review
-# -----------------------------
 @orders_bp.route('/pending-client-review', methods=['GET'])
 def get_pending_client_reviews():
     logger.info("=== INÍCIO get_pending_client_reviews ===")
@@ -473,19 +421,28 @@ def get_pending_client_reviews():
                 return jsonify({'error': 'Perfil de cliente não encontrado.'}), 404
             client_id = client_profile['id']
 
-            sql_query = (
-                "SELECT o.id, o.restaurant_id, rp.restaurant_name, "
-                "o.delivery_id as deliveryman_id, "
-                "(dp.first_name || ' ' || dp.last_name) as deliveryman_name, "
-                "o.updated_at as completed_at "
-                "FROM orders o "
-                "JOIN restaurant_profiles rp ON o.restaurant_id = rp.id "
-                "LEFT JOIN delivery_profiles dp ON o.delivery_id = dp.id "
-                "WHERE o.client_id = %s AND o.status = 'delivered' "
-                "AND (NOT EXISTS (SELECT 1 FROM restaurant_reviews rr WHERE rr.order_id = o.id AND rr.client_id = %s) "
-                "OR (o.delivery_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM delivery_reviews dr WHERE dr.order_id = o.id AND dr.client_id = %s))) "
-                "ORDER BY o.updated_at DESC;"
-            )
+            sql_query = """
+                SELECT o.id, o.restaurant_id, rp.restaurant_name, o.delivery_id as deliveryman_id,
+                       (dp.first_name || ' ' || dp.last_name) as deliveryman_name,
+                       o.updated_at as completed_at
+                FROM orders o
+                JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                LEFT JOIN delivery_profiles dp ON o.delivery_id = dp.id
+                WHERE o.client_id = %s AND o.status = 'delivered'
+                  AND (
+                        NOT EXISTS (
+                          SELECT 1 FROM restaurant_reviews rr
+                          WHERE rr.order_id = o.id AND rr.client_id = %s
+                        )
+                        OR (
+                          o.delivery_id IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM delivery_reviews dr
+                            WHERE dr.order_id = o.id AND dr.client_id = %s
+                          )
+                        )
+                      )
+                ORDER BY o.updated_at DESC;
+            """
             cur.execute(sql_query, (client_id, client_id, client_id))
             orders_to_review = [dict(row) for row in cur.fetchall()]
             return jsonify(orders_to_review), 200
@@ -497,9 +454,6 @@ def get_pending_client_reviews():
         if conn:
             conn.close()
 
-# -----------------------------
-# GET /api/orders/pending-delivery-review
-# -----------------------------
 @orders_bp.route('/pending-delivery-review', methods=['GET', 'OPTIONS'])
 def get_pending_delivery_review():
     logger.info("=== INÍCIO get_pending_delivery_review ===")
@@ -519,17 +473,20 @@ def get_pending_delivery_review():
                 return jsonify({'error': 'Perfil de entregador não encontrado.'}), 404
             delivery_id = delivery_profile['id']
 
-            sql_query = (
-                "SELECT o.id, o.restaurant_id, rp.restaurant_name, "
-                "o.client_id, (cp.first_name || ' ' || cp.last_name) as client_name, "
-                "o.updated_at as delivered_at, o.total_amount "
-                "FROM orders o "
-                "JOIN restaurant_profiles rp ON o.restaurant_id = rp.id "
-                "JOIN client_profiles cp ON o.client_id = cp.id "
-                "WHERE o.delivery_id = %s AND o.status = 'delivered' "
-                "AND NOT EXISTS (SELECT 1 FROM delivery_reviews dr WHERE dr.order_id = o.id AND dr.delivery_id = %s) "
-                "ORDER BY o.updated_at DESC;"
-            )
+            sql_query = """
+                SELECT o.id, o.restaurant_id, rp.restaurant_name, o.client_id,
+                       (cp.first_name || ' ' || cp.last_name) as client_name,
+                       o.updated_at as delivered_at, o.total_amount
+                FROM orders o
+                JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                JOIN client_profiles cp ON o.client_id = cp.id
+                WHERE o.delivery_id = %s AND o.status = 'delivered'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM delivery_reviews dr
+                    WHERE dr.order_id = o.id AND dr.delivery_id = %s
+                  )
+                ORDER BY o.updated_at DESC;
+            """
             cur.execute(sql_query, (delivery_id, delivery_id))
             orders_to_review = [dict(row) for row in cur.fetchall()]
             return jsonify(orders_to_review), 200
@@ -541,14 +498,11 @@ def get_pending_delivery_review():
         if conn:
             conn.close()
 
-# -----------------------------
-# GET /api/orders/available (para entregadores)
-# -----------------------------
 @orders_bp.route('/available', methods=['GET'])
 def get_available_orders():
-    """Retorna pedidos disponíveis para entregadores:
-       - 'ready' sem entregador
-       - 'accepted_by_delivery' sem entregador (caso restaurante já tenha sinalizado 'Aguardando Retirada')
+    """Retorna pedidos disponíveis para o entregador:
+       - status 'ready' e delivery_id IS NULL
+       - status 'accepted_by_delivery' e delivery_id IS NULL
     """
     logger.info("=== INÍCIO get_available_orders ===")
     conn = None
@@ -570,63 +524,55 @@ def get_available_orders():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             sql_query = """
                 SELECT 
-                    o.id, 
+                    o.id,
                     o.restaurant_id,
-                    COALESCE(rp.restaurant_name, 'Restaurante') as restaurant_name,
-                    CONCAT_WS(', ', 
-                        rp.address_street, 
-                        rp.address_number, 
+                    COALESCE(rp.restaurant_name, 'Restaurante') AS restaurant_name,
+                    CONCAT_WS(', ',
+                        rp.address_street,
+                        rp.address_number,
                         rp.address_neighborhood,
-                        rp.address_city, 
+                        rp.address_city,
                         rp.address_state
-                    ) as restaurant_address,
+                    ) AS restaurant_address,
                     o.delivery_address,
-                    COALESCE(o.total_amount, 0) as total_amount,
-                    COALESCE(o.delivery_fee, 0) as delivery_fee,
+                    COALESCE(o.total_amount, 0) AS total_amount,
+                    COALESCE(o.delivery_fee, 0) AS delivery_fee,
                     o.status,
                     o.created_at
-                FROM 
-                    orders o
-                LEFT JOIN 
-                    restaurant_profiles rp ON o.restaurant_id = rp.id
+                FROM orders o
+                LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE 
-                    (o.status = 'ready' AND o.delivery_id IS NULL)
-                    OR (o.status = 'accepted_by_delivery' AND o.delivery_id IS NULL)
-                ORDER BY 
-                    o.created_at ASC;
+                    (o.status = 'ready' OR o.status = 'accepted_by_delivery')
+                    AND o.delivery_id IS NULL
+                ORDER BY o.created_at ASC;
             """
             cur.execute(sql_query)
             rows = cur.fetchall()
 
             available_orders = []
             for row in rows:
-                try:
-                    order_dict = dict(row)
+                order_dict = dict(row)
 
-                    if isinstance(order_dict.get('delivery_address'), str):
-                        try:
-                            order_dict['delivery_address'] = json.loads(order_dict['delivery_address'])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
+                if isinstance(order_dict.get('delivery_address'), str):
+                    try:
+                        order_dict['delivery_address'] = json.loads(order_dict['delivery_address'])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
-                    if order_dict.get('created_at'):
-                        order_dict['created_at'] = order_dict['created_at'].isoformat()
-                    if order_dict.get('id'):
-                        order_dict['id'] = str(order_dict['id'])
-                    if order_dict.get('restaurant_id'):
-                        order_dict['restaurant_id'] = str(order_dict['restaurant_id'])
-                    if order_dict.get('total_amount') is not None:
-                        order_dict['total_amount'] = float(order_dict['total_amount'])
-                    if order_dict.get('delivery_fee') is not None:
-                        order_dict['delivery_fee'] = float(order_dict['delivery_fee'])
+                if order_dict.get('created_at'):
+                    order_dict['created_at'] = order_dict['created_at'].isoformat()
+                if order_dict.get('id'):
+                    order_dict['id'] = str(order_dict['id'])
+                if order_dict.get('restaurant_id'):
+                    order_dict['restaurant_id'] = str(order_dict['restaurant_id'])
+                if order_dict.get('total_amount') is not None:
+                    order_dict['total_amount'] = float(order_dict['total_amount'])
+                if order_dict.get('delivery_fee') is not None:
+                    order_dict['delivery_fee'] = float(order_dict['delivery_fee'])
 
-                    available_orders.append(order_dict)
+                available_orders.append(order_dict)
 
-                except Exception as row_error:
-                    logger.error(f"Erro ao processar linha: {row_error}", exc_info=True)
-                    continue
-
-            logger.info(f"✅ Disponíveis para entrega: {len(available_orders)}")
+            logger.info(f"✅ Processados {len(available_orders)} pedidos disponíveis com sucesso")
             return jsonify(available_orders), 200
 
     except Exception as e:
@@ -637,12 +583,9 @@ def get_available_orders():
             conn.close()
             logger.info("Conexão com banco fechada em get_available_orders")
 
-# -----------------------------
-# POST /api/orders/<id>/accept (entregador)
-# -----------------------------
 @orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
 def accept_order_by_delivery(order_id):
-    """Endpoint para entregador aceitar pedido"""
+    """Entregador aceita pedido disponível (ready ou accepted_by_delivery)"""
     logger.info(f"=== INÍCIO accept_order_by_delivery para {order_id} ===")
     conn = None
     try:
@@ -669,14 +612,17 @@ def accept_order_by_delivery(order_id):
 
             delivery_profile_id = delivery_profile['id']
 
-            cur.execute("SELECT id, status, delivery_id FROM orders WHERE id = %s", (str(order_id),))
+            cur.execute("""
+                SELECT id, status, delivery_id
+                FROM orders
+                WHERE id = %s
+            """, (str(order_id),))
             order = cur.fetchone()
             if not order:
                 logger.error(f"Pedido {order_id} não encontrado")
                 return jsonify({'error': 'Pedido não encontrado'}), 404
 
-            # permitir aceitar quando 'ready' ou 'accepted_by_delivery' (sem entregador)
-            if order['status'] not in ('ready', 'accepted_by_delivery'):
+            if order['status'] not in ['ready', 'accepted_by_delivery']:
                 logger.warning(f"Pedido {order_id} não está disponível. Status: {order['status']}")
                 return jsonify({'error': f'Pedido não está disponível. Status: {order["status"]}'}), 400
 
@@ -685,8 +631,8 @@ def accept_order_by_delivery(order_id):
                 return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
 
             cur.execute("""
-                UPDATE orders 
-                SET delivery_id = %s, 
+                UPDATE orders
+                SET delivery_id = %s,
                     status = 'accepted_by_delivery',
                     updated_at = NOW()
                 WHERE id = %s
@@ -696,17 +642,18 @@ def accept_order_by_delivery(order_id):
             updated_order = dict(cur.fetchone())
             conn.commit()
 
-            # normalizações de saída
-            for key in ('id', 'restaurant_id', 'delivery_id', 'client_id'):
-                if updated_order.get(key):
-                    updated_order[key] = str(updated_order[key])
-            for key in ('created_at', 'updated_at'):
-                if updated_order.get(key):
-                    updated_order[key] = updated_order[key].isoformat()
+            # Normaliza tipos para JSON
+            for k in ('id', 'restaurant_id', 'delivery_id', 'client_id'):
+                if updated_order.get(k):
+                    updated_order[k] = str(updated_order[k])
+            for t in ('created_at', 'updated_at'):
+                if updated_order.get(t):
+                    updated_order[t] = updated_order[t].isoformat()
 
             updated_order.pop('pickup_code', None)
             updated_order.pop('delivery_code', None)
 
+            logger.info(f"✅ Pedido {order_id} aceito pelo entregador {delivery_profile_id}")
             return jsonify({
                 'status': 'success',
                 'message': 'Pedido aceito! Vá ao restaurante para retirar.',
@@ -723,55 +670,65 @@ def accept_order_by_delivery(order_id):
             conn.close()
             logger.info("Conexão com banco fechada em accept_order_by_delivery")
 
-# -----------------------------
-# GET /api/orders/<id>/codes (cliente)
-# -----------------------------
-@orders_bp.route('/<uuid:order_id>/codes', methods=['GET'])
-def get_order_codes(order_id):
-    """Endpoint para cliente buscar os códigos do seu próprio pedido"""
-    logger.info(f"=== INÍCIO get_order_codes para {order_id} ===")
+# === NOVO: expor o código de retirada com permissão adequada
+@orders_bp.route('/<uuid:order_id>/pickup-code', methods=['GET'])
+def get_pickup_code_for_delivery_or_restaurant(order_id):
     conn = None
     try:
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error:
-            logger.error(f"Erro de autenticação: {error}")
             return error
 
-        if user_type != 'client':
-            logger.warning(f"Acesso negado para user_type: {user_type}")
-            return jsonify({'error': 'Apenas o cliente pode acessar os códigos do pedido'}), 403
-
         conn = get_db_connection()
-        if not conn:
-            logger.error("Falha ao conectar ao banco de dados")
-            return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
-
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("""
-                SELECT o.id, o.status, o.pickup_code, o.delivery_code, o.client_id
-                FROM orders o
-                JOIN client_profiles cp ON o.client_id = cp.id
-                WHERE o.id = %s AND cp.user_id = %s
-            """, (str(order_id), user_auth_id))
 
-            order = cur.fetchone()
-            if not order:
-                logger.error(f"Pedido {order_id} não encontrado ou não pertence ao cliente")
-                return jsonify({'error': 'Pedido não encontrado'}), 404
+            if user_type == 'client':
+                cur.execute("""
+                    SELECT o.pickup_code
+                    FROM orders o
+                    JOIN client_profiles cp ON o.client_id = cp.id
+                    WHERE o.id = %s AND cp.user_id = %s
+                """, (str(order_id), user_auth_id))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado"}), 404
+                return jsonify({"pickup_code": row['pickup_code']}), 200
 
-            logger.info(f"✅ Códigos retornados para pedido {order_id}")
+            if user_type == 'restaurant':
+                cur.execute("""
+                    SELECT o.pickup_code
+                    FROM orders o
+                    JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                    WHERE o.id = %s AND rp.user_id = %s
+                """, (str(order_id), user_auth_id))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
+                return jsonify({"pickup_code": row['pickup_code']}), 200
 
-            return jsonify({
-                'order_id': str(order['id']),
-                'status': order['status'],
-                'pickup_code': order['pickup_code'],
-                'delivery_code': order['delivery_code']
-            }), 200
+            if user_type == 'delivery':
+                cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
+                dprof = cur.fetchone()
+                if not dprof:
+                    return jsonify({"error": "Perfil de entregador não encontrado"}), 404
+
+                cur.execute("""
+                    SELECT pickup_code
+                    FROM orders
+                    WHERE id = %s AND delivery_id = %s
+                """, (str(order_id), dprof['id']))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado ou não atribuído a este entregador"}), 404
+                return jsonify({"pickup_code": row['pickup_code']}), 200
+
+            return jsonify({"error": "Acesso não autorizado"}), 403
 
     except Exception as e:
-        logger.error(f"❌ Erro crítico em get_order_codes: {e}", exc_info=True)
-        return jsonify({'error': 'Erro interno do servidor'}), 500
+        logger.error(f"Erro em get_pickup_code_for_delivery_or_restaurant: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
     finally:
         if conn:
             conn.close()
-            logger.info("Conexão com banco fechada em get_order_codes")
