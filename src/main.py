@@ -1,15 +1,15 @@
 import os
 import sys
-import re
 import logging
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, jsonify, request, Blueprint
+from flask import Flask, jsonify, request, Blueprint, make_response
 from flask_cors import CORS
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
 import mercadopago
 import psycopg2
+import re
 
 # --- Configuração de Path e Logging ---
 current_dir = Path(__file__).parent
@@ -71,30 +71,84 @@ app.config.update(
     SESSION_COOKIE_SECURE=True,
 )
 
-# --- Configuração de CORS Global ---
-production_origins = [
-    "https://restaurante.inksadelivery.com.br",
-    "https://admin.inksadelivery.com.br",
+# ---------------- CORS ROBUSTO ----------------
+# Origens explícitas conhecidas
+PROD_ORIGINS = [
     "https://clientes.inksadelivery.com.br",
+    "https://restaurantes.inksadelivery.com.br",   # <- plural
+    "https://restaurante.inksadelivery.com.br",    # (mantido por segurança, caso exista)
     "https://entregadores.inksadelivery.com.br",
+    "https://admin.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
 ]
 
-vercel_preview_origins = [
-    "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
-    "https://inksa-admin-v0-5pv7tmapd-inksas-projects.vercel.app",
-    "https://inksa-admin-v0-awfofjwr4-inksas-projects.vercel.app",
+# Pré-visualizações Vercel (domínios variáveis)
+VERCEL_BASE = ".vercel.app"
+
+# Dev local
+LOCAL_HOSTS = [
+    "http://localhost:3000", "http://127.0.0.1:3000",
+    "http://localhost:5173", "http://127.0.0.1:5173",
 ]
 
-allowed_origins_patterns = [
-    re.compile(r"http://localhost:\d+"),
-    re.compile(r"https://.*\.vercel\.app"),
-]
+# Permite sobrescrever/estender via variável de ambiente (se desejar)
+EXTRA = [o.strip() for o in os.environ.get("EXTRA_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
-allowed_origins = production_origins + vercel_preview_origins + allowed_origins_patterns
-CORS(app, origins=allowed_origins, supports_credentials=True)
+ALLOWED_ORIGINS = set(PROD_ORIGINS + LOCAL_HOSTS + EXTRA)
+
+def is_allowed_origin(origin: str) -> bool:
+    if not origin:
+        return False
+    if origin in ALLOWED_ORIGINS:
+        return True
+    # qualquer subdomínio *.vercel.app
+    if origin.endswith(VERCEL_BASE):
+        return True
+    # qualquer localhost em porta qualquer
+    if re.match(r"^http://localhost:\d+$", origin) or re.match(r"^http://127\.0\.0\.1:\d+$", origin):
+        return True
+    return False
+
+# Flask-CORS para /api/* (usa wildcard aqui; headers finais serão ajustados no after_request)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "*"}},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+)
+
+@app.before_request
+def handle_preflight():
+    # Responder preflight globalmente (especialmente para /api/*)
+    if request.method == "OPTIONS":
+        origin = request.headers.get("Origin", "")
+        resp = make_response()
+        if is_allowed_origin(origin):
+            resp.headers["Access-Control-Allow-Origin"] = origin
+        else:
+            # se quiser negar, deixe "null"; se quiser permitir tudo, pode por "*"
+            resp.headers["Access-Control-Allow-Origin"] = "null"
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        return resp, 204
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    if is_allowed_origin(origin):
+        # injeta sempre que a origem for permitida
+        response.headers.setdefault("Access-Control-Allow-Origin", origin)
+        response.headers.setdefault("Vary", "Origin")
+        response.headers.setdefault("Access-Control-Allow-Credentials", "true")
+        response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    return response
 
 # --- Configuração do SocketIO ---
+# Se quiser restringir, substitua "*" por list(ALLOWED_ORIGINS)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
 
 # --- REGISTRO DE BLUEPRINTS ---
@@ -172,7 +226,7 @@ def health_check():
         "cors_enabled": True
     })
 
-# --- Handlers de Erro e SocketIO ---
+# --- Handlers de SocketIO ---
 @socketio.on('connect')
 def handle_connect():
     logger.info(f'Cliente conectado via WebSocket: {request.sid}')
@@ -187,6 +241,7 @@ def handle_ping(data):
     logger.info(f'Ping recebido de {request.sid}: {data}')
     return {'response': 'pong', 'sid': request.sid}
 
+# --- Handlers de Erro ---
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint não encontrado", "path": request.path}), 404
