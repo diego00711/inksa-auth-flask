@@ -735,9 +735,6 @@ def get_pickup_code_for_delivery_or_restaurant(order_id):
 
 # === NOVO: rota de compatibilidade usada pelo app do cliente
 # GET /api/orders/<order_id>/codes
-# - Cliente: retorna delivery_code
-# - Restaurante: retorna pickup_code
-# - Entregador: retorna pickup_code (se o pedido estiver atribuído a ele)
 @orders_bp.route('/<uuid:order_id>/codes', methods=['GET'])
 def get_order_codes_compatible(order_id):
     conn = None
@@ -781,7 +778,6 @@ def get_order_codes_compatible(order_id):
                 }), 200
 
             if user_type == 'delivery':
-                # entrega só enxerga o pickup_code se o pedido estiver atribuído a ele
                 cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
                 dprof = cur.fetchone()
                 if not dprof:
@@ -805,6 +801,88 @@ def get_order_codes_compatible(order_id):
 
     except Exception as e:
         logger.error(f"Erro em get_order_codes_compatible: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+# === NOVO: DELETE /api/orders/<order_id>  -> arquiva/exclui pedido
+# Regra:
+# - CLIENTE pode arquivar pedidos que são seus e estejam em
+#   'awaiting_payment', 'cancelled', 'delivered', 'archived'
+#   (pedidos em andamento não podem ser excluídos pelo cliente)
+# - RESTAURANTE pode arquivar pedidos seus que estejam 'delivered' ou 'cancelled'
+# - Entregador não exclui
+@orders_bp.route('/<uuid:order_id>', methods=['DELETE'])
+def archive_order(order_id):
+    logger.info(f"=== INÍCIO archive_order para {order_id} ===")
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
+
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if user_type == 'client':
+                cur.execute("""
+                    SELECT o.status
+                    FROM orders o
+                    JOIN client_profiles cp ON o.client_id = cp.id
+                    WHERE o.id = %s AND cp.user_id = %s
+                """, (str(order_id), user_auth_id))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado"}), 404
+
+                allowed = {'awaiting_payment', 'cancelled', 'delivered', 'archived'}
+                if row['status'] not in allowed:
+                    return jsonify({"error": "Este pedido ainda está em andamento e não pode ser excluído."}), 400
+
+                cur.execute("""
+                    UPDATE orders
+                    SET status = 'archived', updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id, status, updated_at
+                """, (str(order_id),))
+                result = cur.fetchone()
+                conn.commit()
+                return jsonify({"status": "success", "order_id": str(result['id']), "new_status": result['status']}), 200
+
+            elif user_type == 'restaurant':
+                cur.execute("""
+                    SELECT o.status
+                    FROM orders o
+                    JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                    WHERE o.id = %s AND rp.user_id = %s
+                """, (str(order_id), user_auth_id))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
+
+                if row['status'] not in {'delivered', 'cancelled', 'archived'}:
+                    return jsonify({"error": "Somente pedidos finalizados podem ser arquivados pelo restaurante."}), 400
+
+                cur.execute("""
+                    UPDATE orders
+                    SET status = 'archived', updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id, status, updated_at
+                """, (str(order_id),))
+                result = cur.fetchone()
+                conn.commit()
+                return jsonify({"status": "success", "order_id": str(result['id']), "new_status": result['status']}), 200
+
+            else:
+                return jsonify({"error": "Acesso negado"}), 403
+
+    except Exception as e:
+        logger.error(f"Erro em archive_order: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return jsonify({"error": "Erro interno do servidor"}), 500
