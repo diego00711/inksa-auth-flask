@@ -1,65 +1,22 @@
 # src/routes/payouts.py
 import logging
 from datetime import datetime
-from uuid import UUID
-
 from flask import Blueprint, request, jsonify
-import psycopg2
-import psycopg2.extras
-
+from psycopg2.extras import DictCursor
 from ..utils.helpers import get_db_connection, get_user_id_from_token
-from ..logic.payout_processor import process_payouts
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Se você tiver isso em outro módulo, pode mover:
+from ..logic.payout_processor import process_payouts  # já usado no seu projeto
+
 logger = logging.getLogger(__name__)
-
 payouts_bp = Blueprint("payouts", __name__)
 
-# -------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------
 def _is_admin(user_type: str) -> bool:
-    # ajuste se seu sistema utilizar outra checagem (ex: role em tabela users)
-    return (user_type or "").lower() == "admin"
+    # ajuste conforme sua regra de admins
+    return user_type == "admin"
 
-def _ok(data=None, status=200):
-    return jsonify({"status": "success", "data": data}), status
-
-def _err(msg, status=400):
-    return jsonify({"status": "error", "error": msg}), status
-
-def _to_uuid(value):
-    try:
-        return str(UUID(str(value)))
-    except Exception:
-        return None
-
-def _parse_date(s):
-    if not s:
-        return None
-    try:
-        # aceita "YYYY-MM-DD" ou ISO
-        return datetime.fromisoformat(s).date()
-    except Exception:
-        return None
-
-def _row_to_dict(row):
-    """Converte registro DictRow para dict serializável."""
-    if row is None:
-        return None
-    d = dict(row)
-    for k, v in list(d.items()):
-        if isinstance(v, (datetime,)):
-            d[k] = v.isoformat()
-        # tipos date/time/etc. o psycopg2 já serializa bem quando vira string
-        # IDs UUID -> string
-        if hasattr(v, "hex") and len(getattr(v, "hex", "")) == 32:
-            d[k] = str(v)
-    return d
-
-# CORS preflight local
 @payouts_bp.before_request
-def handle_options():
+def allow_cors_preflight():
     if request.method == "OPTIONS":
         resp = jsonify()
         resp.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
@@ -69,324 +26,299 @@ def handle_options():
         return resp
 
 # -------------------------------------------------------------------
-# POST /process  -> gera payouts a partir das views/tabelas (processor)
+# POST /api/admin/payouts/process
+# Body: { "partner_type": "restaurant"|"delivery", "cycle_type": "weekly"|"bi-weekly"|"monthly" }
+# Gera os payouts agregados a partir dos orders 'delivered' não pagos.
 # -------------------------------------------------------------------
-@payouts_bp.route("/process", methods=["POST"])
+@payouts_bp.route("/process", methods=["POST", "OPTIONS"])
 def process_payouts_route():
-    """
-    POST /api/admin/payouts/process
-    Body:
-      {
-        "partner_type": "restaurant" | "delivery",
-        "cycle_type": "weekly" | "bi-weekly" | "monthly"
-      }
-    """
     conn = None
     try:
         user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
         if error:
             return error
         if not _is_admin(user_type):
-            return _err("Acesso negado. Somente administradores.", 403)
+            return jsonify({"error": "Acesso negado. Somente administradores."}), 403
 
         body = request.get_json(silent=True) or {}
         partner_type = (body.get("partner_type") or "").strip().lower()
         cycle_type = (body.get("cycle_type") or "weekly").strip().lower()
 
         if partner_type not in ("restaurant", "delivery"):
-            return _err("partner_type inválido (restaurant | delivery)")
+            return jsonify({"error": "partner_type inválido (restaurant|delivery)"}), 400
         if cycle_type not in ("weekly", "bi-weekly", "monthly"):
-            return _err("cycle_type inválido (weekly | bi-weekly | monthly)")
+            return jsonify({"error": "cycle_type inválido (weekly|bi-weekly|monthly)"}), 400
 
         conn = get_db_connection()
         if not conn:
-            return _err("Erro de conexão com banco de dados", 500)
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
 
-        logger.info("➡️ Iniciando processamento de payouts: partner_type=%s, cycle_type=%s", partner_type, cycle_type)
         result = process_payouts(conn, partner_type=partner_type, cycle_type=cycle_type)
         conn.commit()
 
-        payload = {
+        return jsonify({
+            "status": "success",
             "partner_type": partner_type,
             "cycle_type": cycle_type,
             "generated_count": len(result),
-            "payouts": result,
-        }
-        return _ok(payload, 200)
+            "payouts": result
+        }), 200
 
     except Exception as e:
         logger.exception("Erro ao processar payouts")
-        if conn:
-            conn.rollback()
-        return _err("Erro interno ao processar payouts", 500)
+        if conn: conn.rollback()
+        return jsonify({"error": "Erro interno ao processar payouts"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 # -------------------------------------------------------------------
-# GET /list  -> lista payouts com filtros
+# GET /api/admin/payouts
+# Query params: partner_type, status, partner_id, start_date, end_date, limit, offset
+# Retorna lista paginada de payouts.
 # -------------------------------------------------------------------
-@payouts_bp.route("/list", methods=["GET"])
+@payouts_bp.route("", methods=["GET", "OPTIONS"])
 def list_payouts():
-    """
-    GET /api/admin/payouts/list?partner_type=restaurant|delivery&status=pending|paid|cancelled
-                               &from=YYYY-MM-DD&to=YYYY-MM-DD
-                               &partner_id=<uuid>
-                               &limit=50&offset=0
-    """
     conn = None
     try:
         user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
         if error:
             return error
         if not _is_admin(user_type):
-            return _err("Acesso negado. Somente administradores.", 403)
+            return jsonify({"error": "Acesso negado"}), 403
 
-        partner_type = (request.args.get("partner_type") or "").strip().lower() or None
-        status = (request.args.get("status") or "").strip().lower() or None
-        partner_id = _to_uuid(request.args.get("partner_id"))
-        d_from = _parse_date(request.args.get("from"))
-        d_to = _parse_date(request.args.get("to"))
-        try:
-            limit = min(max(int(request.args.get("limit", 50)), 1), 200)
-            offset = max(int(request.args.get("offset", 0)), 0)
-        except Exception:
-            limit, offset = 50, 0
+        partner_type = (request.args.get("partner_type") or "").strip().lower()  # restaurant|delivery|""(todos)
+        status       = (request.args.get("status") or "").strip().lower()       # pending|paid|cancelled|""(todos)
+        partner_id   = request.args.get("partner_id")
+        start_date   = request.args.get("start_date")  # ISO
+        end_date     = request.args.get("end_date")    # ISO
+        limit        = int(request.args.get("limit") or 20)
+        offset       = int(request.args.get("offset") or 0)
 
-        wh = []
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
+
+        where = []
         params = []
 
         if partner_type in ("restaurant", "delivery"):
-            wh.append("partner_type = %s")
+            where.append("partner_type = %s")
             params.append(partner_type)
         if status in ("pending", "paid", "cancelled"):
-            wh.append("status = %s")
+            where.append("status = %s")
             params.append(status)
         if partner_id:
-            wh.append("partner_id = %s")
+            where.append("partner_id = %s")
             params.append(partner_id)
-        if d_from:
-            wh.append("period_end >= %s")
-            params.append(d_from)
-        if d_to:
-            wh.append("period_start <= %s")
-            params.append(d_to)
+        if start_date:
+            where.append("created_at >= %s")
+            params.append(start_date)
+        if end_date:
+            where.append("created_at <= %s")
+            params.append(end_date)
 
-        where_clause = (" WHERE " + " AND ".join(wh)) if wh else ""
-        sql = f"""
-            SELECT
-              id, partner_type, partner_id, period_start, period_end,
-              gross_amount, commission_amount, net_amount,
-              status, created_at, updated_at, paid_at, paid_by_user_id,
-              payment_method, payment_ref
-            FROM payouts
-            {where_clause}
-            ORDER BY created_at DESC
-            LIMIT %s OFFSET %s
-        """
-        params.extend([limit, offset])
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        order_sql = "ORDER BY created_at DESC"
+        pag_sql   = "LIMIT %s OFFSET %s"
 
-        conn = get_db_connection()
-        if not conn:
-            return _err("Erro de conexão com banco de dados", 500)
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            # total
+            cur.execute(f"SELECT COUNT(*) AS total FROM payouts {where_sql}", tuple(params))
+            total = int(cur.fetchone()["total"])
 
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            data = [_row_to_dict(r) for r in rows]
+            # page
+            cur.execute(
+                f"""SELECT id, partner_type, partner_id, period_start, period_end,
+                           total_gross, commission_fee, total_net, status,
+                           payment_method, payment_ref,
+                           created_at, updated_at
+                    FROM payouts
+                    {where_sql} {order_sql} {pag_sql}""",
+                tuple(params + [limit, offset])
+            )
+            rows = [dict(r) for r in cur.fetchall()]
 
-        return _ok({"items": data, "limit": limit, "offset": offset, "count": len(data)})
+        # conversões leves
+        for r in rows:
+            for k in ("period_start", "period_end", "created_at", "updated_at"):
+                if r.get(k) and hasattr(r[k], "isoformat"):
+                    r[k] = r[k].isoformat()
 
-    except Exception as e:
+        return jsonify({"status": "success", "items": rows, "total": total}), 200
+
+    except Exception:
         logger.exception("Erro ao listar payouts")
-        return _err("Erro interno ao listar payouts", 500)
+        return jsonify({"error": "Erro interno ao listar payouts"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 # -------------------------------------------------------------------
-# GET /<payout_id>/details  -> detalhe + itens (view) se existir
+# GET /api/admin/payouts/<uuid:payout_id>
+# Detalhes + itens por pedido
 # -------------------------------------------------------------------
-@payouts_bp.route("/<uuid:payout_id>/details", methods=["GET"])
-def payout_details(payout_id):
-    """
-    GET /api/admin/payouts/<payout_id>/details
-    Retorna o payout + itens (se a view payouts_items_v existir).
-    """
+@payouts_bp.route("/<uuid:payout_id>", methods=["GET", "OPTIONS"])
+def get_payout_detail(payout_id):
     conn = None
     try:
         user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
         if error:
             return error
         if not _is_admin(user_type):
-            return _err("Acesso negado. Somente administradores.", 403)
+            return jsonify({"error": "Acesso negado"}), 403
 
         conn = get_db_connection()
         if not conn:
-            return _err("Erro de conexão com banco de dados", 500)
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
 
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("""
-                SELECT
-                  id, partner_type, partner_id, period_start, period_end,
-                  gross_amount, commission_amount, net_amount,
-                  status, created_at, updated_at, paid_at, paid_by_user_id,
-                  payment_method, payment_ref
-                FROM payouts
-                WHERE id = %s
-            """, (str(payout_id),))
-            row = cur.fetchone()
-            if not row:
-                return _err("Payout não encontrado", 404)
-            payout = _row_to_dict(row)
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                """SELECT id, partner_type, partner_id, period_start, period_end,
+                          total_gross, commission_fee, total_net, status,
+                          payment_method, payment_ref, created_at, updated_at
+                   FROM payouts WHERE id = %s""", (str(payout_id),)
+            )
+            head = cur.fetchone()
+            if not head:
+                return jsonify({"error": "Payout não encontrado"}), 404
 
-            # tenta buscar itens na view consolidada (se existir)
-            items = []
-            try:
-                cur.execute("""
-                    SELECT order_id, partner_type, partner_id, order_amount,
-                           delivery_fee, commission_amount, net_amount,
-                           created_at, status
-                    FROM payouts_items_v
-                    WHERE payout_id = %s
-                    ORDER BY created_at ASC
-                """, (str(payout_id),))
-                items = [_row_to_dict(r) for r in cur.fetchall()]
-            except Exception:
-                # fallback (opcional): pode tentar buscar direto em orders com período
-                logger.info("View payouts_items_v não encontrada, retornando sem itens")
+            cur.execute(
+                """SELECT id, order_id, order_total, delivery_fee,
+                          commission_applied, net_amount
+                   FROM payout_items
+                   WHERE payout_id = %s
+                   ORDER BY created_at ASC""",
+                (str(payout_id),)
+            )
+            items = [dict(r) for r in cur.fetchall()]
 
-        return _ok({"payout": payout, "items": items})
+        head = dict(head)
+        for k in ("period_start","period_end","created_at","updated_at"):
+            if head.get(k) and hasattr(head[k], "isoformat"):
+                head[k] = head[k].isoformat()
 
-    except Exception as e:
-        logger.exception("Erro ao obter detalhes do payout")
-        return _err("Erro interno ao obter detalhes do payout", 500)
+        return jsonify({"status": "success", "payout": head, "items": items}), 200
+
+    except Exception:
+        logger.exception("Erro ao obter detalhe de payout")
+        return jsonify({"error": "Erro interno ao obter payout"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 # -------------------------------------------------------------------
-# POST /<payout_id>/pay  -> marca payout como pago
+# POST /api/admin/payouts/<uuid:payout_id>/mark-paid
+# Body: { "payment_method": "pix|transfer|cash|...", "payment_ref": "txid123", "paid_at": "2025-10-31T10:30:00" (opcional) }
 # -------------------------------------------------------------------
-@payouts_bp.route("/<uuid:payout_id>/pay", methods=["POST"])
-def pay_payout(payout_id):
-    """
-    POST /api/admin/payouts/<payout_id>/pay
-    Body:
-      {
-        "payment_method": "pix" | "manual" | "transfer" | ...,
-        "payment_ref": "comprovante / txid / id",
-        "paid_at": "ISO(optional)"   # se não vier, NOW()
-      }
-    Efeito:
-      - Atualiza payout -> status='paid', paid_at, paid_by_user_id, payment_method, payment_ref
-    """
+@payouts_bp.route("/<uuid:payout_id>/mark-paid", methods=["POST", "OPTIONS"])
+def mark_payout_paid(payout_id):
     conn = None
     try:
         user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
         if error:
             return error
         if not _is_admin(user_type):
-            return _err("Acesso negado. Somente administradores.", 403)
+            return jsonify({"error": "Acesso negado"}), 403
 
         body = request.get_json(silent=True) or {}
-        payment_method = (body.get("payment_method") or "manual").strip().lower()
-        payment_ref = (body.get("payment_ref") or "").strip()
-        paid_at_iso = body.get("paid_at")
-        paid_at = None
-        if paid_at_iso:
-            try:
-                paid_at = datetime.fromisoformat(paid_at_iso)
-            except Exception:
-                return _err("paid_at inválido (use ISO 8601)")
+        method = (body.get("payment_method") or "").strip()
+        ref    = (body.get("payment_ref") or "").strip()
+        paid_at = body.get("paid_at")  # opcional
+
+        if not method:
+            return jsonify({"error": "payment_method é obrigatório"}), 400
 
         conn = get_db_connection()
         if not conn:
-            return _err("Erro de conexão com banco de dados", 500)
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
 
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT id, status FROM payouts WHERE id = %s", (str(payout_id),))
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT status FROM payouts WHERE id = %s", (str(payout_id),))
             row = cur.fetchone()
             if not row:
-                return _err("Payout não encontrado", 404)
+                return jsonify({"error": "Payout não encontrado"}), 404
+            if row["status"] == "paid":
+                return jsonify({"error": "Payout já está pago"}), 400
+            if row["status"] == "cancelled":
+                return jsonify({"error": "Payout está cancelado"}), 400
 
-            current_status = (row["status"] or "").lower()
-            if current_status == "paid":
-                return _err("Payout já está marcado como pago", 409)
-            if current_status == "cancelled":
-                return _err("Payout cancelado não pode ser pago", 409)
+            if paid_at:
+                try:
+                    # valida formato
+                    datetime.fromisoformat(paid_at.replace("Z","+00:00"))
+                except Exception:
+                    return jsonify({"error": "paid_at inválido (ISO8601)"}), 400
 
-            cur.execute("""
-                UPDATE payouts
-                   SET status = 'paid',
-                       paid_at = COALESCE(%s, NOW()),
-                       paid_by_user_id = %s,
-                       payment_method = %s,
-                       payment_ref = %s,
-                       updated_at = NOW()
-                 WHERE id = %s
-                RETURNING *
-            """, (paid_at, user_id, payment_method, payment_ref, str(payout_id)))
-            updated = cur.fetchone()
+            cur.execute(
+                """UPDATE payouts
+                      SET status='paid',
+                          payment_method=%s,
+                          payment_ref=%s,
+                          updated_at=NOW()
+                    WHERE id=%s
+                    RETURNING *""",
+                (method, ref or None, str(payout_id))
+            )
+            updated = dict(cur.fetchone())
             conn.commit()
 
-        return _ok(_row_to_dict(updated))
+        for k in ("period_start","period_end","created_at","updated_at"):
+            if updated.get(k) and hasattr(updated[k], "isoformat"):
+                updated[k] = updated[k].isoformat()
 
-    except Exception as e:
+        return jsonify({"status": "success", "payout": updated}), 200
+
+    except Exception:
         logger.exception("Erro ao marcar payout como pago")
-        if conn:
-            conn.rollback()
-        return _err("Erro interno ao marcar payout como pago", 500)
+        if conn: conn.rollback()
+        return jsonify({"error": "Erro interno ao marcar payout como pago"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 # -------------------------------------------------------------------
-# (Opcional) DELETE /<payout_id> -> cancelar payout
+# POST /api/admin/payouts/<uuid:payout_id>/cancel
 # -------------------------------------------------------------------
-@payouts_bp.route("/<uuid:payout_id>", methods=["DELETE"])
+@payouts_bp.route("/<uuid:payout_id>/cancel", methods=["POST", "OPTIONS"])
 def cancel_payout(payout_id):
-    """
-    DELETE /api/admin/payouts/<payout_id>
-    Marca payout como 'cancelled' (apenas se ainda não pago).
-    """
     conn = None
     try:
         user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
         if error:
             return error
         if not _is_admin(user_type):
-            return _err("Acesso negado. Somente administradores.", 403)
+            return jsonify({"error": "Acesso negado"}), 403
 
         conn = get_db_connection()
         if not conn:
-            return _err("Erro de conexão com banco de dados", 500)
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
 
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT id, status FROM payouts WHERE id = %s", (str(payout_id),))
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT status FROM payouts WHERE id = %s", (str(payout_id),))
             row = cur.fetchone()
             if not row:
-                return _err("Payout não encontrado", 404)
+                return jsonify({"error": "Payout não encontrado"}), 404
+            if row["status"] == "paid":
+                return jsonify({"error": "Não é possível cancelar um payout já pago"}), 400
+            if row["status"] == "cancelled":
+                return jsonify({"error": "Payout já está cancelado"}), 400
 
-            if (row["status"] or "").lower() == "paid":
-                return _err("Payout pago não pode ser cancelado", 409)
-
-            cur.execute("""
-                UPDATE payouts
-                   SET status='cancelled', updated_at=NOW()
-                 WHERE id = %s
-                RETURNING *
-            """, (str(payout_id),))
-            updated = cur.fetchone()
+            cur.execute(
+                """UPDATE payouts
+                      SET status='cancelled', updated_at=NOW()
+                    WHERE id=%s
+                    RETURNING *""",
+                (str(payout_id),)
+            )
+            updated = dict(cur.fetchone())
             conn.commit()
 
-        return _ok(_row_to_dict(updated))
+        for k in ("period_start","period_end","created_at","updated_at"):
+            if updated.get(k) and hasattr(updated[k], "isoformat"):
+                updated[k] = updated[k].isoformat()
 
-    except Exception as e:
+        return jsonify({"status": "success", "payout": updated}), 200
+
+    except Exception:
         logger.exception("Erro ao cancelar payout")
-        if conn:
-            conn.rollback()
-        return _err("Erro interno ao cancelar payout", 500)
+        if conn: conn.rollback()
+        return jsonify({"error": "Erro interno ao cancelar payout"}), 500
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
