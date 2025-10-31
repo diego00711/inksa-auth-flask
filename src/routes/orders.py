@@ -889,3 +889,50 @@ def archive_order(order_id):
     finally:
         if conn:
             conn.close()
+@orders_bp.route('/<uuid:order_id>', methods=['DELETE'])
+def delete_order(order_id):
+    """
+    Cliente pode excluir pedidos que já foram finalizados (delivered/cancelled).
+    A exclusão aqui será 'soft': arquiva o pedido (status = archived) OU remove, se preferir.
+    """
+    conn = None
+    try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'client':
+            return jsonify({'error': 'Apenas clientes podem excluir pedidos.'}), 403
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # garante que o pedido pertence ao cliente logado
+            cur.execute("""
+                SELECT o.status
+                FROM orders o
+                JOIN client_profiles cp ON o.client_id = cp.id
+                WHERE o.id = %s AND cp.user_id = %s
+            """, (str(order_id), user_id))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({'error': 'Pedido não encontrado.'}), 404
+
+            if row['status'] not in ('delivered', 'cancelled', 'archived'):
+                return jsonify({'error': 'Só é possível excluir pedidos entregues ou cancelados.'}), 400
+
+            # opção A: soft delete → arquiva
+            cur.execute("""
+                UPDATE orders SET status = 'archived', updated_at = NOW()
+                WHERE id = %s
+            """, (str(order_id),))
+            # opção B (remover do banco): descomente a linha abaixo e remova a UPDATE acima
+            # cur.execute("DELETE FROM orders WHERE id = %s", (str(order_id),))
+
+            conn.commit()
+            return ('', 204)
+
+    except Exception as e:
+        logger.error(f'Erro ao excluir pedido {order_id}: {e}', exc_info=True)
+        if conn: conn.rollback()
+        return jsonify({'error': 'Erro interno do servidor.'}), 500
+    finally:
+        if conn: conn.close()            
