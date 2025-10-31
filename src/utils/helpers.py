@@ -1,92 +1,123 @@
-# src/utils/helpers.py - VERSÃO CORRIGIDA E LIMPA
+# src/utils/helpers.py — VERSÃO ROBUSTA
 
 import os
+import json
+import uuid
 import logging
 import psycopg2
+import psycopg2.extras
 from psycopg2.extras import register_uuid
 from flask import request, jsonify
 from supabase import create_client, Client
-import json
 from datetime import date, datetime, timedelta, time
 from decimal import Decimal
-import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Inicialização do Supabase ---
+# --- Supabase ---
 supabase: Client = None
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        raise ValueError("As variáveis de ambiente SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórias.")
+        raise ValueError("SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórias.")
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    logger.info("✅ Cliente Supabase inicializado com sucesso.")
+    logger.info("✅ Supabase client inicializado.")
 except Exception as e:
-    logger.error(f"❌ Falha ao inicializar o cliente Supabase: {e}")
+    logger.error(f"❌ Falha ao inicializar Supabase: {e}")
     supabase = None
 
-# --- Funções de Banco de Dados ---
+
+# --- DB ---
 def get_db_connection():
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
+    url = os.environ.get("DATABASE_URL")
+    if not url:
         logger.error("❌ DATABASE_URL não encontrada.")
         return None
     try:
-        conn = psycopg2.connect(database_url)
-        register_uuid(conn)
+        conn = psycopg2.connect(url)
+        register_uuid(None, conn)  # garante suporte a UUID no cursor
         return conn
     except Exception as e:
-        logger.error(f"❌ Falha na conexão com o banco de dados: {e}", exc_info=True)
+        logger.error(f"❌ Conexão DB falhou: {e}", exc_info=True)
         return None
 
-# --- Função de Validação de Token ---
-def get_user_id_from_token(auth_header):
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return None, None, (jsonify({"error": "Cabeçalho de autorização inválido"}), 401)
 
-    token = auth_header.split(' ')[1]
+# --- Auth helper ---
+def _extract_bearer_token(auth_header: str):
+    """Extrai o token de um cabeçalho Authorization.
+    Aceita:
+      - 'Bearer <jwt>'
+      - '<jwt>' (sem 'Bearer', comum quando front erra)
+    """
+    if not auth_header:
+        return None
+    parts = auth_header.strip().split()
+    if len(parts) == 0:
+        return None
+    if parts[0].lower() == "bearer" and len(parts) >= 2:
+        return parts[1]
+    # se não veio 'Bearer', mas é um JWT, devolve assim mesmo
+    return parts[0]
+
+
+def get_user_id_from_token(auth_header):
+    token = _extract_bearer_token(auth_header)
+    if not token:
+        return None, None, (jsonify({"error": "Authorization ausente ou inválido"}), 401)
+
     conn = None
     try:
         if not supabase:
-            raise Exception("Cliente Supabase não inicializado.")
-        
-        user_response = supabase.auth.get_user(token)
-        user = user_response.user
+            raise RuntimeError("Supabase client não inicializado.")
+
+        # Valida o JWT no Supabase e extrai o user.id (UUID do auth)
+        user_resp = supabase.auth.get_user(token)
+        user = getattr(user_resp, "user", None)
         if not user:
             return None, None, (jsonify({"error": "Token inválido ou expirado"}), 401)
 
         user_id = str(user.id)
-        
+
         conn = get_db_connection()
         if not conn:
-            return None, None, (jsonify({"error": "Falha na conexão para verificar permissões"}), 500)
+            return None, None, (jsonify({"error": "Falha ao conectar para verificar permissões"}), 500)
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT user_type FROM users WHERE id = %s", (user_id,))
-            db_user = cur.fetchone()
+            # cobre cenários com coluna id OU uuid (alguns projetos mantêm as duas)
+            cur.execute("""
+                SELECT user_type
+                FROM public.users
+                WHERE id = %s OR uuid = %s
+                LIMIT 1
+            """, (user_id, user_id))
+            row = cur.fetchone()
 
-        if not db_user or not db_user['user_type']:
-            return None, None, (jsonify({"error": "Tipo de usuário não encontrado no banco de dados"}), 403)
+        if not row or not row.get("user_type"):
+            return None, None, (jsonify({"error": "Permissão não encontrada para este usuário"}), 403)
 
-        return user_id, db_user['user_type'], None
+        return user_id, row["user_type"], None
+
     except Exception as e:
-        logger.error(f"Erro ao processar token: {e}", exc_info=True)
-        if "JWT" in str(e) or "Token" in str(e):
-             return None, None, (jsonify({"error": f"Erro de autenticação: {e}"}), 401)
-        return None, None, (jsonify({"error": "Erro interno ao processar o token"}), 500)
+        msg = str(e)
+        logger.error(f"Erro ao processar token: {msg}", exc_info=True)
+        if "invalid" in msg.lower() or "jwt" in msg.lower() or "token" in msg.lower():
+            return None, None, (jsonify({"error": f"Erro de autenticação: {msg}"}), 401)
+        return None, None, (jsonify({"error": "Erro interno ao validar token"}), 500)
     finally:
         if conn:
             conn.close()
 
-# --- Funções de Serialização ---
+
+# --- JSON utils ---
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal): return float(obj)
         if isinstance(obj, (datetime, date, time)): return obj.isoformat()
         if isinstance(obj, uuid.UUID): return str(obj)
         return super().default(obj)
+
 
 def serialize_data(data):
     return json.loads(json.dumps(data, cls=CustomJSONEncoder))
