@@ -337,3 +337,189 @@ def get_dashboard():
     finally:
         if conn:
             conn.close()
+  # --- Dashboard resumido para o Admin ------------------------------
+from psycopg2.extras import DictCursor
+from datetime import datetime, timedelta
+from ..utils.helpers import get_db_connection, get_user_id_from_token
+from flask import request, jsonify
+
+def _is_admin(user_type: str) -> bool:
+    return user_type == "admin"
+
+@admin_bp.route("/dashboard", methods=["GET", "OPTIONS"])
+def admin_dashboard():
+    # CORS preflight
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+
+    user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    resp = {
+        "kpis": {
+            "totalRevenue": 0.0,
+            "ordersToday": 0,
+            "averageTicket": 0.0,
+            "newClientsToday": 0,
+            "ordersInProgress": 0,
+            "ordersCanceled": 0,
+            "restaurantsPending": 0,
+            "activeDeliverymen": 0
+        },
+        "chartData": [],        # [{formatted_date, daily_revenue}]
+        "recentOrders": [],     # [{id, client_name, restaurant_name, total_amount, status}]
+        "ordersStatus": {},     # {"delivered": n, "cancelled": n, ...}
+        "clientsGrowth": []     # [{formatted_date, total_clients}]
+    }
+
+    # Ajuste aqui os nomes de tabela/coluna se forem diferentes no seu schema:
+    ORDERS_TABLE = "orders"
+    CLIENTS_TABLE = "client_profiles"
+    RESTAURANTS_TABLE = "restaurants"
+    DELIVERY_TABLE = "delivery_profiles"
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com banco"}), 500
+
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+
+            # --- KPIs básicos
+            # Receita total (pedidos entregues)
+            cur.execute(f"""
+                SELECT COALESCE(SUM(total_amount),0) AS total
+                FROM {ORDERS_TABLE}
+                WHERE status IN ('delivered','completed')
+            """)
+            resp["kpis"]["totalRevenue"] = float(cur.fetchone()["total"])
+
+            # Pedidos hoje
+            cur.execute(f"""
+                SELECT COUNT(*)::int AS c
+                FROM {ORDERS_TABLE}
+                WHERE created_at::date = CURRENT_DATE
+            """)
+            resp["kpis"]["ordersToday"] = int(cur.fetchone()["c"])
+
+            # Ticket médio (em pedidos entregues)
+            cur.execute(f"""
+                SELECT COALESCE(AVG(total_amount),0) AS avg_ticket
+                FROM {ORDERS_TABLE}
+                WHERE status IN ('delivered','completed')
+            """)
+            resp["kpis"]["averageTicket"] = float(cur.fetchone()["avg_ticket"])
+
+            # Novos clientes hoje
+            cur.execute(f"""
+                SELECT COUNT(*)::int AS c
+                FROM {CLIENTS_TABLE}
+                WHERE created_at::date = CURRENT_DATE
+            """)
+            resp["kpis"]["newClientsToday"] = int(cur.fetchone()["c"])
+
+            # Em andamento / cancelados
+            cur.execute(f"""
+                SELECT
+                    SUM(CASE WHEN status IN ('preparing','on_the_way','in_progress') THEN 1 ELSE 0 END)::int AS in_progress,
+                    SUM(CASE WHEN status IN ('cancelled','canceled') THEN 1 ELSE 0 END)::int AS canceled
+                FROM {ORDERS_TABLE}
+            """)
+            row = cur.fetchone()
+            resp["kpis"]["ordersInProgress"] = int(row["in_progress"])
+            resp["kpis"]["ordersCanceled"] = int(row["canceled"])
+
+            # Restaurantes pendentes (ajuste o nome do campo de aprovação)
+            try:
+                cur.execute(f"""
+                    SELECT COUNT(*)::int AS c
+                    FROM {RESTAURANTS_TABLE}
+                    WHERE (approved IS FALSE) OR (status = 'pending')
+                """)
+                resp["kpis"]["restaurantsPending"] = int(cur.fetchone()["c"])
+            except Exception:
+                pass  # Campo pode não existir — mantém 0
+
+            # Entregadores ativos (ajuste o critério)
+            try:
+                cur.execute(f"""
+                    SELECT COUNT(*)::int AS c
+                    FROM {DELIVERY_TABLE}
+                    WHERE active IS TRUE
+                """)
+                resp["kpis"]["activeDeliverymen"] = int(cur.fetchone()["c"])
+            except Exception:
+                pass
+
+            # --- Série de receita (últimos 7 dias)
+            cur.execute(f"""
+                WITH days AS (
+                    SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
+                )
+                SELECT
+                    to_char(d, 'DD/MM') AS formatted_date,
+                    COALESCE((
+                        SELECT SUM(o.total_amount)
+                        FROM {ORDERS_TABLE} o
+                        WHERE o.status IN ('delivered','completed') AND o.created_at::date = d
+                    ), 0) AS daily_revenue
+                FROM days
+                ORDER BY d
+            """)
+            resp["chartData"] = [dict(r) for r in cur.fetchall()]
+
+            # --- Distribuição por status (todos os pedidos)
+            cur.execute(f"""
+                SELECT status, COUNT(*)::int AS c
+                FROM {ORDERS_TABLE}
+                GROUP BY status
+            """)
+            resp["ordersStatus"] = {r["status"] or "desconhecido": int(r["c"]) for r in cur.fetchall()}
+
+            # --- Pedidos recentes (top 10)
+            # Ajuste os nomes de colunas conforme seu schema
+            cur.execute(f"""
+                SELECT id, client_name, restaurant_name, total_amount, status
+                FROM {ORDERS_TABLE}
+                ORDER BY created_at DESC
+                LIMIT 10
+            """)
+            resp["recentOrders"] = [
+                {
+                    "id": str(r["id"]),
+                    "client_name": r.get("client_name") or "Cliente",
+                    "restaurant_name": r.get("restaurant_name") or "Restaurante",
+                    "total_amount": float(r.get("total_amount") or 0),
+                    "status": r.get("status") or "desconhecido"
+                }
+                for r in cur.fetchall()
+            ]
+
+            # --- Crescimento de clientes (últimos 7 dias)
+            cur.execute(f"""
+                WITH days AS (
+                    SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
+                )
+                SELECT
+                    to_char(d, 'DD/MM') AS formatted_date,
+                    COALESCE((
+                        SELECT COUNT(*)
+                        FROM {CLIENTS_TABLE} c
+                        WHERE c.created_at::date <= d
+                    ), 0)::int AS total_clients
+                FROM days
+                ORDER BY d
+            """)
+            resp["clientsGrowth"] = [dict(r) for r in cur.fetchall()]
+
+        conn.close()
+        return jsonify(resp), 200
+
+    except Exception as e:
+        # Não quebra a UI — retorna payload mínimo
+        logging.exception("Erro no /api/admin/dashboard")
+        return jsonify(resp), 200
+          
