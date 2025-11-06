@@ -40,6 +40,7 @@ try:
     from src.routes.gamification_routes import gamification_bp
     from src.routes.categories import categories_bp
     from src.routes.analytics import analytics_bp
+    from .routes.analytics_admin import analytics_admin_bp
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp
     from src.routes.client import client_bp
@@ -161,6 +162,7 @@ app.register_blueprint(upload_bp, url_prefix='/api/upload')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
+app.register_blueprint(analytics_admin_bp, url_prefix="/api/analytics")
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 
 # Pagamento
