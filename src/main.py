@@ -42,7 +42,7 @@ try:
     from src.routes.analytics import analytics_bp
     from .routes.analytics_admin import analytics_admin_bp
     from src.routes.admin_logs import admin_logs_bp
-    from src.routes.admin_users import admin_users_bp
+    from src.routes.admin_users import admin_users_bp, legacy_admin_users_bp
     from src.routes.client import client_bp
     from src.routes.avaliacao.restaurante_reviews import restaurante_reviews_bp
     from src.routes.avaliacao.entregador_reviews import entregador_reviews_bp
@@ -181,6 +181,7 @@ app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
 app.register_blueprint(admin_users_bp, url_prefix='/api/admin/users')
+app.register_blueprint(legacy_admin_users_bp, url_prefix='/api/users')
 
 # --- Rotas de Avaliação agrupadas sob /api/review ---
 app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')

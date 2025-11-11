@@ -11,18 +11,18 @@ from ..utils.audit import log_admin_action_auto
 
 # Create blueprint for admin users API endpoints
 admin_users_bp = Blueprint('admin_users_bp', __name__)
+legacy_admin_users_bp = Blueprint('legacy_admin_users_bp', __name__)
 
 # Aplica o CORS diretamente a este blueprint, incluindo ambientes locais e produção.
-CORS(
-    admin_users_bp,
-    origins=[
-        "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
-        "https://admin.inksadelivery.com.br",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    supports_credentials=True,
-)
+CORS_ORIGINS = [
+    "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
+    "https://admin.inksadelivery.com.br",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+CORS(admin_users_bp, origins=CORS_ORIGINS, supports_credentials=True)
+CORS(legacy_admin_users_bp, origins=CORS_ORIGINS, supports_credentials=True)
 
 DISPLAY_NAME_SQL = """
         TRIM(COALESCE(
@@ -63,8 +63,6 @@ def get_user_status(user_data):
 
 @admin_users_bp.route('', methods=['GET'])
 @admin_users_bp.route('/', methods=['GET'])
-@admin_users_bp.route('/api/users', methods=['GET'])
-@admin_users_bp.route('/api/users/', methods=['GET'])
 @admin_required
 def list_users():
     """
@@ -167,8 +165,6 @@ def list_users():
 
 @admin_users_bp.route('/<uuid:user_id>', methods=['GET'])
 @admin_users_bp.route('/<uuid:user_id>/', methods=['GET'])
-@admin_users_bp.route('/api/users/<uuid:user_id>', methods=['GET'])
-@admin_users_bp.route('/api/users/<uuid:user_id>/', methods=['GET'])
 @admin_required
 def get_user_detail(user_id):
     """
@@ -231,8 +227,6 @@ def get_user_detail(user_id):
 
 @admin_users_bp.route('/summary', methods=['GET'])
 @admin_users_bp.route('/summary/', methods=['GET'])
-@admin_users_bp.route('/api/users/summary', methods=['GET'])
-@admin_users_bp.route('/api/users/summary/', methods=['GET'])
 @admin_required
 def get_users_summary():
     """Aggregate metrics so the admin dashboard can display real data."""
@@ -362,8 +356,6 @@ def get_users_summary():
 
 @admin_users_bp.route('/signups-trend', methods=['GET'])
 @admin_users_bp.route('/signups-trend/', methods=['GET'])
-@admin_users_bp.route('/api/users/signups-trend', methods=['GET'])
-@admin_users_bp.route('/api/users/signups-trend/', methods=['GET'])
 @admin_required
 def get_users_signups_trend():
     """Return the number of users created per day split by role."""
@@ -438,8 +430,6 @@ def get_users_signups_trend():
 
 @admin_users_bp.route('/<uuid:user_id>', methods=['PATCH'])
 @admin_users_bp.route('/<uuid:user_id>/', methods=['PATCH'])
-@admin_users_bp.route('/api/users/<uuid:user_id>', methods=['PATCH'])
-@admin_users_bp.route('/api/users/<uuid:user_id>/', methods=['PATCH'])
 @admin_required
 def update_user(user_id):
     """
@@ -509,3 +499,27 @@ def update_user(user_id):
     finally:
         if conn:
             conn.close()
+
+
+@legacy_admin_users_bp.route('', methods=['GET'], strict_slashes=False)
+def legacy_list_users():
+    return list_users()
+
+
+@legacy_admin_users_bp.route('/summary', methods=['GET'], strict_slashes=False)
+def legacy_get_users_summary():
+    return get_users_summary()
+
+
+@legacy_admin_users_bp.route('/signups-trend', methods=['GET'], strict_slashes=False)
+def legacy_get_users_signups_trend():
+    return get_users_signups_trend()
+
+
+@legacy_admin_users_bp.route('/<uuid:user_id>', methods=['GET', 'PATCH'], strict_slashes=False)
+def legacy_user_detail_or_update(user_id):
+    if request.method == 'PATCH':
+        return update_user(user_id)
+    return get_user_detail(user_id)
+
+
