@@ -334,7 +334,7 @@ def get_all_users():
                     COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city
                 FROM users u
                 LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
-                LEFT JOIN restaurant_profiles rp ON u.id = rp.id AND u.user_type = 'restaurant'
+                LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant'
                 LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
             """
             where = []
@@ -374,7 +374,7 @@ def get_all_restaurants():
                 """
                 SELECT rp.*, u.created_at
                 FROM restaurant_profiles rp
-                JOIN users u ON rp.id = u.id
+                JOIN users u ON rp.user_id = u.id
                 ORDER BY u.created_at DESC;
                 """
             )
