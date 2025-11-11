@@ -11,9 +11,30 @@ from ..utils.audit import log_admin_action_auto
 
 # Create blueprint for admin users API endpoints
 admin_users_bp = Blueprint('admin_users_bp', __name__)
+legacy_admin_users_bp = Blueprint('legacy_admin_users_bp', __name__)
 
-# Aplica o CORS diretamente a este blueprint, permitindo a URL específica da Vercel.
-CORS(admin_users_bp, origins=["https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app"], supports_credentials=True )
+# Aplica o CORS diretamente a este blueprint, incluindo ambientes locais e produção.
+CORS_ORIGINS = [
+    "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
+    "https://admin.inksadelivery.com.br",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+CORS(admin_users_bp, origins=CORS_ORIGINS, supports_credentials=True)
+CORS(legacy_admin_users_bp, origins=CORS_ORIGINS, supports_credentials=True)
+
+DISPLAY_NAME_SQL = """
+        TRIM(COALESCE(
+            CASE
+                WHEN u.user_type = 'client' THEN cp.first_name || ' ' || cp.last_name
+                WHEN u.user_type = 'restaurant' THEN rp.restaurant_name
+                WHEN u.user_type = 'delivery' THEN dp.first_name || ' ' || dp.last_name
+                ELSE u.email
+            END,
+            ''
+        ))
+    """
 
 DISPLAY_NAME_SQL = """
         TRIM(COALESCE(
@@ -52,7 +73,8 @@ def get_user_status(user_data):
     else:
         return 'inactive'
 
-@admin_users_bp.route('/api/users', methods=['GET'])
+@admin_users_bp.route('', methods=['GET'])
+@admin_users_bp.route('/', methods=['GET'])
 @admin_required
 def list_users():
     """
@@ -153,7 +175,8 @@ def list_users():
         if conn:
             conn.close()
 
-@admin_users_bp.route('/api/users/<uuid:user_id>', methods=['GET'])
+@admin_users_bp.route('/<uuid:user_id>', methods=['GET'])
+@admin_users_bp.route('/<uuid:user_id>/', methods=['GET'])
 @admin_required
 def get_user_detail(user_id):
     """
@@ -214,7 +237,11 @@ def get_user_detail(user_id):
             conn.close()
 
 
+ codex/review-repo-and-create-real-finger-endpoints-jb87t3
+@admin_users_bp.route('/summary', methods=['GET'])
+@admin_users_bp.route('/summary/', methods=['GET'])
 @admin_users_bp.route('/api/users/summary', methods=['GET'])
+ main
 @admin_required
 def get_users_summary():
     """Aggregate metrics so the admin dashboard can display real data."""
@@ -342,7 +369,11 @@ def get_users_summary():
             conn.close()
 
 
+ codex/review-repo-and-create-real-finger-endpoints-jb87t3
+@admin_users_bp.route('/signups-trend', methods=['GET'])
+@admin_users_bp.route('/signups-trend/', methods=['GET'])
 @admin_users_bp.route('/api/users/signups-trend', methods=['GET'])
+main
 @admin_required
 def get_users_signups_trend():
     """Return the number of users created per day split by role."""
@@ -415,8 +446,13 @@ def get_users_signups_trend():
         if conn:
             conn.close()
 
+codex/review-repo-and-create-real-finger-endpoints-jb87t3
+@admin_users_bp.route('/<uuid:user_id>', methods=['PATCH'])
+@admin_users_bp.route('/<uuid:user_id>/', methods=['PATCH'])
+@admin_requ
 @admin_users_bp.route('/api/users/<uuid:user_id>', methods=['PATCH'])
-@admin_required  
+@admin_required
+main
 def update_user(user_id):
     """
     Partial update for user status/role.
@@ -485,3 +521,27 @@ def update_user(user_id):
     finally:
         if conn:
             conn.close()
+
+
+@legacy_admin_users_bp.route('', methods=['GET'], strict_slashes=False)
+def legacy_list_users():
+    return list_users()
+
+
+@legacy_admin_users_bp.route('/summary', methods=['GET'], strict_slashes=False)
+def legacy_get_users_summary():
+    return get_users_summary()
+
+
+@legacy_admin_users_bp.route('/signups-trend', methods=['GET'], strict_slashes=False)
+def legacy_get_users_signups_trend():
+    return get_users_signups_trend()
+
+
+@legacy_admin_users_bp.route('/<uuid:user_id>', methods=['GET', 'PATCH'], strict_slashes=False)
+def legacy_user_detail_or_update(user_id):
+    if request.method == 'PATCH':
+        return update_user(user_id)
+    return get_user_detail(user_id)
+
+
