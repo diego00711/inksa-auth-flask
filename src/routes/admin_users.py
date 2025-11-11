@@ -2,12 +2,12 @@ import traceback
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify, request
 from flask_cors import CORS
 import psycopg2.extras
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token
 from ..utils.audit import log_admin_action_auto
+from ..utils.helpers import get_db_connection, get_user_id_from_token
 
 
 ALLOWED_ORIGINS = [
@@ -20,13 +20,11 @@ ALLOWED_ORIGINS = [
 ]
 
 
-def _create_admin_users_blueprint(name: str) -> Blueprint:
-    """Cria um blueprint configurado com CORS e rotas compartilhadas."""
+admin_users_bp = Blueprint("admin_users_bp", __name__)
+legacy_admin_users_bp = Blueprint("legacy_admin_users_bp", __name__)
 
-    blueprint = Blueprint(name, __name__)
-    CORS(blueprint, origins=ALLOWED_ORIGINS, supports_credentials=True)
-    _register_user_routes(blueprint)
-    return blueprint
+for _bp in (admin_users_bp, legacy_admin_users_bp):
+    CORS(_bp, origins=ALLOWED_ORIGINS, supports_credentials=True)
 
 
 DISPLAY_NAME_SQL = """
@@ -78,6 +76,7 @@ def get_user_status(user_data):
     return "active" if full_name and full_name.strip() else "inactive"
 
 
+@admin_users_bp.route("/", methods=["GET"], strict_slashes=False)
 @admin_required
 def list_users():
     page = max(1, int(request.args.get("page", 1)))
@@ -188,6 +187,7 @@ def list_users():
             conn.close()
 
 
+@admin_users_bp.route("/<uuid:user_id>", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_user_detail(user_id):
     conn = get_db_connection()
@@ -260,6 +260,7 @@ def get_user_detail(user_id):
             conn.close()
 
 
+@admin_users_bp.route("/summary", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_users_summary():
     conn = get_db_connection()
@@ -382,6 +383,7 @@ def get_users_summary():
             conn.close()
 
 
+@admin_users_bp.route("/signups-trend", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_users_signups_trend():
     try:
@@ -459,6 +461,7 @@ def get_users_signups_trend():
             conn.close()
 
 
+@admin_users_bp.route("/<uuid:user_id>", methods=["PATCH"], strict_slashes=False)
 @admin_required
 def update_user(user_id):
     data = request.get_json()
@@ -556,45 +559,46 @@ def update_user(user_id):
             conn.close()
 
 
-def _register_user_routes(blueprint: Blueprint) -> None:
-    """Registra todas as rotas compartilhadas para o blueprint informado."""
-
-    blueprint.add_url_rule(
-        "/", endpoint="list_users", view_func=list_users, methods=["GET"], strict_slashes=False
+def _register_legacy_routes():
+    legacy_admin_users_bp.add_url_rule(
+        "/",
+        endpoint="legacy_list_users",
+        view_func=list_users,
+        methods=["GET"],
+        strict_slashes=False,
     )
-
-    blueprint.add_url_rule(
+    legacy_admin_users_bp.add_url_rule(
         "/summary",
-        endpoint="users_summary",
+        endpoint="legacy_users_summary",
         view_func=get_users_summary,
         methods=["GET"],
         strict_slashes=False,
     )
-    blueprint.add_url_rule(
+    legacy_admin_users_bp.add_url_rule(
         "/signups-trend",
-        endpoint="users_signups_trend",
+        endpoint="legacy_users_signups_trend",
         view_func=get_users_signups_trend,
         methods=["GET"],
         strict_slashes=False,
     )
-
-    blueprint.add_url_rule(
+    legacy_admin_users_bp.add_url_rule(
         "/<uuid:user_id>",
-        endpoint="get_user_detail",
+        endpoint="legacy_get_user_detail",
         view_func=get_user_detail,
         methods=["GET"],
         strict_slashes=False,
     )
-    blueprint.add_url_rule(
+    legacy_admin_users_bp.add_url_rule(
         "/<uuid:user_id>",
-        endpoint="update_user",
+        endpoint="legacy_update_user",
         view_func=update_user,
         methods=["PATCH"],
         strict_slashes=False,
     )
 
 
-admin_users_bp = _create_admin_users_blueprint("admin_users_bp")
-legacy_admin_users_bp = _create_admin_users_blueprint("legacy_admin_users_bp")
+_register_legacy_routes()
+
 
 __all__ = ("admin_users_bp", "legacy_admin_users_bp")
+
