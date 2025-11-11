@@ -1,4 +1,3 @@
-import textwrap
 import traceback
 from datetime import datetime, timedelta
 from functools import wraps
@@ -10,10 +9,8 @@ import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 from ..utils.audit import log_admin_action_auto
 
-admin_users_bp = Blueprint("admin_users_bp", __name__)
-legacy_admin_users_bp = Blueprint("legacy_admin_users_bp", __name__)
 
-_ALLOWED_ADMIN_ORIGINS = [
+ALLOWED_ORIGINS = [
     "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
     "https://admin.inksadelivery.com.br",
     "http://localhost:3000",
@@ -22,60 +19,35 @@ _ALLOWED_ADMIN_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
-
-def _compact_sql(sql: str) -> str:
-    """Normalize multi-line SQL snippets into single-line strings."""
-
-    return " ".join(
-        line.strip()
-        for line in textwrap.dedent(sql).splitlines()
-        if line.strip()
-    )
-
+# Blueprint principal e alias legado para manter compatibilidade com antigos clientes
+admin_users_bp = Blueprint("admin_users_bp", __name__)
+legacy_admin_users_bp = Blueprint("legacy_admin_users_bp", __name__)
 
 for bp in (admin_users_bp, legacy_admin_users_bp):
-    CORS(bp, origins=_ALLOWED_ADMIN_ORIGINS, supports_credentials=True)
+    CORS(bp, origins=ALLOWED_ORIGINS, supports_credentials=True)
 
 
-DISPLAY_NAME_SQL = _compact_sql(
-    """
-    TRIM(COALESCE(
+DISPLAY_NAME_SQL = """
+    COALESCE(
         CASE
-            WHEN u.user_type = 'client' THEN cp.first_name || ' ' || cp.last_name
+            WHEN u.user_type = 'client' THEN COALESCE(cp.first_name, '') || ' ' || COALESCE(cp.last_name, '')
             WHEN u.user_type = 'restaurant' THEN rp.restaurant_name
-            WHEN u.user_type = 'delivery' THEN dp.first_name || ' ' || dp.last_name
+            WHEN u.user_type = 'delivery' THEN COALESCE(dp.first_name, '') || ' ' || COALESCE(dp.last_name, '')
             ELSE u.email
-        END, ''
-    ))
-    """
-)
+        END,
+        ''
+    )
+"""
 
-PROFILE_JOINS_SQL = _compact_sql(
-    """
+PROFILE_JOINS_SQL = """
     LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
     LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant'
     LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
-    """
-)
-
-BASE_SELECT_SQL = _compact_sql(
-    f"""
-    SELECT
-        u.id,
-        u.email,
-        u.user_type,
-        u.created_at,
-        {DISPLAY_NAME_SQL} AS full_name,
-        COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
-        COALESCE(cp.phone, rp.phone, dp.phone) AS phone
-    FROM users u
-    {PROFILE_JOINS_SQL}
-    """
-)
+"""
 
 
-def admin_required(fn):
-    @wraps(fn)
+def admin_required(func):
+    @wraps(func)
     def wrapper(*args, **kwargs):
         auth_header = request.headers.get("Authorization")
         user_id, user_type, error_response = get_user_id_from_token(auth_header)
@@ -94,7 +66,7 @@ def admin_required(fn):
                 403,
             )
 
-        return fn(*args, **kwargs)
+        return func(*args, **kwargs)
 
     return wrapper
 
@@ -133,7 +105,18 @@ def list_users():
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            base_query = BASE_SELECT_SQL
+            base_query = f"""
+                SELECT
+                    u.id,
+                    u.email,
+                    u.user_type,
+                    u.created_at,
+                    {DISPLAY_NAME_SQL} AS full_name,
+                    COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
+                    COALESCE(cp.phone, rp.phone, dp.phone) AS phone
+                FROM users u
+                {PROFILE_JOINS_SQL}
+            """
 
             where_clauses = []
             params = []
@@ -146,8 +129,8 @@ def list_users():
                 where_clauses.append(
                     f"(u.email ILIKE %s OR {DISPLAY_NAME_SQL} ILIKE %s)"
                 )
-                query_param = f"%{query}%"
-                params.extend([query_param, query_param])
+                like_value = f"%{query}%"
+                params.extend([like_value, like_value])
 
             where_sql = ""
             if where_clauses:
@@ -211,25 +194,42 @@ def get_user_detail(user_id):
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
-    detail_sql = (
-        "SELECT "
-        "u.id, u.email, u.user_type, u.created_at, "
-        f"{DISPLAY_NAME_SQL} AS full_name, "
-        "COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city, "
-        "COALESCE(cp.phone, rp.phone, dp.phone) AS phone, "
-        "cp.first_name, cp.last_name, cp.cpf, "
-        "cp.address_street, cp.address_number, cp.address_neighborhood, "
-        "cp.address_city AS client_city, cp.address_state, cp.address_zipcode, "
-        "rp.restaurant_name, rp.business_name, rp.cnpj, "
-        "rp.address_street AS rest_address_street, rp.address_number AS rest_address_number, "
-        "rp.address_neighborhood AS rest_address_neighborhood, rp.address_city AS rest_address_city, "
-        "rp.address_state AS rest_address_state, rp.address_zipcode AS rest_address_zipcode, "
-        "dp.first_name AS delivery_first_name, dp.last_name AS delivery_last_name, "
-        "dp.cpf AS delivery_cpf, dp.birth_date, dp.vehicle_type "
-        "FROM users u "
-        f"{PROFILE_JOINS_SQL} "
-        "WHERE u.id = %s"
-    )
+    detail_sql = f"""
+        SELECT
+            u.id,
+            u.email,
+            u.user_type,
+            u.created_at,
+            {DISPLAY_NAME_SQL} AS full_name,
+            COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
+            COALESCE(cp.phone, rp.phone, dp.phone) AS phone,
+            cp.first_name,
+            cp.last_name,
+            cp.cpf,
+            cp.address_street,
+            cp.address_number,
+            cp.address_neighborhood,
+            cp.address_city AS client_city,
+            cp.address_state,
+            cp.address_zipcode,
+            rp.restaurant_name,
+            rp.business_name,
+            rp.cnpj,
+            rp.address_street AS rest_address_street,
+            rp.address_number AS rest_address_number,
+            rp.address_neighborhood AS rest_address_neighborhood,
+            rp.address_city AS rest_address_city,
+            rp.address_state AS rest_address_state,
+            rp.address_zipcode AS rest_address_zipcode,
+            dp.first_name AS delivery_first_name,
+            dp.last_name AS delivery_last_name,
+            dp.cpf AS delivery_cpf,
+            dp.birth_date,
+            dp.vehicle_type
+        FROM users u
+        {PROFILE_JOINS_SQL}
+        WHERE u.id = %s
+    """
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -267,29 +267,29 @@ def get_users_summary():
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
-    summary_sql = (
-        "SELECT "
-        "u.user_type, "
-        "COUNT(*) AS total, "
-        "COUNT(*) FILTER ("
-        "    WHERE CASE "
-        "        WHEN u.user_type = 'admin' THEN TRUE "
-        f"        ELSE {DISPLAY_NAME_SQL} <> '' "
-        "    END"
-        ") AS active, "
-        "COUNT(*) FILTER ("
-        "    WHERE CASE "
-        "        WHEN u.user_type = 'admin' THEN FALSE "
-        f"        ELSE {DISPLAY_NAME_SQL} = '' "
-        "    END"
-        ") AS inactive, "
-        "COUNT(*) FILTER (WHERE u.created_at >= NOW() - INTERVAL '7 days') AS last_7_days, "
-        "COUNT(*) FILTER (WHERE u.created_at >= NOW() - INTERVAL '30 days') AS last_30_days "
-        "FROM users u "
-        f"{PROFILE_JOINS_SQL} "
-        "GROUP BY u.user_type "
-        "ORDER BY u.user_type"
-    )
+    summary_sql = f"""
+        SELECT
+            u.user_type,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (
+                WHERE CASE
+                    WHEN u.user_type = 'admin' THEN TRUE
+                    ELSE {DISPLAY_NAME_SQL} <> ''
+                END
+            ) AS active,
+            COUNT(*) FILTER (
+                WHERE CASE
+                    WHEN u.user_type = 'admin' THEN FALSE
+                    ELSE {DISPLAY_NAME_SQL} = ''
+                END
+            ) AS inactive,
+            COUNT(*) FILTER (WHERE u.created_at >= NOW() - INTERVAL '7 days') AS last_7_days,
+            COUNT(*) FILTER (WHERE u.created_at >= NOW() - INTERVAL '30 days') AS last_30_days
+        FROM users u
+        {PROFILE_JOINS_SQL}
+        GROUP BY u.user_type
+        ORDER BY u.user_type
+    """
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -330,15 +330,18 @@ def get_users_summary():
                 recent_limit = 10
             recent_limit = max(1, min(recent_limit, 50))
 
-            recent_sql = (
-                "SELECT "
-                "u.id, u.email, u.user_type, u.created_at, "
-                f"{DISPLAY_NAME_SQL} AS display_name "
-                "FROM users u "
-                f"{PROFILE_JOINS_SQL} "
-                "ORDER BY u.created_at DESC "
-                "LIMIT %s"
-            )
+            recent_sql = f"""
+                SELECT
+                    u.id,
+                    u.email,
+                    u.user_type,
+                    u.created_at,
+                    {DISPLAY_NAME_SQL} AS display_name
+                FROM users u
+                {PROFILE_JOINS_SQL}
+                ORDER BY u.created_at DESC
+                LIMIT %s
+            """
 
             cur.execute(recent_sql, (recent_limit,))
             recent_rows = cur.fetchall()
@@ -396,16 +399,16 @@ def get_users_signups_trend():
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
-    trend_sql = (
-        "SELECT "
-        "created_at::date AS day, "
-        "user_type, "
-        "COUNT(*) AS total "
-        "FROM users "
-        "WHERE created_at >= %s "
-        "GROUP BY 1, 2 "
-        "ORDER BY day ASC"
-    )
+    trend_sql = """
+        SELECT
+            created_at::date AS day,
+            user_type,
+            COUNT(*) AS total
+        FROM users
+        WHERE created_at >= %s
+        GROUP BY 1, 2
+        ORDER BY day ASC
+    """
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
