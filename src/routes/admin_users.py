@@ -19,12 +19,14 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
-# Blueprints principal e legado para manter compatibilidade com URLs antigas
-admin_users_bp = Blueprint("admin_users_bp", __name__)
-legacy_admin_users_bp = Blueprint("legacy_admin_users_bp", __name__)
 
-for bp in (admin_users_bp, legacy_admin_users_bp):
-    CORS(bp, origins=ALLOWED_ORIGINS, supports_credentials=True)
+def _create_admin_users_blueprint(name: str) -> Blueprint:
+    """Cria um blueprint configurado com CORS e rotas compartilhadas."""
+
+    blueprint = Blueprint(name, __name__)
+    CORS(blueprint, origins=ALLOWED_ORIGINS, supports_credentials=True)
+    _register_user_routes(blueprint)
+    return blueprint
 
 
 DISPLAY_NAME_SQL = """
@@ -592,5 +594,7 @@ def _register_user_routes(blueprint: Blueprint) -> None:
     )
 
 
-_register_user_routes(admin_users_bp)
-_register_user_routes(legacy_admin_users_bp)
+admin_users_bp = _create_admin_users_blueprint("admin_users_bp")
+legacy_admin_users_bp = _create_admin_users_blueprint("legacy_admin_users_bp")
+
+__all__ = ("admin_users_bp", "legacy_admin_users_bp")
