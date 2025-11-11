@@ -180,8 +180,8 @@ app.register_blueprint(delivery_bp)
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
-app.register_blueprint(admin_users_bp, url_prefix='/api/admin')
-app.register_blueprint(legacy_admin_users_bp, url_prefix='/api')
+app.register_blueprint(admin_users_bp, url_prefix='/api/admin/users')
+app.register_blueprint(legacy_admin_users_bp, url_prefix='/api/users')
 
 # --- Rotas de Avaliação agrupadas sob /api/review ---
 app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')

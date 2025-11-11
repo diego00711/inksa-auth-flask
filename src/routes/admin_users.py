@@ -76,7 +76,6 @@ def get_user_status(user_data):
     return "active" if full_name and full_name.strip() else "inactive"
 
 
-@admin_users_bp.route("/users", methods=["GET"], strict_slashes=False)
 @admin_required
 def list_users():
     page = max(1, int(request.args.get("page", 1)))
@@ -187,7 +186,6 @@ def list_users():
             conn.close()
 
 
-@admin_users_bp.route("/users/<uuid:user_id>", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_user_detail(user_id):
     conn = get_db_connection()
@@ -260,7 +258,6 @@ def get_user_detail(user_id):
             conn.close()
 
 
-@admin_users_bp.route("/users/summary", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_users_summary():
     conn = get_db_connection()
@@ -383,7 +380,6 @@ def get_users_summary():
             conn.close()
 
 
-@admin_users_bp.route("/users/signups-trend", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_users_signups_trend():
     try:
@@ -461,7 +457,6 @@ def get_users_signups_trend():
             conn.close()
 
 
-@admin_users_bp.route("/users/<uuid:user_id>", methods=["PATCH"], strict_slashes=False)
 @admin_required
 def update_user(user_id):
     data = request.get_json()
@@ -559,23 +554,43 @@ def update_user(user_id):
             conn.close()
 
 
-@legacy_admin_users_bp.route("/users", methods=["GET"], strict_slashes=False)
-def legacy_list_users():
-    return list_users()
+def _register_user_routes(blueprint: Blueprint) -> None:
+    """Registra todas as rotas compartilhadas para o blueprint informado."""
+
+    blueprint.add_url_rule(
+        "/", endpoint="list_users", view_func=list_users, methods=["GET"], strict_slashes=False
+    )
+
+    blueprint.add_url_rule(
+        "/summary",
+        endpoint="users_summary",
+        view_func=get_users_summary,
+        methods=["GET"],
+        strict_slashes=False,
+    )
+    blueprint.add_url_rule(
+        "/signups-trend",
+        endpoint="users_signups_trend",
+        view_func=get_users_signups_trend,
+        methods=["GET"],
+        strict_slashes=False,
+    )
+
+    blueprint.add_url_rule(
+        "/<uuid:user_id>",
+        endpoint="get_user_detail",
+        view_func=get_user_detail,
+        methods=["GET"],
+        strict_slashes=False,
+    )
+    blueprint.add_url_rule(
+        "/<uuid:user_id>",
+        endpoint="update_user",
+        view_func=update_user,
+        methods=["PATCH"],
+        strict_slashes=False,
+    )
 
 
-@legacy_admin_users_bp.route("/users/summary", methods=["GET"], strict_slashes=False)
-def legacy_get_users_summary():
-    return get_users_summary()
-
-
-@legacy_admin_users_bp.route("/users/signups-trend", methods=["GET"], strict_slashes=False)
-def legacy_get_users_signups_trend():
-    return get_users_signups_trend()
-
-
-@legacy_admin_users_bp.route("/users/<uuid:user_id>", methods=["GET", "PATCH"], strict_slashes=False)
-def legacy_user_detail_or_update(user_id):
-    if request.method == "PATCH":
-        return update_user(user_id)
-    return get_user_detail(user_id)
+_register_user_routes(admin_users_bp)
+_register_user_routes(legacy_admin_users_bp)
