@@ -36,6 +36,18 @@ DISPLAY_NAME_SQL = """
         ))
     """
 
+DISPLAY_NAME_SQL = """
+        TRIM(COALESCE(
+            CASE
+                WHEN u.user_type = 'client' THEN cp.first_name || ' ' || cp.last_name
+                WHEN u.user_type = 'restaurant' THEN rp.restaurant_name
+                WHEN u.user_type = 'delivery' THEN dp.first_name || ' ' || dp.last_name
+                ELSE u.email
+            END,
+            ''
+        ))
+    """
+
 # Decorador para verificar se o usuário é um administrador
 def admin_required(f):
     @wraps(f)
@@ -225,8 +237,11 @@ def get_user_detail(user_id):
             conn.close()
 
 
+ codex/review-repo-and-create-real-finger-endpoints-jb87t3
 @admin_users_bp.route('/summary', methods=['GET'])
 @admin_users_bp.route('/summary/', methods=['GET'])
+@admin_users_bp.route('/api/users/summary', methods=['GET'])
+ main
 @admin_required
 def get_users_summary():
     """Aggregate metrics so the admin dashboard can display real data."""
@@ -354,8 +369,11 @@ def get_users_summary():
             conn.close()
 
 
+ codex/review-repo-and-create-real-finger-endpoints-jb87t3
 @admin_users_bp.route('/signups-trend', methods=['GET'])
 @admin_users_bp.route('/signups-trend/', methods=['GET'])
+@admin_users_bp.route('/api/users/signups-trend', methods=['GET'])
+main
 @admin_required
 def get_users_signups_trend():
     """Return the number of users created per day split by role."""
@@ -428,9 +446,13 @@ def get_users_signups_trend():
         if conn:
             conn.close()
 
+codex/review-repo-and-create-real-finger-endpoints-jb87t3
 @admin_users_bp.route('/<uuid:user_id>', methods=['PATCH'])
 @admin_users_bp.route('/<uuid:user_id>/', methods=['PATCH'])
+@admin_requ
+@admin_users_bp.route('/api/users/<uuid:user_id>', methods=['PATCH'])
 @admin_required
+main
 def update_user(user_id):
     """
     Partial update for user status/role.
