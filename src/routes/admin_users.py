@@ -1,4 +1,4 @@
-import os
+import textwrap
 import traceback
 from datetime import datetime, timedelta
 from functools import wraps
@@ -22,36 +22,55 @@ _ALLOWED_ADMIN_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
+
+def _compact_sql(sql: str) -> str:
+    """Normalize multi-line SQL snippets into single-line strings."""
+
+    return " ".join(
+        line.strip()
+        for line in textwrap.dedent(sql).splitlines()
+        if line.strip()
+    )
+
+
 for bp in (admin_users_bp, legacy_admin_users_bp):
     CORS(bp, origins=_ALLOWED_ADMIN_ORIGINS, supports_credentials=True)
 
-DISPLAY_NAME_SQL = (
-    "TRIM(COALESCE("
-    "CASE "
-    "WHEN u.user_type = 'client' THEN cp.first_name || ' ' || cp.last_name "
-    "WHEN u.user_type = 'restaurant' THEN rp.restaurant_name "
-    "WHEN u.user_type = 'delivery' THEN dp.first_name || ' ' || dp.last_name "
-    "ELSE u.email "
-    "END, '' ))"
+
+DISPLAY_NAME_SQL = _compact_sql(
+    """
+    TRIM(COALESCE(
+        CASE
+            WHEN u.user_type = 'client' THEN cp.first_name || ' ' || cp.last_name
+            WHEN u.user_type = 'restaurant' THEN rp.restaurant_name
+            WHEN u.user_type = 'delivery' THEN dp.first_name || ' ' || dp.last_name
+            ELSE u.email
+        END, ''
+    ))
+    """
 )
 
-PROFILE_JOINS_SQL = (
-    "LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client' "
-    "LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant' "
-    "LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'"
+PROFILE_JOINS_SQL = _compact_sql(
+    """
+    LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
+    LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant'
+    LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
+    """
 )
 
-BASE_SELECT_SQL = (
-    "SELECT "
-    "u.id, "
-    "u.email, "
-    "u.user_type, "
-    "u.created_at, "
-    f"{DISPLAY_NAME_SQL} AS full_name, "
-    "COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city, "
-    "COALESCE(cp.phone, rp.phone, dp.phone) AS phone "
-    "FROM users u "
-    f"{PROFILE_JOINS_SQL}"
+BASE_SELECT_SQL = _compact_sql(
+    f"""
+    SELECT
+        u.id,
+        u.email,
+        u.user_type,
+        u.created_at,
+        {DISPLAY_NAME_SQL} AS full_name,
+        COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
+        COALESCE(cp.phone, rp.phone, dp.phone) AS phone
+    FROM users u
+    {PROFILE_JOINS_SQL}
+    """
 )
 
 
