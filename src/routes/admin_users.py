@@ -19,7 +19,7 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
-# Blueprint principal e alias legado para manter compatibilidade com antigos clientes
+# Blueprints principal e legado para manter compatibilidade com URLs antigas
 admin_users_bp = Blueprint("admin_users_bp", __name__)
 legacy_admin_users_bp = Blueprint("legacy_admin_users_bp", __name__)
 
@@ -76,7 +76,7 @@ def get_user_status(user_data):
     return "active" if full_name and full_name.strip() else "inactive"
 
 
-@admin_users_bp.route("", methods=["GET"], strict_slashes=False)
+@admin_users_bp.route("/users", methods=["GET"], strict_slashes=False)
 @admin_required
 def list_users():
     page = max(1, int(request.args.get("page", 1)))
@@ -187,7 +187,7 @@ def list_users():
             conn.close()
 
 
-@admin_users_bp.route("/<uuid:user_id>", methods=["GET"], strict_slashes=False)
+@admin_users_bp.route("/users/<uuid:user_id>", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_user_detail(user_id):
     conn = get_db_connection()
@@ -260,7 +260,7 @@ def get_user_detail(user_id):
             conn.close()
 
 
-@admin_users_bp.route("/summary", methods=["GET"], strict_slashes=False)
+@admin_users_bp.route("/users/summary", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_users_summary():
     conn = get_db_connection()
@@ -383,7 +383,7 @@ def get_users_summary():
             conn.close()
 
 
-@admin_users_bp.route("/signups-trend", methods=["GET"], strict_slashes=False)
+@admin_users_bp.route("/users/signups-trend", methods=["GET"], strict_slashes=False)
 @admin_required
 def get_users_signups_trend():
     try:
@@ -461,7 +461,7 @@ def get_users_signups_trend():
             conn.close()
 
 
-@admin_users_bp.route("/<uuid:user_id>", methods=["PATCH"], strict_slashes=False)
+@admin_users_bp.route("/users/<uuid:user_id>", methods=["PATCH"], strict_slashes=False)
 @admin_required
 def update_user(user_id):
     data = request.get_json()
@@ -559,22 +559,22 @@ def update_user(user_id):
             conn.close()
 
 
-@legacy_admin_users_bp.route("", methods=["GET"], strict_slashes=False)
+@legacy_admin_users_bp.route("/users", methods=["GET"], strict_slashes=False)
 def legacy_list_users():
     return list_users()
 
 
-@legacy_admin_users_bp.route("/summary", methods=["GET"], strict_slashes=False)
+@legacy_admin_users_bp.route("/users/summary", methods=["GET"], strict_slashes=False)
 def legacy_get_users_summary():
     return get_users_summary()
 
 
-@legacy_admin_users_bp.route("/signups-trend", methods=["GET"], strict_slashes=False)
+@legacy_admin_users_bp.route("/users/signups-trend", methods=["GET"], strict_slashes=False)
 def legacy_get_users_signups_trend():
     return get_users_signups_trend()
 
 
-@legacy_admin_users_bp.route("/<uuid:user_id>", methods=["GET", "PATCH"], strict_slashes=False)
+@legacy_admin_users_bp.route("/users/<uuid:user_id>", methods=["GET", "PATCH"], strict_slashes=False)
 def legacy_user_detail_or_update(user_id):
     if request.method == "PATCH":
         return update_user(user_id)
