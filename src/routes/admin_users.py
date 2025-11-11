@@ -1,5 +1,3 @@
-import os
-import textwrap
 import traceback
 from datetime import datetime, timedelta
 from functools import wraps
@@ -11,11 +9,10 @@ import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 from ..utils.audit import log_admin_action_auto
 
-# Create blueprint for admin users API endpoints
+# Create blueprints for admin users API endpoints
 admin_users_bp = Blueprint('admin_users_bp', __name__)
 legacy_admin_users_bp = Blueprint('legacy_admin_users_bp', __name__)
 
-# Aplica o CORS diretamente a este blueprint, incluindo ambientes locais e produção.
 CORS_ORIGINS = [
     "https://inksa-admin-v0-q4yqjmgnt-inksas-projects.vercel.app",
     "https://admin.inksadelivery.com.br",
@@ -26,70 +23,62 @@ CORS_ORIGINS = [
 CORS(admin_users_bp, origins=CORS_ORIGINS, supports_credentials=True)
 CORS(legacy_admin_users_bp, origins=CORS_ORIGINS, supports_credentials=True)
 
-DISPLAY_NAME_SQL = textwrap.dedent("""
-    TRIM(COALESCE(
-        CASE
-            WHEN u.user_type = 'client' THEN cp.first_name || ' ' || cp.last_name
-            WHEN u.user_type = 'restaurant' THEN rp.restaurant_name
-            WHEN u.user_type = 'delivery' THEN dp.first_name || ' ' || dp.last_name
-            ELSE u.email
-        END,
-        ''
-    ))
-""").strip()
+DISPLAY_NAME_SQL = """
+TRIM(COALESCE(
+    CASE
+        WHEN u.user_type = 'client' THEN cp.first_name || ' ' || cp.last_name
+        WHEN u.user_type = 'restaurant' THEN rp.restaurant_name
+        WHEN u.user_type = 'delivery' THEN dp.first_name || ' ' || dp.last_name
+        ELSE u.email
+    END,
+    ''
+))
+""".strip()
 
-USER_PROFILE_JOINS = textwrap.dedent("""
-    LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
-    LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant'
-    LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
-""").strip()
+PROFILE_JOINS_SQL = """
+LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
+LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant'
+LEFT JOIN delivery_profiles dp ON u.id = dp.user_id AND u.user_type = 'delivery'
+""".strip()
 
 
-def _inject_user_profile_sql(sql_template: str) -> str:
-    return sql_template.format(
-        display_name_sql=DISPLAY_NAME_SQL,
-        joins=USER_PROFILE_JOINS,
-    )
-
-# Decorador para verificar se o usuário é um administrador
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
         user_id, user_type, error_response = get_user_id_from_token(auth_header)
-        
+
         if error_response:
             return error_response
-        
+
         if user_type != 'admin':
             return jsonify({"status": "error", "message": "Acesso não autorizado. Rota exclusiva para administradores."}), 403
-        
+
         return f(*args, **kwargs)
+
     return decorated_function
 
+
 def get_user_status(user_data):
-    """
-    Determine user status based on profile data and user_type.
-    """
+    """Determine user status based on profile data and user_type."""
+
     if user_data.get('full_name') and user_data.get('full_name').strip():
         return 'active'
-    else:
-        return 'inactive'
+    return 'inactive'
 
-@admin_users_bp.route('', methods=['GET'])
-@admin_users_bp.route('/', methods=['GET'])
+
+@admin_users_bp.route('', methods=['GET'], strict_slashes=False)
 @admin_required
 def list_users():
-    """
-    List users with pagination and filtering support.
-    """
+    """List users with pagination and filtering support."""
+
     page = max(1, int(request.args.get('page', 1)))
     page_size = min(100, max(1, int(request.args.get('page_size', 20))))
     query = request.args.get('query', '').strip()
     status_filter = request.args.get('status', 'all').lower()
     role_filter = request.args.get('role', '').strip()
     sort_param = request.args.get('sort', 'created_at:desc').strip()
-    
+
     if ':' in sort_param:
         sort_field, sort_direction = sort_param.split(':', 1)
         sort_direction = sort_direction.upper()
@@ -98,141 +87,157 @@ def list_users():
     else:
         sort_field = sort_param
         sort_direction = 'DESC'
-    
+
     allowed_sort_fields = ['created_at', 'email', 'user_type', 'full_name']
     if sort_field not in allowed_sort_fields:
         sort_field = 'created_at'
-    
+
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            base_query = _inject_user_profile_sql(textwrap.dedent("""
+            base_query = f"""
                 SELECT
-                    u.id, u.email, u.user_type, u.created_at,
-                    {display_name_sql} AS full_name,
+                    u.id,
+                    u.email,
+                    u.user_type,
+                    u.created_at,
+                    {DISPLAY_NAME_SQL} AS full_name,
                     COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
                     COALESCE(cp.phone, rp.phone, dp.phone) AS phone
                 FROM users u
-                {joins}
-            """).strip())
-            
+                {PROFILE_JOINS_SQL}
+            """.strip()
+
             where_clauses = []
             params = []
-            
+
             if role_filter:
                 where_clauses.append("u.user_type = %s")
                 params.append(role_filter)
-            
+
             if query:
-                where_clauses.append("""
-                    (u.email ILIKE %s OR 
-                     COALESCE(
-                        cp.first_name || ' ' || cp.last_name, 
-                        rp.restaurant_name, 
-                        dp.first_name || ' ' || dp.last_name
-                     ) ILIKE %s)
-                """)
+                where_clauses.append(
+                    "(u.email ILIKE %s OR "
+                    "COALESCE(cp.first_name || ' ' || cp.last_name, rp.restaurant_name, dp.first_name || ' ' || dp.last_name) ILIKE %s)"
+                )
                 query_param = f'%{query}%'
                 params.extend([query_param, query_param])
-            
-            where_sql = ""
+
+            where_sql = ''
             if where_clauses:
-                where_sql = " WHERE " + " AND ".join(where_clauses)
-            
-            count_query = (
-                "SELECT COUNT(DISTINCT u.id) as total FROM users u "
-                "{joins} {where_sql}"
-            ).format(joins=USER_PROFILE_JOINS, where_sql=where_sql)
+                where_sql = ' WHERE ' + ' AND '.join(where_clauses)
+
+            count_query = f"""
+                SELECT COUNT(DISTINCT u.id) AS total
+                FROM users u
+                {PROFILE_JOINS_SQL}
+                {where_sql}
+            """.strip()
             cur.execute(count_query, tuple(params))
             total_count = cur.fetchone()['total']
-            
+
             final_query = f"{base_query} {where_sql} ORDER BY {sort_field} {sort_direction} LIMIT %s OFFSET %s"
             offset = (page - 1) * page_size
             cur.execute(final_query, tuple(params + [page_size, offset]))
             users = [dict(row) for row in cur.fetchall()]
-            
+
             filtered_users = []
             for user in users:
                 user['status'] = get_user_status(user)
                 if status_filter == 'all' or user['status'] == status_filter:
                     filtered_users.append(user)
-            
+
             if status_filter != 'all':
                 total_count = len(filtered_users)
-            
+
             response = {
                 "items": filtered_users,
                 "total": total_count,
                 "page": page,
-                "page_size": page_size
+                "page_size": page_size,
             }
-            
+
             return jsonify(response), 200
 
-    except Exception as e:
+    except Exception as exc:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno ao buscar usuários.", "detail": str(e)}), 500
+        return jsonify({"status": "error", "message": "Erro interno ao buscar usuários.", "detail": str(exc)}), 500
     finally:
         if conn:
             conn.close()
 
-@admin_users_bp.route('/<uuid:user_id>', methods=['GET'])
-@admin_users_bp.route('/<uuid:user_id>/', methods=['GET'])
+
+@admin_users_bp.route('/<uuid:user_id>', methods=['GET'], strict_slashes=False)
 @admin_required
 def get_user_detail(user_id):
-    """
-    Get detailed information about a specific user.
-    """
+    """Get detailed information about a specific user."""
+
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            query = _inject_user_profile_sql(textwrap.dedent("""
+            query = f"""
                 SELECT
-                    u.id, u.email, u.user_type, u.created_at,
-                    {display_name_sql} AS full_name,
+                    u.id,
+                    u.email,
+                    u.user_type,
+                    u.created_at,
+                    {DISPLAY_NAME_SQL} AS full_name,
                     COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
                     COALESCE(cp.phone, rp.phone, dp.phone) AS phone,
-                    cp.first_name, cp.last_name, cp.cpf,
-                    cp.address_street, cp.address_number, cp.address_neighborhood,
-                    cp.address_city as client_city, cp.address_state, cp.address_zipcode,
-                    rp.restaurant_name, rp.business_name, rp.cnpj,
-                    rp.address_street as rest_address_street, rp.address_number as rest_address_number,
-                    rp.address_neighborhood as rest_address_neighborhood, rp.address_city as rest_address_city,
-                    rp.address_state as rest_address_state, rp.address_zipcode as rest_address_zipcode,
-                    dp.first_name as delivery_first_name, dp.last_name as delivery_last_name,
-                    dp.cpf as delivery_cpf, dp.birth_date, dp.vehicle_type
+                    cp.first_name,
+                    cp.last_name,
+                    cp.cpf,
+                    cp.address_street,
+                    cp.address_number,
+                    cp.address_neighborhood,
+                    cp.address_city AS client_city,
+                    cp.address_state,
+                    cp.address_zipcode,
+                    rp.restaurant_name,
+                    rp.business_name,
+                    rp.cnpj,
+                    rp.address_street AS rest_address_street,
+                    rp.address_number AS rest_address_number,
+                    rp.address_neighborhood AS rest_address_neighborhood,
+                    rp.address_city AS rest_address_city,
+                    rp.address_state AS rest_address_state,
+                    rp.address_zipcode AS rest_address_zipcode,
+                    dp.first_name AS delivery_first_name,
+                    dp.last_name AS delivery_last_name,
+                    dp.cpf AS delivery_cpf,
+                    dp.birth_date,
+                    dp.vehicle_type
                 FROM users u
-                {joins}
+                {PROFILE_JOINS_SQL}
                 WHERE u.id = %s
-            """).strip())
-            
+            """.strip()
+
             cur.execute(query, (str(user_id),))
             user = cur.fetchone()
-            
+
             if not user:
                 return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
-            
+
             user_dict = dict(user)
             user_dict['status'] = get_user_status(user_dict)
-            
+
             return jsonify({"status": "success", "data": user_dict}), 200
 
-    except Exception as e:
+    except Exception as exc:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno ao buscar usuário.", "detail": str(e)}), 500
+        return jsonify({"status": "error", "message": "Erro interno ao buscar usuário.", "detail": str(exc)}), 500
     finally:
         if conn:
             conn.close()
 
 
-@admin_users_bp.route('/summary', methods=['GET'])
-@admin_users_bp.route('/summary/', methods=['GET'])
+@admin_users_bp.route('/summary', methods=['GET'], strict_slashes=False)
 @admin_required
 def get_users_summary():
     """Aggregate metrics so the admin dashboard can display real data."""
@@ -243,47 +248,49 @@ def get_users_summary():
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            summary_sql = _inject_user_profile_sql(textwrap.dedent("""
+            summary_sql = f"""
                 SELECT
                     u.user_type,
                     COUNT(*) AS total,
                     COUNT(*) FILTER (
                         WHERE CASE
                             WHEN u.user_type = 'admin' THEN TRUE
-                            ELSE {display_name_sql} <> ''
+                            ELSE {DISPLAY_NAME_SQL} <> ''
                         END
                     ) AS active,
                     COUNT(*) FILTER (
                         WHERE CASE
                             WHEN u.user_type = 'admin' THEN FALSE
-                            ELSE {display_name_sql} = ''
+                            ELSE {DISPLAY_NAME_SQL} = ''
                         END
                     ) AS inactive,
                     COUNT(*) FILTER (WHERE u.created_at >= NOW() - INTERVAL '7 days') AS last_7_days,
                     COUNT(*) FILTER (WHERE u.created_at >= NOW() - INTERVAL '30 days') AS last_30_days
                 FROM users u
-                {joins}
+                {PROFILE_JOINS_SQL}
                 GROUP BY u.user_type
                 ORDER BY u.user_type
-            """).strip())
+            """.strip()
 
             cur.execute(summary_sql)
             rows = cur.fetchall()
 
             summary = []
-            total_users = 0
-            active_users = 0
-            inactive_users = 0
-            new_last_7_days = 0
-            new_last_30_days = 0
+            totals = {
+                "total_users": 0,
+                "active_users": 0,
+                "inactive_users": 0,
+                "new_last_7_days": 0,
+                "new_last_30_days": 0,
+            }
 
             for row in rows:
                 user_type = row['user_type']
                 total = int(row['total'])
-                active = int(row['active']) if row['active'] is not None else 0
-                inactive = int(row['inactive']) if row['inactive'] is not None else 0
-                last_7 = int(row['last_7_days']) if row['last_7_days'] is not None else 0
-                last_30 = int(row['last_30_days']) if row['last_30_days'] is not None else 0
+                active = int(row['active'] or 0)
+                inactive = int(row['inactive'] or 0)
+                last_7 = int(row['last_7_days'] or 0)
+                last_30 = int(row['last_30_days'] or 0)
 
                 summary.append({
                     "user_type": user_type,
@@ -294,11 +301,11 @@ def get_users_summary():
                     "last_30_days": last_30,
                 })
 
-                total_users += total
-                active_users += active
-                inactive_users += inactive
-                new_last_7_days += last_7
-                new_last_30_days += last_30
+                totals['total_users'] += total
+                totals['active_users'] += active
+                totals['inactive_users'] += inactive
+                totals['new_last_7_days'] += last_7
+                totals['new_last_30_days'] += last_30
 
             recent_limit_param = request.args.get('recent_limit', 10)
             try:
@@ -307,56 +314,50 @@ def get_users_summary():
                 recent_limit = 10
             recent_limit = max(1, min(recent_limit, 50))
 
-            recent_sql = _inject_user_profile_sql(textwrap.dedent("""
+            recent_sql = f"""
                 SELECT
                     u.id,
                     u.email,
                     u.user_type,
                     u.created_at,
-                    {display_name_sql} AS display_name
+                    {DISPLAY_NAME_SQL} AS display_name
                 FROM users u
-                {joins}
+                {PROFILE_JOINS_SQL}
                 ORDER BY u.created_at DESC
                 LIMIT %s
-            """).strip())
+            """.strip()
 
             cur.execute(recent_sql, (recent_limit,))
+            recent_rows = cur.fetchall()
 
-            recent = [
-                {
-                    "id": str(row['id']),
-                    "email": row['email'],
-                    "user_type": row['user_type'],
-                    "created_at": row['created_at'].isoformat() if isinstance(row['created_at'], datetime) else row['created_at'],
-                    "display_name": row['display_name'],
-                }
-                for row in cur.fetchall()
-            ]
+        recent_signups = [
+            {
+                "id": str(row['id']),
+                "email": row['email'],
+                "user_type": row['user_type'],
+                "created_at": row['created_at'].isoformat() if isinstance(row['created_at'], datetime) else row['created_at'],
+                "display_name": row['display_name'],
+            }
+            for row in recent_rows
+        ]
 
         payload = {
             "summary": summary,
-            "totals": {
-                "total_users": total_users,
-                "active_users": active_users,
-                "inactive_users": inactive_users,
-                "new_last_7_days": new_last_7_days,
-                "new_last_30_days": new_last_30_days,
-            },
-            "recent_signups": recent,
+            "totals": totals,
+            "recent_signups": recent_signups,
         }
 
         return jsonify({"status": "success", "data": payload}), 200
 
-    except Exception as e:
+    except Exception as exc:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno ao gerar métricas de usuários.", "detail": str(e)}), 500
+        return jsonify({"status": "error", "message": "Erro interno ao gerar métricas de usuários.", "detail": str(exc)}), 500
     finally:
         if conn:
             conn.close()
 
 
-@admin_users_bp.route('/signups-trend', methods=['GET'])
-@admin_users_bp.route('/signups-trend/', methods=['GET'])
+@admin_users_bp.route('/signups-trend', methods=['GET'], strict_slashes=False)
 @admin_required
 def get_users_signups_trend():
     """Return the number of users created per day split by role."""
@@ -387,7 +388,7 @@ def get_users_signups_trend():
                 GROUP BY 1, 2
                 ORDER BY day ASC
                 """,
-                (start_date,)
+                (start_date,),
             )
 
             raw_rows = cur.fetchall()
@@ -395,9 +396,7 @@ def get_users_signups_trend():
         data_by_day = {}
         for row in raw_rows:
             day = row['day']
-            if day not in data_by_day:
-                data_by_day[day] = {"total": 0, "by_type": {}}
-
+            data_by_day.setdefault(day, {"total": 0, "by_type": {}})
             count = int(row['total'])
             data_by_day[day]["total"] += count
             data_by_day[day]["by_type"][row['user_type']] = count
@@ -422,20 +421,19 @@ def get_users_signups_trend():
 
         return jsonify({"status": "success", "data": payload}), 200
 
-    except Exception as e:
+    except Exception as exc:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno ao montar série de cadastros.", "detail": str(e)}), 500
+        return jsonify({"status": "error", "message": "Erro interno ao montar série de cadastros.", "detail": str(exc)}), 500
     finally:
         if conn:
             conn.close()
 
-@admin_users_bp.route('/<uuid:user_id>', methods=['PATCH'])
-@admin_users_bp.route('/<uuid:user_id>/', methods=['PATCH'])
+
+@admin_users_bp.route('/<uuid:user_id>', methods=['PATCH'], strict_slashes=False)
 @admin_required
 def update_user(user_id):
-    """
-    Partial update for user status/role.
-    """
+    """Partial update for user status/role."""
+
     data = request.get_json()
     if not data:
         return jsonify({"status": "error", "message": "Nenhum dado enviado para atualização."}), 400
@@ -448,55 +446,55 @@ def update_user(user_id):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT id, user_type, email FROM users WHERE id = %s", (str(user_id),))
             user = cur.fetchone()
-            
+
             if not user:
                 return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
-            
+
             updates = []
             params = []
             update_details = []
-            
+
             if 'user_type' in data:
                 new_user_type = data['user_type']
                 valid_types = ['client', 'restaurant', 'delivery', 'admin']
-                
+
                 if new_user_type not in valid_types:
                     return jsonify({"status": "error", "message": f"Tipo de usuário inválido. Deve ser um de: {', '.join(valid_types)}"}), 400
-                
+
                 updates.append("user_type = %s")
                 params.append(new_user_type)
                 update_details.append(f"user_type: {user['user_type']} -> {new_user_type}")
-            
+
             if 'status' in data:
                 new_status = data['status']
                 if new_status not in ['active', 'inactive']:
                     return jsonify({"status": "error", "message": "Status inválido. Deve ser 'active' ou 'inactive'."}), 400
                 update_details.append(f"status: -> {new_status}")
-            
+
             if updates:
                 params.append(str(user_id))
                 update_query = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
                 cur.execute(update_query, tuple(params))
-                
+
                 if cur.rowcount == 0:
                     conn.rollback()
                     return jsonify({"status": "error", "message": "Falha ao atualizar usuário"}), 500
-                
+
                 conn.commit()
-            
+
             if update_details:
                 log_admin_action_auto(
-                    "UpdateUser", 
+                    "UpdateUser",
                     f"Updated user {user['email']} (ID: {user_id}): {', '.join(update_details)}"
                 )
-            
+
             return jsonify({"status": "success", "message": "Usuário atualizado com sucesso."}), 200
 
-    except Exception as e:
+    except Exception as exc:
         if conn:
             conn.rollback()
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Erro interno ao atualizar usuário.", "detail": str(e)}), 500
+        return jsonify({"status": "error", "message": "Erro interno ao atualizar usuário.", "detail": str(exc)}), 500
     finally:
         if conn:
             conn.close()
@@ -522,5 +520,3 @@ def legacy_user_detail_or_update(user_id):
     if request.method == 'PATCH':
         return update_user(user_id)
     return get_user_detail(user_id)
-
-
