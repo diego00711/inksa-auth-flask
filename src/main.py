@@ -180,8 +180,12 @@ app.register_blueprint(delivery_bp)
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
-app.register_blueprint(admin_users_bp, url_prefix='/api/admin/users')
-app.register_blueprint(legacy_admin_users_bp, url_prefix='/api/users')
+
+# >>> Ajuste principal de Users:
+#    - blueprint oficial em /api/users
+#    - legacy/compat em /api/admin/users
+app.register_blueprint(admin_users_bp, url_prefix='/api/users')
+app.register_blueprint(legacy_admin_users_bp, url_prefix='/api/admin/users')
 
 # --- Rotas de Avaliação agrupadas sob /api/review ---
 app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')
@@ -211,6 +215,15 @@ def health_check_simple():
         "timestamp": datetime.now().isoformat(),
         "service": "Inksa Delivery API"
     }), 200
+
+# Healthchecks adicionais (muito usados por plataformas/monitoramento)
+@app.route('/healthz')
+def healthz():
+    return jsonify({"status": "ok"}), 200
+
+@app.route('/api/healthz')
+def api_healthz():
+    return jsonify({"status": "ok"}), 200
 
 @app.route('/api/debug/routes')
 def debug_routes():
