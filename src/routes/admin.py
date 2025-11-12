@@ -62,10 +62,29 @@ def admin_required(fn):
     return wrapper
 
 
+def _safe_float(v, default=0.0):
+    try:
+        return float(v or 0)
+    except Exception:
+        return default
+
+
+def _safe_int(v, default=0):
+    try:
+        return int(v or 0)
+    except Exception:
+        return default
+
+
 def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     """
     Monta o mesmo payload usado no dashboard, com filtros opcionais.
     Reaproveitado pelas rotas de compatibilidade (/metrics, /revenue-series, /transactions).
+
+    Blindagem:
+      - Cada bloco de SQL tem try/except com log detalhado.
+      - Não reusamos cursor após exceção sem tratar.
+      - Converte tipos com segurança (_safe_float/_safe_int).
     """
     payload = {
         "kpis": {
@@ -84,170 +103,200 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
         "clientsGrowth": [],
     }
 
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        # KPIs
-        cur.execute(
-            f"""
-            SELECT COALESCE(SUM(total_amount),0) AS total
-            FROM {ORDERS_TABLE}
-            WHERE status IN ('delivered','completed')
-            """
-        )
-        payload["kpis"]["totalRevenue"] = float(cur.fetchone()["total"])
+    # Use contexto transacional. Se qualquer execute falhar, o "with conn" faz rollback.
+    with conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
 
-        cur.execute(
-            f"""
-            SELECT COALESCE(AVG(total_amount),0) AS avg_ticket
-            FROM {ORDERS_TABLE}
-            WHERE status IN ('delivered','completed')
-            """
-        )
-        payload["kpis"]["averageTicket"] = float(cur.fetchone()["avg_ticket"])
-
-        cur.execute(
-            f"""
-            SELECT COUNT(*)::int AS c
-            FROM {ORDERS_TABLE}
-            WHERE created_at::date = CURRENT_DATE
-            """
-        )
-        payload["kpis"]["ordersToday"] = int(cur.fetchone()["c"])
-
-        cur.execute(
-            f"""
-            SELECT COUNT(*)::int AS c
-            FROM {CLIENTS_TABLE}
-            WHERE created_at::date = CURRENT_DATE
-            """
-        )
-        payload["kpis"]["newClientsToday"] = int(cur.fetchone()["c"])
-
-        cur.execute(
-            f"""
-            SELECT
-              SUM(CASE WHEN status IN ('preparing','on_the_way','in_progress') THEN 1 ELSE 0 END)::int AS in_progress,
-              SUM(CASE WHEN status IN ('cancelled','canceled') THEN 1 ELSE 0 END)::int AS canceled
-            FROM {ORDERS_TABLE}
-            """
-        )
-        row = cur.fetchone()
-        payload["kpis"]["ordersInProgress"] = int(row["in_progress"])
-        payload["kpis"]["ordersCanceled"] = int(row["canceled"])
-
-        # Pode não existir em todos os schemas — não falha se faltar
-        try:
-            cur.execute(
-                f"""
-                SELECT COUNT(*)::int AS c
-                FROM {RESTAURANTS_TABLE}
-                WHERE (approved IS FALSE) OR (status = 'pending')
-                """
-            )
-            payload["kpis"]["restaurantsPending"] = int(cur.fetchone()["c"])
-        except Exception:
-            pass
-
-        try:
-            cur.execute(
-                f"""
-                SELECT COUNT(*)::int AS c
-                FROM {DELIVERY_TABLE}
-                WHERE active IS TRUE
-                """
-            )
-            payload["kpis"]["activeDeliverymen"] = int(cur.fetchone()["c"])
-        except Exception:
-            pass
-
-        # Série de receita
-        if date_from and date_to:
-            cur.execute(
-                f"""
-                SELECT to_char(d::date,'DD/MM') AS formatted_date,
-                       COALESCE(SUM(o.total_amount),0) AS daily_revenue
-                FROM generate_series(%s::date, %s::date, '1 day') AS d
-                LEFT JOIN {ORDERS_TABLE} o
-                  ON o.created_at::date = d::date
-                 AND o.status IN ('delivered','completed')
-                GROUP BY d
-                ORDER BY d
-                """,
-                (date_from, date_to),
-            )
-        else:
-            cur.execute(
-                f"""
-                WITH days AS (
-                  SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
+            # ---------------- KPIs ----------------
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COALESCE(SUM(total_amount),0) AS total
+                    FROM {ORDERS_TABLE}
+                    WHERE status IN ('delivered','completed')
+                    """
                 )
-                SELECT to_char(d,'DD/MM') AS formatted_date,
-                       COALESCE((
-                         SELECT SUM(o.total_amount)
-                         FROM {ORDERS_TABLE} o
-                         WHERE o.status IN ('delivered','completed')
-                           AND o.created_at::date = d
-                       ),0) AS daily_revenue
-                FROM days
-                ORDER BY d
-                """
-            )
-        payload["chartData"] = [dict(r) for r in cur.fetchall()]
-        for it in payload["chartData"]:
-            it["daily_revenue"] = float(it["daily_revenue"])
+                payload["kpis"]["totalRevenue"] = _safe_float(cur.fetchone()["total"])
+            except Exception:
+                logger.exception("Falha ao calcular totalRevenue")
 
-        # Recent orders (with optional from/to/limit)
-        params = []
-        where = []
-        if date_from:
-            where.append("created_at::date >= %s")
-            params.append(date_from)
-        if date_to:
-            where.append("created_at::date <= %s")
-            params.append(date_to)
-        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        cur.execute(
-            f"""
-            SELECT id, client_name, restaurant_name, total_amount, status, created_at
-            FROM {ORDERS_TABLE}
-            {where_sql}
-            ORDER BY created_at DESC
-            LIMIT %s
-            """,
-            (*params, limit),
-        )
-        payload["recentOrders"] = [
-            {
-                "id": str(r["id"]),
-                "client_name": r.get("client_name") or "Cliente",
-                "restaurant_name": r.get("restaurant_name") or "Restaurante",
-                "total_amount": float(r.get("total_amount") or 0),
-                "status": r.get("status") or "desconhecido",
-                "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
-            }
-            for r in cur.fetchall()
-        ]
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COALESCE(AVG(total_amount),0) AS avg_ticket
+                    FROM {ORDERS_TABLE}
+                    WHERE status IN ('delivered','completed')
+                    """
+                )
+                payload["kpis"]["averageTicket"] = _safe_float(cur.fetchone()["avg_ticket"])
+            except Exception:
+                logger.exception("Falha ao calcular averageTicket")
 
-        # Distribuição por status
-        cur.execute(f"SELECT status, COUNT(*)::int AS c FROM {ORDERS_TABLE} GROUP BY status")
-        payload["ordersStatus"] = {(r["status"] or "desconhecido"): int(r["c"]) for r in cur.fetchall()}
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)::int AS c
+                    FROM {ORDERS_TABLE}
+                    WHERE created_at::date = CURRENT_DATE
+                    """
+                )
+                payload["kpis"]["ordersToday"] = _safe_int(cur.fetchone()["c"])
+            except Exception:
+                logger.exception("Falha ao calcular ordersToday")
 
-        # Crescimento de clientes (últimos 7 dias)
-        cur.execute(
-            f"""
-            WITH days AS (
-              SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
-            )
-            SELECT
-              to_char(d, 'DD/MM') AS formatted_date,
-              COALESCE((
-                SELECT COUNT(*) FROM {CLIENTS_TABLE} c
-                WHERE c.created_at::date <= d
-              ), 0)::int AS total_clients
-            FROM days
-            ORDER BY d
-            """
-        )
-        payload["clientsGrowth"] = [dict(r) for r in cur.fetchall()]
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)::int AS c
+                    FROM {CLIENTS_TABLE}
+                    WHERE created_at::date = CURRENT_DATE
+                    """
+                )
+                payload["kpis"]["newClientsToday"] = _safe_int(cur.fetchone()["c"])
+            except Exception:
+                logger.exception("Falha ao calcular newClientsToday")
+
+            try:
+                cur.execute(
+                    f"""
+                    SELECT
+                      SUM(CASE WHEN status IN ('preparing','on_the_way','in_progress') THEN 1 ELSE 0 END)::int AS in_progress,
+                      SUM(CASE WHEN status IN ('cancelled','canceled') THEN 1 ELSE 0 END)::int AS canceled
+                    FROM {ORDERS_TABLE}
+                    """
+                )
+                row = cur.fetchone() or {}
+                payload["kpis"]["ordersInProgress"] = _safe_int(row.get("in_progress"))
+                payload["kpis"]["ordersCanceled"] = _safe_int(row.get("canceled"))
+            except Exception:
+                logger.exception("Falha ao calcular ordersInProgress/ordersCanceled")
+
+            # Campos que podem não existir em todos os schemas
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)::int AS c
+                    FROM {RESTAURANTS_TABLE}
+                    WHERE (approved IS FALSE) OR (status = 'pending')
+                    """
+                )
+                payload["kpis"]["restaurantsPending"] = _safe_int(cur.fetchone()["c"])
+            except Exception:
+                logger.info("Campo de aprovação de restaurantes ausente (restaurantsPending)")
+
+            try:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)::int AS c
+                    FROM {DELIVERY_TABLE}
+                    WHERE active IS TRUE
+                    """
+                )
+                payload["kpis"]["activeDeliverymen"] = _safe_int(cur.fetchone()["c"])
+            except Exception:
+                logger.info("Campo 'active' ausente em delivery_profiles (activeDeliverymen)")
+
+            # ---------------- Série de receita (chartData) ----------------
+            try:
+                if date_from and date_to:
+                    cur.execute(
+                        f"""
+                        SELECT to_char(d::date,'DD/MM') AS formatted_date,
+                               COALESCE(SUM(o.total_amount),0) AS daily_revenue
+                        FROM generate_series(%s::date, %s::date, '1 day') AS d
+                        LEFT JOIN {ORDERS_TABLE} o
+                          ON o.created_at::date = d::date
+                         AND o.status IN ('delivered','completed')
+                        GROUP BY d
+                        ORDER BY d
+                        """,
+                        (date_from, date_to),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        WITH days AS (
+                          SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
+                        )
+                        SELECT to_char(d,'DD/MM') AS formatted_date,
+                               COALESCE((
+                                 SELECT SUM(o.total_amount)
+                                 FROM {ORDERS_TABLE} o
+                                 WHERE o.status IN ('delivered','completed')
+                                   AND o.created_at::date = d
+                               ),0) AS daily_revenue
+                        FROM days
+                        ORDER BY d
+                        """
+                    )
+                payload["chartData"] = [dict(r) for r in cur.fetchall()]
+                for it in payload["chartData"]:
+                    it["daily_revenue"] = _safe_float(it.get("daily_revenue"))
+            except Exception:
+                logger.exception("Falha ao montar chartData (série de receita)")
+
+            # ---------------- Recent orders ----------------
+            try:
+                params = []
+                where = []
+                if date_from:
+                    where.append("created_at::date >= %s")
+                    params.append(date_from)
+                if date_to:
+                    where.append("created_at::date <= %s")
+                    params.append(date_to)
+                where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+                cur.execute(
+                    f"""
+                    SELECT id, client_name, restaurant_name, total_amount, status, created_at
+                    FROM {ORDERS_TABLE}
+                    {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (*params, limit),
+                )
+                payload["recentOrders"] = [
+                    {
+                        "id": str(r["id"]),
+                        "client_name": r.get("client_name") or "Cliente",
+                        "restaurant_name": r.get("restaurant_name") or "Restaurante",
+                        "total_amount": _safe_float(r.get("total_amount")),
+                        "status": r.get("status") or "desconhecido",
+                        "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+            except Exception:
+                logger.exception("Falha ao montar recentOrders")
+
+            # ---------------- Distribuição por status ----------------
+            try:
+                cur.execute(f"SELECT status, COUNT(*)::int AS c FROM {ORDERS_TABLE} GROUP BY status")
+                payload["ordersStatus"] = {(r["status"] or "desconhecido"): _safe_int(r["c"]) for r in cur.fetchall()}
+            except Exception:
+                logger.exception("Falha ao montar ordersStatus")
+
+            # ---------------- Crescimento de clientes ----------------
+            try:
+                cur.execute(
+                    f"""
+                    WITH days AS (
+                      SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
+                    )
+                    SELECT
+                      to_char(d, 'DD/MM') AS formatted_date,
+                      COALESCE((
+                        SELECT COUNT(*) FROM {CLIENTS_TABLE} c
+                        WHERE c.created_at::date <= d
+                      ), 0)::int AS total_clients
+                    FROM days
+                    ORDER BY d
+                    """
+                )
+                payload["clientsGrowth"] = [dict(r) for r in cur.fetchall()]
+            except Exception:
+                logger.exception("Falha ao montar clientsGrowth")
 
     return payload
 
@@ -272,7 +321,7 @@ def admin_login():
         if not conn:
             return jsonify({"status": "error", "message": "Falha na conexão com a base de dados."}), 500
 
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT user_type FROM users WHERE id = %s", (str(user.id),))
             db_user = cur.fetchone()
 
@@ -323,7 +372,7 @@ def get_all_users():
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             params = []
             sql = """
                 SELECT 
@@ -369,7 +418,7 @@ def get_all_restaurants():
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
                 """
                 SELECT rp.*, u.created_at
@@ -423,18 +472,18 @@ def admin_dashboard():
         "clientsGrowth": [],
     }
 
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão com banco"}), 500
+
     try:
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Erro de conexão com banco"}), 500
-
-        payload = _build_dashboard_payload(conn)
-        conn.close()
-        return jsonify(payload), 200
-
+        data = _build_dashboard_payload(conn)
+        return jsonify(data), 200
     except Exception:
         logger.exception("Erro no /api/admin/dashboard")
         return jsonify(resp), 200
+    finally:
+        conn.close()
 
 
 # -------------------------------------------------------------------
@@ -451,8 +500,11 @@ def admin_metrics():
     if not conn:
         return jsonify({"status": "error", "message": "DB connection error"}), 500
     try:
-        payload = _build_dashboard_payload(conn, date_from, date_to)
-        return jsonify({"status": "success", "data": payload["kpis"]}), 200
+        data = _build_dashboard_payload(conn, date_from, date_to)
+        return jsonify({"status": "success", "data": data["kpis"]}), 200
+    except Exception:
+        logger.exception("Erro em /api/admin/metrics")
+        return jsonify({"status": "error", "message": "Erro interno"}), 500
     finally:
         conn.close()
 
@@ -468,8 +520,11 @@ def admin_revenue_series():
     if not conn:
         return jsonify({"status": "error", "message": "DB connection error"}), 500
     try:
-        payload = _build_dashboard_payload(conn, date_from, date_to)
-        return jsonify({"status": "success", "data": payload["chartData"]}), 200
+        data = _build_dashboard_payload(conn, date_from, date_to)
+        return jsonify({"status": "success", "data": data["chartData"]}), 200
+    except Exception:
+        logger.exception("Erro em /api/admin/revenue-series")
+        return jsonify({"status": "error", "message": "Erro interno"}), 500
     finally:
         conn.close()
 
@@ -486,8 +541,11 @@ def admin_transactions():
     if not conn:
         return jsonify({"status": "error", "message": "DB connection error"}), 500
     try:
-        payload = _build_dashboard_payload(conn, date_from, date_to, limit=limit)
+        data = _build_dashboard_payload(conn, date_from, date_to, limit=limit)
         # Mantém o nome que o front espera
-        return jsonify({"status": "success", "data": payload["recentOrders"]}), 200
+        return jsonify({"status": "success", "data": data["recentOrders"]}), 200
+    except Exception:
+        logger.exception("Erro em /api/admin/transactions")
+        return jsonify({"status": "error", "message": "Erro interno"}), 500
     finally:
         conn.close()
