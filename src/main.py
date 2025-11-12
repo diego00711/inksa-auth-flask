@@ -37,7 +37,8 @@ try:
     from src.routes.delivery_stats_earnings import delivery_stats_earnings_bp
     from src.routes.banners import banners_bp
     from src.utils.helpers import supabase
-    from src.routes.gamification_routes import gamification_bp
+    # >>> importa também o blueprint “admin” de gamificação
+    from src.routes.gamification_routes import gamification_bp, admin_gamification_bp
     from src.routes.categories import categories_bp
     from src.routes.analytics import analytics_bp
     from .routes.analytics_admin import analytics_admin_bp
@@ -73,28 +74,20 @@ app.config.update(
 )
 
 # ---------------- CORS ROBUSTO ----------------
-# Origens explícitas conhecidas
 PROD_ORIGINS = [
     "https://clientes.inksadelivery.com.br",
-    "https://restaurantes.inksadelivery.com.br",   # <- plural
-    "https://restaurante.inksadelivery.com.br",    # (mantido por segurança, caso exista)
+    "https://restaurantes.inksadelivery.com.br",
+    "https://restaurante.inksadelivery.com.br",
     "https://entregadores.inksadelivery.com.br",
     "https://admin.inksadelivery.com.br",
     "https://app.inksadelivery.com.br",
 ]
-
-# Pré-visualizações Vercel (domínios variáveis)
 VERCEL_BASE = ".vercel.app"
-
-# Dev local
 LOCAL_HOSTS = [
     "http://localhost:3000", "http://127.0.0.1:3000",
     "http://localhost:5173", "http://127.0.0.1:5173",
 ]
-
-# Permite sobrescrever/estender via variável de ambiente (se desejar)
 EXTRA = [o.strip() for o in os.environ.get("EXTRA_ALLOWED_ORIGINS", "").split(",") if o.strip()]
-
 ALLOWED_ORIGINS = set(PROD_ORIGINS + LOCAL_HOSTS + EXTRA)
 
 def is_allowed_origin(origin: str) -> bool:
@@ -102,15 +95,12 @@ def is_allowed_origin(origin: str) -> bool:
         return False
     if origin in ALLOWED_ORIGINS:
         return True
-    # qualquer subdomínio *.vercel.app
     if origin.endswith(VERCEL_BASE):
         return True
-    # qualquer localhost em porta qualquer
     if re.match(r"^http://localhost:\d+$", origin) or re.match(r"^http://127\.0\.0\.1:\d+$", origin):
         return True
     return False
 
-# Flask-CORS para /api/* (usa wildcard aqui; headers finais serão ajustados no after_request)
 CORS(
     app,
     resources={r"/api/*": {"origins": "*"}},
@@ -121,14 +111,12 @@ CORS(
 
 @app.before_request
 def handle_preflight():
-    # Responder preflight globalmente (especialmente para /api/*)
     if request.method == "OPTIONS":
         origin = request.headers.get("Origin", "")
         resp = make_response()
         if is_allowed_origin(origin):
             resp.headers["Access-Control-Allow-Origin"] = origin
         else:
-            # se quiser negar, deixe "null"; se quiser permitir tudo, pode por "*"
             resp.headers["Access-Control-Allow-Origin"] = "null"
         resp.headers["Vary"] = "Origin"
         resp.headers["Access-Control-Allow-Credentials"] = "true"
@@ -140,7 +128,6 @@ def handle_preflight():
 def add_cors_headers(response):
     origin = request.headers.get("Origin", "")
     if is_allowed_origin(origin):
-        # injeta sempre que a origem for permitida
         response.headers.setdefault("Access-Control-Allow-Origin", origin)
         response.headers.setdefault("Vary", "Origin")
         response.headers.setdefault("Access-Control-Allow-Credentials", "true")
@@ -149,7 +136,6 @@ def add_cors_headers(response):
     return response
 
 # --- Configuração do SocketIO ---
-# Se quiser restringir, substitua "*" por list(ALLOWED_ORIGINS)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
 
 # --- REGISTRO DE BLUEPRINTS ---
@@ -163,7 +149,10 @@ app.register_blueprint(orders_bp, url_prefix='/api/orders')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(analytics_admin_bp, url_prefix="/api/analytics")
+
+# Gamificação (apps) e Gamificação (Admin)
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
+app.register_blueprint(admin_gamification_bp, url_prefix='/api/admin/gamification')  # <<< NOVO
 
 # Pagamento
 app.register_blueprint(mp_payment_bp, url_prefix='/api')
@@ -181,9 +170,7 @@ app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
 
-# >>> Ajuste principal de Users:
-#    - blueprint oficial em /api/users
-#    - legacy/compat em /api/admin/users
+# Users: oficial e legacy
 app.register_blueprint(admin_users_bp, url_prefix='/api/users')
 app.register_blueprint(legacy_admin_users_bp, url_prefix='/api/admin/users')
 
@@ -216,7 +203,6 @@ def health_check_simple():
         "service": "Inksa Delivery API"
     }), 200
 
-# Healthchecks adicionais (muito usados por plataformas/monitoramento)
 @app.route('/healthz')
 def healthz():
     return jsonify({"status": "ok"}), 200
