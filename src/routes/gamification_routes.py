@@ -8,22 +8,23 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 import psycopg2.extras
 
-gamification_bp = Blueprint("gamification", __name__, url_prefix="/gamification")
+from ..utils.helpers import get_user_id_from_token
 
-# CORS explícito (além do global do app)
-CORS(
-    gamification_bp,
-    origins=[
-        "http://localhost:3000","http://127.0.0.1:3000",
-        "http://localhost:5173","http://127.0.0.1:5173",
-        r"https://.*\.vercel\.app",
-        "https://admin.inksadelivery.com.br",
-        "https://clientes.inksadelivery.com.br",
-        "https://restaurantes.inksadelivery.com.br",
-        "https://entregadores.inksadelivery.com.br",
-    ],
-    supports_credentials=True,
-)
+_CORS_ORIGINS = [
+    "http://localhost:3000", "http://127.0.0.1:3000",
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    r"https://.*\.vercel\.app",
+    "https://admin.inksadelivery.com.br",
+    "https://clientes.inksadelivery.com.br",
+    "https://restaurantes.inksadelivery.com.br",
+    "https://entregadores.inksadelivery.com.br",
+]
+
+gamification_bp = Blueprint("gamification", __name__, url_prefix="/gamification")
+CORS(gamification_bp, origins=_CORS_ORIGINS, supports_credentials=True)
+
+admin_gamification_bp = Blueprint("admin_gamification", __name__, url_prefix="/admin/gamification")
+CORS(admin_gamification_bp, origins=_CORS_ORIGINS, supports_credentials=True)
 
 # ---------- infraestrutura ----------
 def _db():
@@ -311,3 +312,189 @@ def add_points_for_event(user_id, profile_type=None, points=0, event_type="pedid
         order_id=order_id,
     )
     return ok
+
+
+# ---------- Admin Gamification ----------
+
+def _admin_required():
+    auth = request.headers.get("Authorization")
+    uid, utype, err = get_user_id_from_token(auth)
+    if err:
+        return None, err
+    if utype != "admin":
+        return None, (_err("unauthorized", 403))
+    return uid, None
+
+
+@admin_gamification_bp.get("/overview")
+def admin_gamification_overview():
+    _, err = _admin_required()
+    if err:
+        return err
+    scope = request.args.get("scope")
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            join = """
+              LEFT JOIN public.delivery_profiles   dp ON dp.id = up.user_id
+              LEFT JOIN public.client_profiles     cp ON cp.id = up.user_id
+              LEFT JOIN public.restaurant_profiles rp ON rp.id = up.user_id
+            """
+            where = []
+            if scope == "restaurant":
+                where.append("rp.id IS NOT NULL")
+            elif scope == "delivery":
+                where.append("dp.id IS NOT NULL")
+            elif scope == "client":
+                where.append("cp.id IS NOT NULL")
+            where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+            cur.execute(f"SELECT COUNT(*)::int AS c FROM public.user_points up {join} {where_sql}")
+            participants = int(cur.fetchone()["c"])
+
+            cur.execute(f"SELECT COALESCE(SUM(total_points),0) AS xp FROM public.user_points up {join} {where_sql}")
+            total_xp = int(cur.fetchone()["xp"])
+
+            cur.execute(f"SELECT COALESCE(AVG(current_level),0) AS avg_level FROM public.user_points up {join} {where_sql}")
+            avg_lvl = float(cur.fetchone()["avg_level"])
+
+            cur.execute("SELECT COUNT(*)::int AS c FROM public.xp_events WHERE created_at >= NOW() - INTERVAL '30 days'")
+            events_30d = int(cur.fetchone()["c"])
+
+            return _ok({
+                "participantsActive": participants,
+                "xpTotalAcumulado": total_xp,
+                "nivelMedio": round(avg_lvl, 2),
+                "eventosUltimos30Dias": events_30d,
+            })
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.overview failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@admin_gamification_bp.get("/leaderboard")
+def admin_gamification_leaderboard():
+    _, err = _admin_required()
+    if err:
+        return err
+    scope = request.args.get("scope")
+    limit = min(max(int(request.args.get("limit", 10)), 1), 100)
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            join = """
+              LEFT JOIN public.delivery_profiles   dp ON dp.id = up.user_id
+              LEFT JOIN public.client_profiles     cp ON cp.id = up.user_id
+              LEFT JOIN public.restaurant_profiles rp ON rp.id = up.user_id
+              LEFT JOIN public.levels l ON l.level_number = up.current_level
+            """
+            where = []
+            if scope == "restaurant":
+                where.append("rp.id IS NOT NULL")
+            elif scope == "delivery":
+                where.append("dp.id IS NOT NULL")
+            elif scope == "client":
+                where.append("cp.id IS NOT NULL")
+            where_sql = "WHERE " + " AND ".join(where) if where else ""
+            cur.execute(f"""
+                SELECT up.user_id, up.total_points, up.current_level,
+                       COALESCE(l.level_name,'Bronze') AS level_name,
+                       COALESCE(rp.restaurant_name,
+                                dp.first_name || ' ' || dp.last_name,
+                                cp.first_name || ' ' || cp.last_name,
+                                'Anônimo') AS name,
+                       CASE WHEN rp.id IS NOT NULL THEN 'restaurant'
+                            WHEN dp.id IS NOT NULL THEN 'delivery'
+                            WHEN cp.id IS NOT NULL THEN 'client'
+                            ELSE 'unknown' END AS profile_type
+                  FROM public.user_points up {join} {where_sql}
+              ORDER BY up.total_points DESC
+                 LIMIT %s
+            """, (limit,))
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["user_id"] = str(r["user_id"])
+            return _ok({"items": rows, "limit": limit})
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.leaderboard failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@admin_gamification_bp.get("/users")
+def admin_gamification_users():
+    _, err = _admin_required()
+    if err:
+        return err
+    page = max(int(request.args.get("page", 1)), 1)
+    limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+    offset = (page - 1) * limit
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT up.user_id, up.total_points, up.current_level,
+                       up.points_to_next_level, up.last_updated,
+                       COALESCE(l.level_name,'Bronze') AS level_name,
+                       COALESCE(rp.restaurant_name,
+                                dp.first_name || ' ' || dp.last_name,
+                                cp.first_name || ' ' || cp.last_name,
+                                'Anônimo') AS name,
+                       CASE WHEN rp.id IS NOT NULL THEN 'restaurant'
+                            WHEN dp.id IS NOT NULL THEN 'delivery'
+                            WHEN cp.id IS NOT NULL THEN 'client'
+                            ELSE 'unknown' END AS profile_type
+                  FROM public.user_points up
+                  LEFT JOIN public.delivery_profiles   dp ON dp.id = up.user_id
+                  LEFT JOIN public.client_profiles     cp ON cp.id = up.user_id
+                  LEFT JOIN public.restaurant_profiles rp ON rp.id = up.user_id
+                  LEFT JOIN public.levels l ON l.level_number = up.current_level
+              ORDER BY up.total_points DESC
+                 LIMIT %s OFFSET %s
+            """, (limit, offset))
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["user_id"] = str(r["user_id"])
+                if r.get("last_updated"):
+                    r["last_updated"] = r["last_updated"].isoformat()
+            cur.execute("SELECT COUNT(*)::int AS c FROM public.user_points")
+            total = int(cur.fetchone()["c"])
+            return _ok({"items": rows, "total": total, "page": page, "limit": limit})
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.users failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@admin_gamification_bp.post("/users/<user_id>/adjust-points")
+def admin_gamification_adjust_points(user_id):
+    _, err = _admin_required()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    try:
+        points = int(body["points"])
+        event_type = (body.get("event_type") or "admin_adjustment").strip()
+        description = body.get("description", "Ajuste manual pelo admin")
+    except Exception:
+        return _err("invalid_body", 422)
+    ok, payload = _add_points_event(
+        user_id=user_id,
+        points=points,
+        event_type=event_type,
+        description=description,
+    )
+    return _ok(payload) if ok else _err(**payload)
