@@ -10,8 +10,8 @@ import psycopg2.extras
 
 from gotrue.errors import AuthApiError
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
-from ..utils.audit import log_admin_action
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, _extract_bearer_token
+from ..utils.audit import log_admin_action, log_admin_action_auto
 
 logger = logging.getLogger(__name__)
 
@@ -403,5 +403,161 @@ def admin_transactions():
     try:
         data = _build_dashboard_payload(conn, date_from, date_to, limit=limit)
         return jsonify({"status": "success", "data": data["recentOrders"]}), 200
+    finally:
+        conn.close()
+
+# --------- Profile ---------
+
+@admin_bp.route("/profile", methods=["GET"])
+@admin_required
+def get_admin_profile():
+    token = _extract_bearer_token(request.headers.get("Authorization"))
+    try:
+        user_resp = supabase.auth.get_user(token)
+        user = getattr(user_resp, "user", None)
+        if not user:
+            return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
+
+        user_id = str(user.id)
+        email = user.email
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+
+        try:
+            user_row = _fetchrow(conn, "SELECT user_type, created_at FROM users WHERE id = %s", (user_id,))
+            recent_logs = _fetchall(conn, """
+                SELECT timestamp, action, details
+                  FROM admin_logs
+                 WHERE admin = %s
+              ORDER BY timestamp DESC
+                 LIMIT 10
+            """, (email,))
+
+            profile = {
+                "id": user_id,
+                "email": email,
+                "user_type": user_row.get("user_type", "admin") if user_row else "admin",
+                "created_at": user_row["created_at"].isoformat() if user_row and user_row.get("created_at") else None,
+                "recent_actions": [
+                    {
+                        "timestamp": r["timestamp"].isoformat() if r.get("timestamp") else None,
+                        "action": r.get("action"),
+                        "details": (r.get("details") or "")[:120],
+                    }
+                    for r in recent_logs
+                ],
+            }
+            return jsonify({"status": "success", "data": profile}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("Erro em get_admin_profile")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@admin_bp.route("/profile/change-password", methods=["POST"])
+@admin_required
+def change_admin_password():
+    data = request.get_json() or {}
+    new_password = (data.get("new_password") or "").strip()
+
+    if len(new_password) < 6:
+        return jsonify({"status": "error", "message": "A senha deve ter pelo menos 6 caracteres"}), 400
+
+    token = _extract_bearer_token(request.headers.get("Authorization"))
+    try:
+        user_resp = supabase.auth.get_user(token)
+        user = getattr(user_resp, "user", None)
+        if not user:
+            return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
+
+        supabase.auth.admin.update_user_by_id(str(user.id), {"password": new_password})
+        log_admin_action_auto("ChangePassword", "Admin alterou sua senha")
+        return jsonify({"status": "success", "message": "Senha alterada com sucesso"}), 200
+    except Exception as e:
+        logger.exception("Erro ao alterar senha do admin")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# --------- Admins management ---------
+
+@admin_bp.route("/admins", methods=["GET"])
+@admin_required
+def list_admins():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+    try:
+        rows = _fetchall(conn, """
+            SELECT id, email, user_type, created_at
+              FROM users
+             WHERE user_type = 'admin'
+          ORDER BY created_at DESC
+        """)
+        result = [
+            {
+                "id": str(r.get("id")),
+                "email": r.get("email") or "",
+                "user_type": r.get("user_type"),
+                "role": "Administrador",
+                "status": "active",
+                "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            }
+            for r in rows
+        ]
+        return jsonify({"status": "success", "data": result}), 200
+    except Exception as e:
+        logger.exception("Erro em list_admins")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@admin_bp.route("/admins", methods=["POST"])
+@admin_required
+def create_admin():
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+
+    if not email:
+        return jsonify({"status": "error", "message": "Email é obrigatório"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+
+    try:
+        existing = _fetchrow(conn, "SELECT id FROM users WHERE email = %s", (email,))
+        if existing:
+            return jsonify({"status": "error", "message": "Já existe um usuário com esse email"}), 409
+
+        result = supabase.auth.admin.invite_user_by_email(email)
+        invited_user = getattr(result, "user", None)
+        if not invited_user:
+            return jsonify({"status": "error", "message": "Falha ao enviar convite"}), 500
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO users (id, email, user_type)
+                   VALUES (%s, %s, 'admin')
+                   ON CONFLICT (id) DO UPDATE SET user_type = 'admin'""",
+                (str(invited_user.id), email),
+            )
+            conn.commit()
+
+        log_admin_action_auto("InviteAdmin", f"Convidou novo admin: {email}")
+
+        return jsonify({
+            "status": "success",
+            "message": f"Convite enviado para {email}",
+            "data": {"id": str(invited_user.id), "email": email, "status": "invited"},
+        }), 201
+    except Exception as e:
+        logger.exception("Erro ao criar admin")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         conn.close()
