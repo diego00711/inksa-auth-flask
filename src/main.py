@@ -49,6 +49,7 @@ try:
     from src.routes.avaliacao.entregador_reviews import entregador_reviews_bp
     from src.routes.avaliacao.menu_item_reviews import menu_item_reviews_bp
     from src.routes.avaliacao.cliente_reviews import cliente_reviews_bp
+    from src.scheduler import start_scheduler
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
     raise
@@ -179,6 +180,19 @@ app.register_blueprint(restaurante_reviews_bp, url_prefix='/api/review')
 app.register_blueprint(entregador_reviews_bp, url_prefix='/api/review')
 app.register_blueprint(menu_item_reviews_bp, url_prefix='/api/review')
 app.register_blueprint(cliente_reviews_bp, url_prefix='/api/review')
+
+# --- Scheduler de Payouts Automáticos ---
+# Guard: Werkzeug reloader spawns a child process with WERKZEUG_RUN_MAIN=true.
+# We start the scheduler only in the child (or in non-debug/production mode)
+# to avoid two scheduler instances during local development.
+import os as _os
+_in_reloader_child = _os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+_debug_mode = _os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+if not _debug_mode or _in_reloader_child:
+    try:
+        start_scheduler(app)
+    except Exception as _sched_err:
+        logging.warning(f"Scheduler não pôde ser iniciado: {_sched_err}")
 
 # --- Inicialização de Serviços Externos ---
 MERCADO_PAGO_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN")
