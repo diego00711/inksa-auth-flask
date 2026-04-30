@@ -326,6 +326,202 @@ def _admin_required():
     return uid, None
 
 
+@admin_gamification_bp.get("")
+@admin_gamification_bp.get("/")
+def admin_gamification_root():
+    """GET /api/admin/gamification — métricas gerais de avaliações e gamificação."""
+    _, err = _admin_required()
+    if err:
+        return err
+    partner_type = request.args.get("partner_type")
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            date_params = []
+            date_where = []
+            if start_date:
+                date_where.append("created_at >= %s")
+                date_params.append(start_date)
+            if end_date:
+                date_where.append("created_at <= %s")
+                date_params.append(end_date)
+            date_sql = ("WHERE " + " AND ".join(date_where)) if date_where else ""
+
+            def count_reviews(table):
+                cur.execute(f"SELECT COUNT(*)::int FROM {table} {date_sql}", date_params)
+                return int(cur.fetchone()[0])
+
+            def avg_rating(table):
+                cur.execute(f"SELECT COALESCE(AVG(rating), 0) FROM {table} {date_sql}", date_params)
+                return float(cur.fetchone()[0])
+
+            rr_count = count_reviews("restaurant_reviews")
+            dr_count = count_reviews("delivery_reviews")
+            try:
+                cr_count = count_reviews("client_reviews")
+            except Exception:
+                cr_count = 0
+                conn.rollback()
+            try:
+                mr_count = count_reviews("menu_item_reviews")
+            except Exception:
+                mr_count = 0
+                conn.rollback()
+            total_reviews = rr_count + dr_count + cr_count + mr_count
+
+            rr_avg = avg_rating("restaurant_reviews")
+            dr_avg = avg_rating("delivery_reviews")
+            review_counts_nz = [(rr_avg, rr_count), (dr_avg, dr_count)]
+            total_weighted = sum(a * c for a, c in review_counts_nz)
+            total_count_nz = rr_count + dr_count
+            global_avg = (total_weighted / total_count_nz) if total_count_nz else 0.0
+
+            cur.execute("SELECT COUNT(*)::int FROM orders WHERE status = 'delivered' " + (
+                "AND created_at >= %s AND created_at <= %s" if (start_date and end_date) else
+                ("AND created_at >= %s" if start_date else ("AND created_at <= %s" if end_date else ""))
+            ), [p for p in [start_date, end_date] if p])
+            total_delivered = int(cur.fetchone()[0]) or 1
+            response_rate = round((total_count_nz / total_delivered) * 100, 1)
+
+            cur.execute("SELECT COUNT(*)::int AS c FROM public.user_points")
+            participants = int(cur.fetchone()["c"])
+            cur.execute("SELECT COALESCE(SUM(total_points), 0)::bigint AS xp FROM public.user_points")
+            total_xp = int(cur.fetchone()["xp"])
+            cur.execute("SELECT COALESCE(AVG(current_level), 0) AS avg_level FROM public.user_points")
+            avg_lvl = round(float(cur.fetchone()["avg_level"]), 2)
+
+            return _ok({
+                "total_reviews": total_reviews,
+                "average_rating": round(global_avg, 2),
+                "response_rate": response_rate,
+                "total_participants": participants,
+                "total_xp": total_xp,
+                "average_level": avg_lvl,
+                "active_challenges": 0,
+            })
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.root failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@admin_gamification_bp.get("/reviews")
+def admin_gamification_reviews():
+    """GET /api/admin/gamification/reviews — avaliações recentes (restaurant + delivery union)."""
+    _, err = _admin_required()
+    if err:
+        return err
+    try:
+        limit = min(max(int(request.args.get("limit", 20)), 1), 100)
+    except (ValueError, TypeError):
+        limit = 20
+    partner_type = request.args.get("partner_type")
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+
+    date_where = []
+    date_params = []
+    if start_date:
+        date_where.append("created_at >= %s")
+        date_params.append(start_date)
+    if end_date:
+        date_where.append("created_at <= %s")
+        date_params.append(end_date)
+    date_sql = ("AND " + " AND ".join(date_where)) if date_where else ""
+
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            queries = []
+            params = []
+            if not partner_type or partner_type == "restaurant":
+                queries.append(
+                    f"SELECT id::text, 'restaurant' AS type, rating, comment, created_at, client_id::text AS reviewer_id FROM restaurant_reviews WHERE 1=1 {date_sql}"
+                )
+                params += date_params
+            if not partner_type or partner_type == "delivery":
+                queries.append(
+                    f"SELECT id::text, 'delivery' AS type, rating, comment, created_at, client_id::text AS reviewer_id FROM delivery_reviews WHERE 1=1 {date_sql}"
+                )
+                params += date_params
+
+            if not queries:
+                return _ok({"items": []})
+
+            union_sql = " UNION ALL ".join(queries)
+            cur.execute(
+                f"SELECT * FROM ({union_sql}) AS combined ORDER BY created_at DESC LIMIT %s",
+                params + [limit],
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                if r.get("created_at") and hasattr(r["created_at"], "isoformat"):
+                    r["created_at"] = r["created_at"].isoformat()
+            return _ok({"items": rows})
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.reviews failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@admin_gamification_bp.get("/rating-distribution")
+def admin_gamification_rating_distribution():
+    """GET /api/admin/gamification/rating-distribution — distribuição de notas de 1 a 5."""
+    _, err = _admin_required()
+    if err:
+        return err
+    partner_type = request.args.get("partner_type")
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+
+    date_where = []
+    params = []
+    if start_date:
+        date_where.append("created_at >= %s")
+        params.append(start_date)
+    if end_date:
+        date_where.append("created_at <= %s")
+        params.append(end_date)
+    date_sql = ("AND " + " AND ".join(date_where)) if date_where else ""
+
+    table = "delivery_reviews" if partner_type == "delivery" else "restaurant_reviews"
+
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT rating, COUNT(*)::int AS count
+                FROM {table}
+                WHERE rating BETWEEN 1 AND 5 {date_sql}
+                GROUP BY rating
+                ORDER BY rating
+                """,
+                params,
+            )
+            rows = {r["rating"]: r["count"] for r in cur.fetchall()}
+            distribution = [{"rating": i, "count": rows.get(i, 0)} for i in range(1, 6)]
+            return _ok({"distribution": distribution})
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.rating-distribution failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @admin_gamification_bp.get("/overview")
 def admin_gamification_overview():
     _, err = _admin_required()
