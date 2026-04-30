@@ -45,6 +45,8 @@ try:
     from src.routes.admin_logs import admin_logs_bp
     from src.routes.admin_users import admin_users_bp, legacy_admin_users_bp
     from src.routes.client import client_bp
+    from src.routes.settings import settings_bp
+    from src.routes.admin_permissions import admin_permissions_bp
     from src.routes.avaliacao.restaurante_reviews import restaurante_reviews_bp
     from src.routes.avaliacao.entregador_reviews import entregador_reviews_bp
     from src.routes.avaliacao.menu_item_reviews import menu_item_reviews_bp
@@ -170,6 +172,8 @@ app.register_blueprint(delivery_bp)
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
 app.register_blueprint(payouts_bp, url_prefix='/api/admin/payouts')
 app.register_blueprint(admin_logs_bp, url_prefix='/api/admin/logs')
+app.register_blueprint(settings_bp, url_prefix='/api/admin/settings')
+app.register_blueprint(admin_permissions_bp, url_prefix='/api/admin/permissions')
 
 # Users: oficial e legacy
 app.register_blueprint(admin_users_bp, url_prefix='/api/users')
