@@ -51,6 +51,7 @@ try:
     from src.routes.avaliacao.entregador_reviews import entregador_reviews_bp
     from src.routes.avaliacao.menu_item_reviews import menu_item_reviews_bp
     from src.routes.avaliacao.cliente_reviews import cliente_reviews_bp
+    from src.routes.public_restaurants import public_restaurants_bp
     from src.scheduler import start_scheduler
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
@@ -144,6 +145,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger
 # --- REGISTRO DE BLUEPRINTS ---
 app.register_blueprint(banners_bp, url_prefix='/api/banners')
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(public_restaurants_bp, url_prefix='/api/restaurants')
 app.register_blueprint(client_bp, url_prefix='/api/client')
 app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
