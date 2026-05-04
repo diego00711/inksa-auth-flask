@@ -378,6 +378,87 @@ def complete_delivery(order_id):
         if conn:
             conn.close()
 
+@delivery_orders_bp.route('/orders/<order_id>/cash-payment', methods=['POST'])
+@cross_origin()
+@delivery_token_required
+def confirm_cash_payment(order_id):
+    """Entregador confirma recebimento do dinheiro. Registra débito e atualiza perfil."""
+    conn = None
+    try:
+        profile_id = g.profile_id
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT o.id, o.status, o.payment_method, o.total_amount,
+                       o.delivery_fee, o.change_for, o.comissao_plataforma
+                FROM orders o
+                WHERE o.id = %s AND o.delivery_id = %s
+            """, (order_id, profile_id))
+            order = cur.fetchone()
+
+            if not order:
+                return jsonify({"status": "error", "message": "Pedido não encontrado"}), 404
+            if order['payment_method'] != 'cash':
+                return jsonify({"status": "error", "message": "Este pedido não é em dinheiro"}), 400
+            if order['status'] != 'delivered':
+                return jsonify({"status": "error", "message": "Pedido ainda não foi entregue"}), 400
+
+            cur.execute("SELECT id FROM cash_payment_records WHERE order_id = %s", (order_id,))
+            if cur.fetchone():
+                return jsonify({"status": "error", "message": "Pagamento em dinheiro já confirmado"}), 409
+
+            total_amount = float(order['total_amount'] or 0)
+            delivery_fee = float(order['delivery_fee'] or 0)
+            commission = float(order.get('comissao_plataforma') or 0)
+            if not commission:
+                rate = current_app.config.get('PLATFORM_COMMISSION_RATE', 0.10)
+                commission = round((total_amount - delivery_fee) * rate, 2)
+
+            restaurant_share = round(total_amount - delivery_fee - commission, 2)
+            cash_debt = round(total_amount - delivery_fee, 2)
+
+            cur.execute("""
+                INSERT INTO cash_payment_records
+                    (order_id, delivery_id, total_amount, delivery_fee, commission, restaurant_share, cash_debt)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (order_id, profile_id, total_amount, delivery_fee, commission, restaurant_share, cash_debt))
+
+            cur.execute("""
+                UPDATE delivery_profiles
+                SET cash_debt = COALESCE(cash_debt, 0) + %s,
+                    total_cash_received = COALESCE(total_cash_received, 0) + %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (cash_debt, total_amount, profile_id))
+
+            conn.commit()
+
+        return jsonify({
+            "status": "success",
+            "message": "Recebimento em dinheiro confirmado!",
+            "data": {
+                "voce_recebeu": total_amount,
+                "sua_taxa": delivery_fee,
+                "deve_a_plataforma": cash_debt,
+                "comissao": commission,
+                "repasse_restaurante": restaurant_share,
+            }
+        }), 200
+
+    except psycopg2.Error as e:
+        if conn: conn.rollback()
+        return jsonify({"status": "error", "message": "Erro de banco de dados", "detail": str(e)}), 500
+    except Exception as e:
+        if conn: conn.rollback()
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Erro interno do servidor", "detail": str(e)}), 500
+    finally:
+        if conn: conn.close()
+
+
 @delivery_orders_bp.route('/orders/pending', methods=['GET'])
 @cross_origin()
 @delivery_token_required

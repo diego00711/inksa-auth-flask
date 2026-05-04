@@ -30,9 +30,11 @@ def get_dashboard_stats():
             
             # Buscar perfil do entregador
             cur.execute("""
-                SELECT id, is_available, daily_goal, rating, total_deliveries, 
-                       online_minutes_today, distance_today
-                FROM delivery_profiles 
+                SELECT id, is_available, daily_goal, rating, total_deliveries,
+                       online_minutes_today, distance_today,
+                       COALESCE(cash_debt, 0) AS cash_debt,
+                       COALESCE(total_cash_received, 0) AS total_cash_received
+                FROM delivery_profiles
                 WHERE user_id = %s
             """, (user_id,))
             delivery_profile = cur.fetchone()
@@ -60,7 +62,9 @@ def get_dashboard_stats():
                 "nextPayment": {"date": "--/--", "amount": 0.0},
                 "streak": 0,
                 "peakHours": {"start": "11:30", "end": "13:30", "bonus": 1.5},
-                "is_available": delivery_profile.get('is_available', False)
+                "is_available": delivery_profile.get('is_available', False),
+                "cashDebt": float(delivery_profile.get('cash_debt') or 0.0),
+                "totalCashReceived": float(delivery_profile.get('total_cash_received') or 0.0),
             }
 
             # ✅ GANHOS E ENTREGAS DE HOJE
@@ -152,9 +156,10 @@ def get_dashboard_stats():
             logger.info(f"🚚 Buscando pedidos ativos para profile_id: {profile_id}")
             cur.execute("""
                 SELECT 
-                    o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, 
+                    o.id, o.status, o.total_amount, o.delivery_fee, o.created_at,
                     o.delivery_address, o.pickup_code,
-                    CONCAT(cp.first_name, ' ', cp.last_name) as client_name, 
+                    o.payment_method, o.change_for,
+                    CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
                     rp.restaurant_name,
                     rp.address_street, rp.address_number, rp.address_neighborhood
                 FROM orders o
@@ -179,7 +184,9 @@ def get_dashboard_stats():
                     'restaurant_street': order.get('address_street'),
                     'restaurant_number': order.get('address_number'),
                     'restaurant_neighborhood': order.get('address_neighborhood'),
-                    'pickup_code': order.get('pickup_code')
+                    'pickup_code': order.get('pickup_code'),
+                    'payment_method': order.get('payment_method'),
+                    'change_for': float(order.get('change_for') or 0.0),
                 })
             
             response_data["activeOrders"] = active_orders

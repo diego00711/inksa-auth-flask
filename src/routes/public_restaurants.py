@@ -176,6 +176,7 @@ def get_restaurant(restaurant_id):
                     phone,
                     category,
                     delivery_type,
+                    COALESCE(accepts_cash, TRUE) AS accepts_cash,
                     latitude,
                     longitude
                 FROM restaurant_profiles
