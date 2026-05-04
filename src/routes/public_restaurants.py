@@ -114,10 +114,10 @@ def list_restaurants():
                     COALESCE(cuisine_type, category)     AS cuisine_type,
                     category,
                     is_open,
-                    COALESCE(rating, 0)                  AS avg_rating,
+                    COALESCE(rating, 0)                  AS rating,
                     COALESCE(delivery_fee, 0)            AS delivery_fee,
-                    COALESCE(minimum_order, 0)           AS min_order_value,
-                    delivery_time                        AS estimated_time,
+                    COALESCE(minimum_order, 0)           AS minimum_order,
+                    delivery_time                        AS delivery_time,
                     delivery_type,
                     {dist_expr}                          AS distance_km
                 FROM restaurant_profiles
@@ -169,10 +169,10 @@ def get_restaurant(restaurant_id):
                         NULLIF(TRIM(COALESCE(address_state,        '')), '')
                     )                                             AS address,
                     is_open,
-                    COALESCE(rating, 0)                           AS avg_rating,
+                    COALESCE(rating, 0)                           AS rating,
                     COALESCE(delivery_fee, 0)                     AS delivery_fee,
-                    COALESCE(minimum_order, 0)                    AS min_order_value,
-                    delivery_time                                 AS estimated_time,
+                    COALESCE(minimum_order, 0)                    AS minimum_order,
+                    delivery_time                                 AS delivery_time,
                     phone,
                     category,
                     delivery_type,
