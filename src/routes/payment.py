@@ -91,30 +91,30 @@ def criar_preferencia_mercado_pago():
         
         dados_pedido = request.json
         logging.info(f"📦 Dados recebidos: {dados_pedido}")
-        
+
         if not dados_pedido:
             logging.error("❌ Dados do pedido não fornecidos")
             return jsonify({"erro": "Dados do pedido não fornecidos."}), 400
-        
-        # ✅ VALIDAÇÃO DO EMAIL (BLOQUEIA EMAILS DE TESTE)
+
+        payment_method = dados_pedido.get('payment_method', 'online')
+        change_for = float(dados_pedido.get('change_for') or 0)
+        logging.info(f"💳 Método de pagamento: {payment_method} | Troco para: {change_for}")
+
+        # ✅ VALIDAÇÃO DO EMAIL — apenas para pagamentos online (não em dinheiro)
         cliente_email = dados_pedido.get('cliente_email', '')
-        
-        if not cliente_email:
-            logging.error("❌ Email do cliente não fornecido!")
-            return jsonify({"erro": "Email do cliente é obrigatório."}), 400
-        
-        # Verificar se email contém palavras de teste
-        email_lower = cliente_email.lower()
-        palavras_proibidas = ['test', 'teste', 'exemplo', 'example', 'demo', 'testuser']
-        
-        if any(palavra in email_lower for palavra in palavras_proibidas):
-            logging.error(f"❌ Email inválido (contém palavra de teste): {cliente_email}")
-            return jsonify({
-                "erro": "Email inválido. Por favor, use um email real para realizar o pagamento.",
-                "detalhes": f"O email '{cliente_email}' parece ser um email de teste. Use seu email real."
-            }), 400
-        
-        logging.info(f"✅ Email validado: {cliente_email}")
+        if payment_method != 'cash':
+            if not cliente_email:
+                logging.error("❌ Email do cliente não fornecido!")
+                return jsonify({"erro": "Email do cliente é obrigatório."}), 400
+            email_lower = cliente_email.lower()
+            palavras_proibidas = ['test', 'teste', 'exemplo', 'example', 'demo', 'testuser']
+            if any(palavra in email_lower for palavra in palavras_proibidas):
+                logging.error(f"❌ Email inválido (contém palavra de teste): {cliente_email}")
+                return jsonify({
+                    "erro": "Email inválido. Por favor, use um email real para realizar o pagamento.",
+                    "detalhes": f"O email '{cliente_email}' parece ser um email de teste. Use seu email real."
+                }), 400
+            logging.info(f"✅ Email validado: {cliente_email}")
         
         # 🆕 PASSO 1: CRIAR O PEDIDO NO BANCO PRIMEIRO!
         import uuid
@@ -134,8 +134,8 @@ def criar_preferencia_mercado_pago():
             'id': pedido_id,
             'client_id': dados_pedido.get('client_id'),
             'restaurant_id': dados_pedido.get('restaurant_id'),
-            'delivery_id': None,  # ✅ NULL explícito - entregador será atribuído depois
-            'status': 'awaiting_payment',  # ✅ Status correto
+            'delivery_id': None,
+            'status': 'pending' if payment_method == 'cash' else 'awaiting_payment',
             'items': dados_pedido.get('itens', []),
             'total_amount_items': dados_pedido.get('total_amount_items', 0),
             'delivery_fee': dados_pedido.get('delivery_fee', 0),
@@ -145,9 +145,13 @@ def criar_preferencia_mercado_pago():
             'client_latitude': dados_pedido.get('client_latitude'),
             'client_longitude': dados_pedido.get('client_longitude'),
             'delivery_distance_km': dados_pedido.get('delivery_distance_km'),
+            'payment_method': payment_method,
+            'change_for': change_for,
             'created_at': datetime.utcnow().isoformat(),
             'updated_at': datetime.utcnow().isoformat()
         }
+        if payment_method == 'cash':
+            order_data['status_pagamento'] = 'pending_cash'
         
         logging.info(f"💾 PASSO 1: Criando pedido {pedido_id} no banco...")
         logging.info(f"🔑 Cliente Supabase configurado: {bool(supabase_client)}")
@@ -167,7 +171,7 @@ def criar_preferencia_mercado_pago():
                 
             logging.info(f"✅ Pedido {pedido_id} criado com sucesso no banco!")
             logging.info(f"📊 Dados do pedido inserido: {result.data}")
-            
+
         except Exception as e:
             error_message = str(e)
             logging.error(f"❌ Erro ao criar pedido no banco: {error_message}")
@@ -184,6 +188,15 @@ def criar_preferencia_mercado_pago():
                 
             return jsonify({"erro": "Erro ao criar pedido no banco de dados."}), 500
         
+        # ✅ Pedido em dinheiro: não passa pelo MP
+        if payment_method == 'cash':
+            logging.info(f"💵 Pedido em dinheiro {pedido_id} — sem processamento MP.")
+            return jsonify({
+                'mensagem': 'Pedido em dinheiro criado com sucesso!',
+                'pedido_id': pedido_id,
+                'payment_method': 'cash',
+            }), 200
+
         # ✅ PASSO 2: Processar itens para o Mercado Pago
         items_mp = []
         items_from_request = dados_pedido.get('itens', [])
