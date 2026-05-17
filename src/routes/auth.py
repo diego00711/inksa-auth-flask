@@ -1,6 +1,7 @@
-# src/routes/auth.py - VERSÃO COM LOGOUT, ME E FECHAMENTO AUTOMÁTICO
+# src/routes/auth.py - VERSÃO COM LOGOUT, ME, FECHAMENTO AUTOMÁTICO, REGISTER E FORGOT-PASSWORD
 
 import logging
+import re
 from flask import Blueprint, request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 
@@ -176,3 +177,130 @@ def logout():
             "status": "error",
             "error": "Erro ao realizar logout"
         }), 500
+
+
+# ✅ NOVO ENDPOINT: CADASTRO DE RESTAURANTE
+@auth_bp.route('/register', methods=['POST'])
+def register():
+    """
+    Cadastra um novo restaurante no Supabase Auth e cria o perfil inicial.
+    Campos obrigatórios: name, email, password
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "error": "Corpo da requisição inválido ou ausente"}), 400
+
+        name = (data.get('name') or '').strip()
+        email = (data.get('email') or '').strip().lower()
+        password = data.get('password') or ''
+
+        # --- Validações ---
+        if not name:
+            return jsonify({"status": "error", "error": "O campo 'name' é obrigatório"}), 400
+
+        if not email:
+            return jsonify({"status": "error", "error": "O campo 'email' é obrigatório"}), 400
+
+        email_regex = r'^[^\s@]+@[^\s@]+\.[^\s@]+$'
+        if not re.match(email_regex, email):
+            return jsonify({"status": "error", "error": "Formato de e-mail inválido"}), 400
+
+        if len(password) < 6:
+            return jsonify({"status": "error", "error": "A senha deve ter no mínimo 6 caracteres"}), 400
+
+        if not supabase:
+            logger.error("Supabase client não inicializado em /register")
+            return jsonify({"status": "error", "error": "Serviço de autenticação indisponível"}), 500
+
+        # --- Cria o usuário no Supabase Auth ---
+        try:
+            sign_up_response = supabase.auth.sign_up({
+                "email": email,
+                "password": password,
+                "options": {
+                    "data": {
+                        "name": name,
+                        "user_type": "restaurant"
+                    }
+                }
+            })
+        except Exception as auth_err:
+            err_msg = str(auth_err)
+            logger.warning(f"Erro ao criar usuário no Supabase Auth: {err_msg}")
+            # Supabase retorna erro específico para e-mail duplicado
+            if "already registered" in err_msg.lower() or "user already exists" in err_msg.lower() or "already been registered" in err_msg.lower():
+                return jsonify({"status": "error", "error": "E-mail já cadastrado"}), 409
+            return jsonify({"status": "error", "error": "Erro ao criar conta: " + err_msg}), 400
+
+        user = sign_up_response.user if sign_up_response else None
+        if not user:
+            # Supabase retorna user=None quando o e-mail já existe mas confirmação está desativada
+            return jsonify({"status": "error", "error": "E-mail já cadastrado"}), 409
+
+        user_id = str(user.id)
+        logger.info(f"Restaurante registrado: user_id={user_id}, email={email}")
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "message": "Cadastro realizado com sucesso",
+                "user": {
+                    "id": user_id,
+                    "email": user.email,
+                    "user_type": "restaurant"
+                }
+            }
+        }), 201
+
+    except Exception as e:
+        logger.error(f"Erro crítico em /register: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": "Erro interno ao realizar cadastro"}), 500
+
+
+# ✅ NOVO ENDPOINT: ESQUECI A SENHA
+@auth_bp.route('/forgot-password', methods=['POST'])
+def forgot_password():
+    """
+    Envia e-mail de reset de senha via Supabase Auth.
+    Por segurança, sempre retorna 200 independentemente de o e-mail existir ou não.
+    Campo obrigatório: email
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "error": "Corpo da requisição inválido ou ausente"}), 400
+
+        email = (data.get('email') or '').strip().lower()
+
+        # --- Validações ---
+        if not email:
+            return jsonify({"status": "error", "error": "O campo 'email' é obrigatório"}), 400
+
+        email_regex = r'^[^\s@]+@[^\s@]+\.[^\s@]+$'
+        if not re.match(email_regex, email):
+            return jsonify({"status": "error", "error": "Formato de e-mail inválido"}), 400
+
+        if not supabase:
+            logger.error("Supabase client não inicializado em /forgot-password")
+            return jsonify({"status": "error", "error": "Serviço de autenticação indisponível"}), 500
+
+        # --- Envia o e-mail de reset via Supabase Auth ---
+        try:
+            supabase.auth.reset_password_email(email)
+            logger.info(f"Reset de senha solicitado para: {email}")
+        except Exception as reset_err:
+            # Registra internamente mas NÃO revela ao cliente se o e-mail existe ou não
+            logger.warning(f"Erro ao enviar reset de senha para {email}: {reset_err}")
+
+        # Sempre retorna 200 por segurança (não revela se o e-mail está cadastrado)
+        return jsonify({
+            "status": "success",
+            "data": {
+                "message": "Se o e-mail estiver cadastrado, você receberá as instruções de recuperação em breve."
+            }
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Erro crítico em /forgot-password: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": "Erro interno ao processar solicitação"}), 500
