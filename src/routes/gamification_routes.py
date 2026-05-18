@@ -694,3 +694,296 @@ def admin_gamification_adjust_points(user_id):
         description=description,
     )
     return _ok(payload) if ok else _err(**payload)
+
+
+# ---------- Novos endpoints exigidos pela especificação ----------
+
+@gamification_bp.post("/award-points")
+def award_points():
+    """
+    POST /api/gamification/award-points
+    Body: {user_id, user_type, action, points}
+    Insere pontos no banco, verifica badges, retorna {success, total_points, badges_unlocked}
+    """
+    body = request.get_json(silent=True) or {}
+    user_id = body.get("user_id")
+    action = body.get("action", "manual")
+    try:
+        points = int(body.get("points", 0))
+    except (ValueError, TypeError):
+        return _err("'points' deve ser um número inteiro", 422)
+
+    if not user_id:
+        return _err("user_id é obrigatório", 422)
+    if points <= 0:
+        return _err("'points' deve ser maior que zero", 422)
+
+    ok, payload = _add_points_event(
+        user_id=user_id,
+        points=points,
+        event_type=action,
+        description=f"Pontos concedidos: {action}",
+    )
+    if not ok:
+        return _err(**payload)
+
+    # Verifica badges desbloqueados (gracioso se tabela não existir)
+    badges_unlocked = _check_and_award_badges(user_id, payload.get("total_points", 0))
+
+    return _ok({
+        "success": True,
+        "total_points": payload.get("total_points", 0),
+        "current_level": payload.get("current_level"),
+        "badges_unlocked": badges_unlocked,
+    })
+
+
+@gamification_bp.get("/user-points/<user_id>")
+def get_user_points(user_id):
+    """
+    GET /api/gamification/user-points/<user_id>
+    Retorna {points, level, next_level, progress_pct}
+    """
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT up.total_points, up.current_level, up.points_to_next_level,
+                       COALESCE(l.level_name, 'Bronze') AS level_name,
+                       COALESCE(l.points_required, 0) AS level_points_required
+                FROM public.user_points up
+                LEFT JOIN public.levels l ON l.level_number = up.current_level
+                WHERE up.user_id = %s
+            """, (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return _ok({
+                    "user_id": user_id,
+                    "points": 0,
+                    "level": 1,
+                    "level_name": "Bronze",
+                    "next_level": 2,
+                    "points_to_next_level": 500,
+                    "progress_pct": 0.0,
+                })
+
+            total = int(row["total_points"])
+            level = int(row["current_level"])
+            to_next = int(row["points_to_next_level"])
+            level_start = int(row["level_points_required"])
+
+            # Calcula porcentagem de progresso no nível atual
+            level_span = (level_start + to_next - level_start) if to_next > 0 else 1
+            points_in_level = total - level_start
+            progress_pct = round((points_in_level / (points_in_level + to_next)) * 100, 1) if (points_in_level + to_next) > 0 else 100.0
+
+            return _ok({
+                "user_id": user_id,
+                "points": total,
+                "level": level,
+                "level_name": row["level_name"],
+                "next_level": level + 1,
+                "points_to_next_level": to_next,
+                "progress_pct": progress_pct,
+            })
+    except Exception as e:
+        current_app.logger.exception("gamification.get_user_points failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@gamification_bp.get("/levels")
+def list_levels():
+    """
+    GET /api/gamification/levels
+    Lista os níveis disponíveis. Se a tabela não existir, retorna os níveis padrão.
+    Níveis padrão: Bronze(0), Prata(500), Ouro(1500), Platina(3000)
+    """
+    DEFAULT_LEVELS = [
+        {"level_number": 1, "level_name": "Bronze",  "points_required": 0},
+        {"level_number": 2, "level_name": "Prata",   "points_required": 500},
+        {"level_number": 3, "level_name": "Ouro",    "points_required": 1500},
+        {"level_number": 4, "level_name": "Platina", "points_required": 3000},
+    ]
+
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'levels'
+                ) AS exists
+            """)
+            if not cur.fetchone()["exists"]:
+                return _ok({"items": DEFAULT_LEVELS, "total": len(DEFAULT_LEVELS), "source": "default"})
+
+            cur.execute("""
+                SELECT level_number, level_name, points_required
+                FROM public.levels
+                ORDER BY level_number ASC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+            if not rows:
+                return _ok({"items": DEFAULT_LEVELS, "total": len(DEFAULT_LEVELS), "source": "default"})
+
+            return _ok({"items": rows, "total": len(rows), "source": "database"})
+    except Exception as e:
+        current_app.logger.exception("gamification.list_levels failed")
+        return _ok({"items": DEFAULT_LEVELS, "total": len(DEFAULT_LEVELS), "source": "default"})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@gamification_bp.get("/user-badges/<user_id>")
+def get_user_badges(user_id):
+    """
+    GET /api/gamification/user-badges/<user_id>
+    Retorna badges do usuário. Retorna lista vazia se tabela não existir.
+    """
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'user_badges'
+                ) AS ub_exists,
+                EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'badges'
+                ) AS b_exists
+            """)
+            exists = cur.fetchone()
+
+            if not exists["ub_exists"]:
+                return _ok({"items": [], "total": 0})
+
+            if exists["b_exists"]:
+                cur.execute("""
+                    SELECT ub.id, ub.badge_id, b.name AS badge_name,
+                           b.description, b.icon_url, ub.awarded_at
+                    FROM public.user_badges ub
+                    LEFT JOIN public.badges b ON b.id = ub.badge_id
+                    WHERE ub.user_id = %s
+                    ORDER BY ub.awarded_at DESC
+                """, (user_id,))
+            else:
+                cur.execute("""
+                    SELECT id, badge_id, awarded_at,
+                           NULL AS badge_name, NULL AS description, NULL AS icon_url
+                    FROM public.user_badges
+                    WHERE user_id = %s
+                    ORDER BY awarded_at DESC
+                """, (user_id,))
+
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["id"] = str(r["id"])
+                r["badge_id"] = str(r["badge_id"]) if r.get("badge_id") else None
+                if r.get("awarded_at") and hasattr(r["awarded_at"], "isoformat"):
+                    r["awarded_at"] = r["awarded_at"].isoformat()
+
+            return _ok({"items": rows, "total": len(rows)})
+    except Exception as e:
+        current_app.logger.exception("gamification.get_user_badges failed")
+        return _ok({"items": [], "total": 0})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# ---------- Helper: verifica e concede badges ----------
+
+def _check_and_award_badges(user_id: str, total_points: int) -> list:
+    """
+    Verifica se o usuário desbloqueou novos badges com base nos pontos atuais.
+    Retorna lista de nomes de badges desbloqueados nesta operação.
+    Falha graciosamente se as tabelas não existirem.
+    """
+    try:
+        conn = _db()
+        try:
+            with conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                    # Verifica se tabelas existem
+                    cur.execute("""
+                        SELECT
+                            EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='badges') AS b_exists,
+                            EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='user_badges') AS ub_exists
+                    """)
+                    ex = cur.fetchone()
+                    if not ex["b_exists"] or not ex["ub_exists"]:
+                        return []
+
+                    # Busca badges que o usuário ainda não tem mas já atingiu
+                    cur.execute("""
+                        SELECT b.id, b.name
+                        FROM public.badges b
+                        WHERE b.points_required <= %s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM public.user_badges ub
+                              WHERE ub.badge_id = b.id AND ub.user_id = %s
+                          )
+                    """, (total_points, user_id))
+                    new_badges = cur.fetchall()
+
+                    if not new_badges:
+                        return []
+
+                    unlocked = []
+                    for badge in new_badges:
+                        cur.execute("""
+                            INSERT INTO public.user_badges (id, user_id, badge_id, awarded_at)
+                            VALUES (gen_random_uuid(), %s, %s, NOW())
+                            ON CONFLICT DO NOTHING
+                        """, (user_id, badge["id"]))
+                        unlocked.append(badge["name"])
+
+                    return unlocked
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        current_app.logger.exception("gamification._check_and_award_badges failed silently")
+        return []
+
+
+# ---------- Helper público: concede pontos ao completar pedido ----------
+
+def award_completion_points(user_id: str, user_type: str, order_id: str = None) -> bool:
+    """
+    Concede pontos ao completar um pedido:
+      - cliente: +50 pontos (event_type='order_delivered_client')
+      - entregador: +30 pontos (event_type='order_delivered_delivery')
+    Retorna True se sucesso, False caso contrário.
+    Chamado de orders.py no endpoint /complete.
+    """
+    POINTS_MAP = {
+        "client": 50,
+        "delivery": 30,
+    }
+    points = POINTS_MAP.get(user_type)
+    if not points:
+        return False
+
+    event_type = f"order_delivered_{user_type}"
+    ok, _ = _add_points_event(
+        user_id=user_id,
+        points=points,
+        event_type=event_type,
+        description=f"Pedido entregue — {user_type}",
+        order_id=order_id,
+    )
+    return ok

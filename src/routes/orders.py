@@ -10,6 +10,11 @@ import psycopg2.extras
 import logging
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 
+try:
+    from .gamification_routes import award_completion_points as _award_completion_points
+except Exception:
+    _award_completion_points = None
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
@@ -327,8 +332,29 @@ def complete_order(order_id):
                 "UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = %s",
                 (str(order_id),)
             )
+            # Busca client_id e delivery_id antes de fechar o cursor
+            cur.execute(
+                "SELECT client_id, delivery_id FROM orders WHERE id = %s",
+                (str(order_id),)
+            )
+            completed_order = cur.fetchone()
             conn.commit()
             logger.info(f"✅ Pedido {order_id} marcado como entregue!")
+
+            # Concede pontos de gamificação (gracioso: não quebra o fluxo se falhar)
+            if _award_completion_points and completed_order:
+                try:
+                    if completed_order['client_id']:
+                        _award_completion_points(
+                            str(completed_order['client_id']), 'client', str(order_id)
+                        )
+                    if completed_order['delivery_id']:
+                        _award_completion_points(
+                            str(completed_order['delivery_id']), 'delivery', str(order_id)
+                        )
+                except Exception as _gam_err:
+                    logger.warning(f"Gamificação: falha ao conceder pontos para pedido {order_id}: {_gam_err}")
+
             return jsonify({"status": "success", "message": "Pedido entregue com sucesso!"}), 200
 
     except Exception as e:
