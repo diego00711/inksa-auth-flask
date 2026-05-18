@@ -54,6 +54,10 @@ try:
     from src.routes.avaliacao.menu_item_reviews import menu_item_reviews_bp
     from src.routes.avaliacao.cliente_reviews import cliente_reviews_bp
     from src.routes.public_restaurants import public_restaurants_bp
+    from src.routes.fcm_routes import fcm_bp
+    from src.routes.tracking_routes import tracking_bp
+    from src.routes.coupons_routes import coupons_bp
+    from src.routes.chat_routes import chat_bp
     from src.scheduler import start_scheduler
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
@@ -173,6 +177,12 @@ delivery_bp.register_blueprint(delivery_orders_bp, url_prefix='/orders')
 delivery_bp.register_blueprint(delivery_stats_earnings_bp, url_prefix='/stats')
 delivery_bp.register_blueprint(delivery_calculator_bp)
 app.register_blueprint(delivery_bp)
+
+# --- Novas Features: FCM, Rastreamento, Cupons, Chat ---
+app.register_blueprint(fcm_bp, url_prefix='/api/profile')
+app.register_blueprint(tracking_bp, url_prefix='/api/deliveries')
+app.register_blueprint(coupons_bp, url_prefix='/api/coupons')
+app.register_blueprint(chat_bp, url_prefix='/api/chat')
 
 # --- Rotas de Admin ---
 app.register_blueprint(admin_bp, url_prefix='/api/admin')

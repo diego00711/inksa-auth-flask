@@ -15,6 +15,31 @@ try:
 except Exception:
     _award_completion_points = None
 
+try:
+    from ..services.notification_service import send_push_notification as _send_push
+except Exception:
+    _send_push = None
+
+
+def _get_fcm_token(cur, table: str, user_id: str):
+    """Busca fcm_token de um perfil. Retorna None silenciosamente se falhar."""
+    try:
+        cur.execute(f"SELECT fcm_token FROM {table} WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return row['fcm_token'] if row else None
+    except Exception:
+        return None
+
+
+def _notify(token, title, body, data=None):
+    """Dispara push notification de forma defensiva — nunca propaga exceções."""
+    if not _send_push or not token:
+        return
+    try:
+        _send_push(token, title, body, data or {})
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
@@ -179,6 +204,15 @@ def handle_orders():
                 new_order.pop('pickup_code', None)
                 new_order.pop('delivery_code', None)
 
+                # FCM: notifica restaurante sobre novo pedido
+                try:
+                    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
+                        rest_token = _get_fcm_token(_ncur, 'restaurant_profiles', new_order['restaurant_id'])
+                    _notify(rest_token, "Novo pedido recebido!", "Voce tem um novo pedido para confirmar",
+                            {"order_id": new_order['id']})
+                except Exception as _e:
+                    logger.warning(f"FCM pedido criado: {_e}")
+
                 logger.info(f"✅ Pedido {new_order['id']} criado com sucesso! Aguardando pagamento...")
                 return jsonify(new_order), 201
 
@@ -237,6 +271,27 @@ def update_order_status(order_id):
             updated_order = dict(cur.fetchone())
             conn.commit()
 
+            # FCM: notificacoes por mudanca de status
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
+                    if new_status_internal == 'accepted':
+                        # Notifica cliente
+                        cli_token = _get_fcm_token(_ncur, 'client_profiles', str(updated_order['client_id']))
+                        _notify(cli_token, "Pedido aceito! 🎉", "Seu pedido foi confirmado pelo restaurante",
+                                {"order_id": str(order_id), "status": "accepted"})
+                    elif new_status_internal == 'ready':
+                        # Notifica entregadores disponíveis (broadcast: busca todos com fcm_token)
+                        try:
+                            _ncur.execute("SELECT fcm_token FROM delivery_profiles WHERE fcm_token IS NOT NULL LIMIT 50")
+                            for _drow in _ncur.fetchall():
+                                _notify(_drow['fcm_token'], "Entrega disponivel! 🛵",
+                                        "Um pedido esta pronto para coleta",
+                                        {"order_id": str(order_id), "status": "ready"})
+                        except Exception:
+                            pass
+            except Exception as _e:
+                logger.warning(f"FCM update_order_status: {_e}")
+
             updated_order.pop('pickup_code', None)
             updated_order.pop('delivery_code', None)
             return jsonify(updated_order), 200
@@ -283,8 +338,27 @@ def pickup_order(order_id):
                 return jsonify({"error": "Código de retirada inválido"}), 403
 
             cur.execute("UPDATE orders SET status = 'delivering', updated_at = NOW() WHERE id = %s", (str(order_id),))
+            # Busca client_id para notificação antes do commit
+            cur.execute("SELECT client_id FROM orders WHERE id = %s", (str(order_id),))
+            _pickup_row = cur.fetchone()
             conn.commit()
             logger.info(f"✅ Pedido {order_id} confirmado como retirado. Status: delivering")
+
+            # FCM: notifica cliente que pedido foi coletado
+            try:
+                if _pickup_row and _pickup_row['client_id']:
+                    _nc_pickup = get_db_connection()
+                    if _nc_pickup:
+                        try:
+                            with _nc_pickup.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur_pickup:
+                                cli_token = _get_fcm_token(_ncur_pickup, 'client_profiles', str(_pickup_row['client_id']))
+                                _notify(cli_token, "Pedido a caminho! 🛵", "Seu pedido foi retirado e esta sendo entregue",
+                                        {"order_id": str(order_id), "status": "delivering"})
+                        finally:
+                            _nc_pickup.close()
+            except Exception as _e:
+                logger.warning(f"FCM pickup_order: {_e}")
+
             return jsonify({"status": "success", "message": "Pedido retirado e em rota de entrega."}), 200
 
     except Exception as e:
@@ -340,6 +414,21 @@ def complete_order(order_id):
             completed_order = cur.fetchone()
             conn.commit()
             logger.info(f"✅ Pedido {order_id} marcado como entregue!")
+
+            # FCM: notifica cliente que pedido foi entregue
+            try:
+                if completed_order and completed_order['client_id']:
+                    _nc2 = get_db_connection()
+                    if _nc2:
+                        try:
+                            with _nc2.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur_del:
+                                cli_token = _get_fcm_token(_ncur_del, 'client_profiles', str(completed_order['client_id']))
+                                _notify(cli_token, "Pedido entregue! ⭐", "Avalie sua experiencia com o restaurante",
+                                        {"order_id": str(order_id), "status": "delivered"})
+                        finally:
+                            _nc2.close()
+            except Exception as _e:
+                logger.warning(f"FCM complete_order: {_e}")
 
             # Concede pontos de gamificação (gracioso: não quebra o fluxo se falhar)
             if _award_completion_points and completed_order:
