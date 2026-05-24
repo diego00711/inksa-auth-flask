@@ -15,7 +15,7 @@ import re
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 
-SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "https://0ab4c11f20659cb2404109e7e177f018@o4511445143912448.ingest.us.sentry.io/4511445160099840")
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
