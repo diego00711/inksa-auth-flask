@@ -79,6 +79,38 @@ def _run_payouts_job() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Expire pending payments job
+# ---------------------------------------------------------------------------
+
+def _expire_pending_payments_job() -> None:
+    """Cancela pedidos em status 'awaiting_payment' criados há mais de 30 minutos."""
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    logger.info("[SCHEDULER] Iniciando expiração de pedidos awaiting_payment")
+    try:
+        from supabase import create_client as _create_client
+        _url = os.environ.get("SUPABASE_URL")
+        _key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        if not _url or not _key:
+            logger.error("[SCHEDULER] Supabase não configurado — job de expiração abortado")
+            return
+        _sb = _create_client(_url, _key)
+        threshold = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        result = _sb.table("orders").update({
+            "status": "cancelled",
+            "cancellation_reason": "payment_timeout",
+        }).eq("status", "awaiting_payment").lt("created_at", threshold).execute()
+        expired_count = len(result.data) if result.data else 0
+        if expired_count:
+            logger.info("[SCHEDULER] %d pedido(s) expirado(s) por timeout de pagamento", expired_count)
+        else:
+            logger.info("[SCHEDULER] Nenhum pedido para expirar")
+    except Exception:
+        logger.exception("[SCHEDULER] Erro no job de expiração de pagamentos")
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -114,6 +146,16 @@ def start_scheduler(app=None) -> None:
         replace_existing=True,
         misfire_grace_time=3600,  # tolerate up to 1-hour misfire (e.g. cold start)
     )
+    _scheduler.add_job(
+        func=_expire_pending_payments_job,
+        trigger="interval",
+        minutes=30,
+        id="expire_pending_payments",
+        name="Cancel stale awaiting_payment orders",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    logger.info("[SCHEDULER] Job de expiração de pagamentos: a cada 30 minutos")
     _scheduler.start()
 
     logger.info(
