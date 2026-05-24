@@ -787,6 +787,76 @@ def accept_order_by_delivery(order_id):
             conn.close()
             logger.info("Conexão com banco fechada em accept_order_by_delivery")
 
+@orders_bp.route('/<uuid:order_id>/restaurant-accept', methods=['PATCH'])
+def restaurant_accept_order(order_id):
+    """Restaurante aceita pedido informando tempo estimado de preparo."""
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'restaurant':
+            return jsonify({"error": "Apenas restaurantes podem aceitar pedidos"}), 403
+
+        data = request.get_json(silent=True) or {}
+        estimated_prep_time = data.get('estimated_time')  # minutos (int)
+        if estimated_prep_time is not None:
+            try:
+                estimated_prep_time = int(estimated_prep_time)
+            except (ValueError, TypeError):
+                estimated_prep_time = None
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT o.id, o.status, o.client_id
+                FROM orders o
+                JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                WHERE o.id = %s AND rp.user_id = %s
+            """, (str(order_id), user_auth_id))
+            order = cur.fetchone()
+            if not order:
+                return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
+
+            if order['status'] != 'pending':
+                return jsonify({"error": f"Pedido não está pendente (status atual: {order['status']})"}), 400
+
+            cur.execute("""
+                UPDATE orders
+                SET status = 'accepted',
+                    accepted_at = NOW(),
+                    estimated_prep_time = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (estimated_prep_time, str(order_id)))
+            updated = dict(cur.fetchone())
+            conn.commit()
+
+            updated.pop('pickup_code', None)
+            updated.pop('delivery_code', None)
+
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
+                    cli_token = _get_fcm_token(_ncur, 'client_profiles', str(updated.get('client_id', '')))
+                    prep_msg = f" Tempo estimado: {estimated_prep_time} min." if estimated_prep_time else ""
+                    _notify(cli_token, "Pedido aceito! 🎉",
+                            f"O restaurante confirmou seu pedido.{prep_msg}",
+                            {"order_id": str(order_id), "status": "accepted"})
+            except Exception as _e:
+                logger.warning(f"FCM restaurant_accept_order: {_e}")
+
+            return jsonify(updated), 200
+    except Exception as e:
+        logger.error(f"Erro em restaurant_accept_order: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 # === MANTIDO: expor o pickup_code com permissão adequada
 @orders_bp.route('/<uuid:order_id>/pickup-code', methods=['GET'])
 def get_pickup_code_for_delivery_or_restaurant(order_id):

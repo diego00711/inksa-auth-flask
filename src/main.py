@@ -73,6 +73,7 @@ try:
     from src.routes.tracking_routes import tracking_bp
     from src.routes.coupons_routes import coupons_bp
     from src.routes.chat_routes import chat_bp
+    from src.routes.club_routes import club_bp
     from src.scheduler import start_scheduler
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
@@ -211,6 +212,7 @@ app.register_blueprint(fcm_bp, url_prefix='/api/profile')
 app.register_blueprint(tracking_bp, url_prefix='/api/deliveries')
 app.register_blueprint(coupons_bp, url_prefix='/api/coupons')
 app.register_blueprint(chat_bp, url_prefix='/api/chat')
+app.register_blueprint(club_bp, url_prefix='/api/club')
 
 # --- Rotas de Admin ---
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
