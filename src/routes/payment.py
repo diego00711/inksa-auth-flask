@@ -7,6 +7,7 @@ import os
 import logging
 import hmac
 import hashlib
+import eventlet
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,11 +36,13 @@ else:
 
 
 def verify_mp_signature(req, secret):
-    """Verifica a assinatura da notificação de webhook do Mercado Pago."""
+    """Verifica a assinatura da notificação de webhook do Mercado Pago.
+    Retorna True apenas se a assinatura for válida. Retorna False em qualquer falha.
+    """
     signature_header = req.headers.get('X-Signature')
     if not signature_header:
-        logging.warning("⚠️ Webhook recebido SEM X-Signature - processando mesmo assim")
-        return True
+        logging.warning("⚠️ Webhook recebido SEM X-Signature — rejeitando")
+        return False
 
     try:
         parts = {p.split('=')[0]: p.split('=')[1] for p in signature_header.split(',')}
@@ -47,16 +50,16 @@ def verify_mp_signature(req, secret):
         signature_hash = parts.get('v1')
 
         if not ts or not signature_hash:
-            logging.warning("⚠️ Cabeçalho X-Signature com formato inválido - processando mesmo assim")
-            return True
-            
+            logging.warning("⚠️ Cabeçalho X-Signature com formato inválido — rejeitando")
+            return False
+
         notification_id = req.args.get('id')
         if not notification_id:
             json_data = req.get_json(silent=True)
             if json_data and 'data' in json_data and 'id' in json_data['data']:
-                 notification_id = json_data['data']['id']
+                notification_id = json_data['data']['id']
             else:
-                notification_id = req.args.get('id', 'id_not_found')
+                notification_id = 'id_not_found'
 
         manifest_string = f"id:{notification_id};ts:{ts};"
 
@@ -67,17 +70,17 @@ def verify_mp_signature(req, secret):
         ).hexdigest()
 
         is_valid = hmac.compare_digest(local_signature, signature_hash)
-        
+
         if is_valid:
             logging.info("✅ Assinatura do webhook VÁLIDA!")
         else:
-            logging.warning("⚠️ Assinatura do webhook INVÁLIDA - mas processando mesmo assim")
-            
-        return True
-        
+            logging.warning("⚠️ Assinatura do webhook INVÁLIDA — rejeitando")
+
+        return is_valid
+
     except Exception as e:
-        logging.error(f"❌ Erro ao validar assinatura: {e} - processando mesmo assim")
-        return True
+        logging.error(f"❌ Erro ao validar assinatura: {e} — rejeitando por segurança")
+        return False
 
 
 @mp_payment_bp.route('/pagamentos/criar_preferencia', methods=['POST'])
@@ -188,6 +191,39 @@ def criar_preferencia_mercado_pago():
                 
             return jsonify({"erro": "Erro ao criar pedido no banco de dados."}), 500
         
+        # --- VUL-08: Revalidação de cupom no backend ---
+        coupon_code = dados_pedido.get('coupon_code', '').strip()
+        backend_discount = 0.0
+        if coupon_code:
+            try:
+                coupon_result = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).eq('is_active', True).execute()
+                if coupon_result.data:
+                    coupon = coupon_result.data[0]
+                    order_subtotal = float(dados_pedido.get('total_amount_items', 0))
+                    min_order = float(coupon.get('min_order_amount') or 0)
+                    if order_subtotal >= min_order:
+                        if coupon.get('discount_type') == 'percentage':
+                            backend_discount = round(order_subtotal * float(coupon.get('discount_value', 0)) / 100, 2)
+                        else:
+                            backend_discount = round(float(coupon.get('discount_value', 0)), 2)
+                        # Cap discount to subtotal
+                        backend_discount = min(backend_discount, order_subtotal)
+                        logging.info(f"✅ Cupom '{coupon_code}' validado no backend — desconto: R${backend_discount:.2f}")
+                    else:
+                        logging.warning(f"⚠️ Cupom '{coupon_code}' inválido: pedido mínimo não atingido")
+                else:
+                    logging.warning(f"⚠️ Cupom '{coupon_code}' não encontrado ou inativo — desconto ignorado")
+            except Exception as _coupon_err:
+                logging.warning(f"⚠️ Falha ao validar cupom no backend: {_coupon_err} — desconto ignorado")
+
+        # Corrigir total_amount com desconto validado pelo backend
+        if backend_discount > 0:
+            raw_total = float(dados_pedido.get('total_amount_items', 0)) + float(dados_pedido.get('delivery_fee', 0))
+            corrected_total = max(0.0, raw_total - backend_discount)
+            order_data['total_amount'] = round(corrected_total, 2)
+            logging.info(f"✅ total_amount corrigido para R${corrected_total:.2f} (desconto backend: R${backend_discount:.2f})")
+        # --- Fim VUL-08 ---
+
         # ✅ Pedido em dinheiro: não passa pelo MP
         if payment_method == 'cash':
             logging.info(f"💵 Pedido em dinheiro {pedido_id} — sem processamento MP.")
@@ -200,38 +236,58 @@ def criar_preferencia_mercado_pago():
         # ✅ PASSO 2: Processar itens para o Mercado Pago
         items_mp = []
         items_from_request = dados_pedido.get('itens', [])
-        
-        logging.info(f"📋 Processando {len(items_from_request)} itens...")
-        
+
+        logging.info(f"📋 Processando e validando preços de {len(items_from_request)} itens...")
+
         for idx, item in enumerate(items_from_request):
             try:
-                # Converte valores para os tipos corretos
-                preco = float(item.get('unit_price', 0))
                 quantidade = int(item.get('quantity', 1))
                 titulo = str(item.get('title', f'Item {idx + 1}'))
-                
-                if preco > 0 and quantidade > 0:
-                    # Cria item com tipos corretos (número, não string)
-                    item_corrigido = {
-                        'title': titulo,
-                        'quantity': quantidade,
-                        'unit_price': preco  # ✅ Sempre número float
-                    }
-                    items_mp.append(item_corrigido)
-                    logging.info(f"✅ Item {idx + 1} adicionado: {titulo} - R$ {preco} x {quantidade}")
-                else:
-                    logging.warning(f"⚠️ Item {idx + 1} ignorado (preço ou quantidade inválidos): {item}")
-                    
+                menu_item_id = item.get('menu_item_id')
+
+                # Itens SEM menu_item_id (ex: Taxa de Entrega) — confiar no valor enviado
+                if not menu_item_id:
+                    preco = float(item.get('unit_price', 0))
+                    if preco > 0 and quantidade > 0:
+                        items_mp.append({'title': titulo, 'quantity': quantidade, 'unit_price': preco})
+                    continue
+
+                # Itens COM menu_item_id — validar preço contra o banco
+                db_result = supabase_client.table('menu_items').select('price, name').eq('id', menu_item_id).execute()
+                if not db_result.data:
+                    logging.error(f"❌ Item {menu_item_id} não encontrado no banco — pedido rejeitado")
+                    supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                    return jsonify({"erro": f"Item de cardápio inválido: {titulo}"}), 400
+
+                preco_real = float(db_result.data[0]['price'])
+                preco_frontend = float(item.get('unit_price', 0))
+
+                if abs(preco_real - preco_frontend) > 0.01:
+                    logging.error(f"❌ Preço inválido para '{titulo}': frontend={preco_frontend}, banco={preco_real}")
+                    supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                    return jsonify({
+                        "erro": "Preço dos itens inválido. Recarregue a página e tente novamente.",
+                        "item": titulo
+                    }), 400
+
+                if preco_real > 0 and quantidade > 0:
+                    items_mp.append({'title': titulo, 'quantity': quantidade, 'unit_price': preco_real})
+                    logging.info(f"✅ Item '{titulo}' validado: R${preco_real:.2f} × {quantidade}")
+
             except (ValueError, TypeError) as e:
-                logging.error(f"❌ Erro ao processar item {idx + 1}: {e} - Item: {item}")
+                logging.error(f"❌ Erro ao processar item {idx + 1}: {e}")
                 continue
-        
-        if not items_mp:
+
+        # Aplicar desconto de cupom nos itens do MP (adiciona item negativo)
+        if backend_discount > 0:
+            items_mp.append({'title': f'Desconto Cupom {coupon_code}', 'quantity': 1, 'unit_price': -backend_discount})
+            logging.info(f"✅ Desconto de cupom R${backend_discount:.2f} adicionado aos itens MP")
+
+        if not items_mp or all(i['unit_price'] <= 0 for i in items_mp if i.get('title') != f'Desconto Cupom {coupon_code}'):
             logging.error("❌ Nenhum item válido para processar!")
-            # Deletar pedido que foi criado
             supabase_client.table('orders').delete().eq('id', pedido_id).execute()
             return jsonify({"erro": "A lista de itens está vazia ou todos os itens têm valor zero."}), 400
-        
+
         logging.info(f"✅ Total de itens válidos: {len(items_mp)}")
         
         # ✅ PASSO 3: Criar preferência no Mercado Pago
@@ -309,8 +365,10 @@ def mercadopago_webhook():
     webhook_secret = os.environ.get("MERCADO_PAGO_WEBHOOK_SECRET")
     
     if webhook_secret:
-        verify_mp_signature(request, webhook_secret)
-    
+        if not verify_mp_signature(request, webhook_secret):
+            logging.warning("⚠️ Webhook rejeitado: assinatura inválida")
+            return jsonify({'error': 'Assinatura inválida'}), 401
+
     logging.info("=" * 80)
     logging.info("✅ === WEBHOOK DO MERCADO PAGO RECEBIDO ===")
     logging.info("=" * 80)
@@ -359,8 +417,17 @@ def mercadopago_webhook():
             logging.info("=" * 80)
             
             if status == 'approved':
+                # Verificação de idempotência: evitar processar o mesmo pagamento duas vezes
+                try:
+                    existing = supabase_client.table('orders').select('id').eq('id_transacao_mp', resource_id).execute()
+                    if existing.data:
+                        logging.info(f"⚠️ Pagamento {resource_id} já processado anteriormente — ignorando duplicata")
+                        return jsonify({'status': 'already_processed'}), 200
+                except Exception as _idem_err:
+                    logging.warning(f"⚠️ Falha na verificação de idempotência: {_idem_err} — continuando")
+
                 logging.info(f"✅ Pagamento {resource_id} APROVADO! Iniciando atualização do pedido...")
-                
+
                 # 🔍 DIAGNÓSTICO: Buscar o pedido ANTES de atualizar (COM RETRY)
                 logging.info(f"🔍 PASSO 1: Buscando pedido {external_reference} no Supabase...")
                 response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).execute()
@@ -369,7 +436,7 @@ def mercadopago_webhook():
                 if not response_supabase.data:
                     logging.warning(f"⚠️ Pedido não encontrado na primeira tentativa. Aguardando 3 segundos...")
                     import time
-                    time.sleep(3)
+                    eventlet.sleep(3)
                     logging.info(f"🔄 RETRY: Buscando pedido {external_reference} novamente...")
                     response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).execute()
                 
@@ -386,10 +453,14 @@ def mercadopago_webhook():
                     logging.info(f"   Status pagamento atual: {pedido_do_bd.get('status_pagamento')}")
                     
                     valor_total_itens = float(pedido_do_bd.get('total_amount_items', 0.0))
-                    
+
                     comissao_plataforma = valor_total_itens * current_app.config['PLATFORM_COMMISSION_RATE']
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
-                    valor_para_entregador = float(pedido_do_bd.get('delivery_fee', 0.0))
+
+                    # Entregador recebe a taxa de entrega menos a comissão da plataforma sobre entrega
+                    _delivery_commission_rate = float(os.environ.get('DELIVERY_COMMISSION_RATE', '0.15'))
+                    delivery_fee = float(pedido_do_bd.get('delivery_fee', 0.0))
+                    valor_para_entregador = round(delivery_fee * (1 - _delivery_commission_rate), 2)
                     
                     # ✅ DADOS QUE SERÃO ATUALIZADOS
                     update_data = {
@@ -457,7 +528,7 @@ def mercadopago_webhook():
                 if not check_order.data:
                     logging.warning(f"⚠️ Pedido não encontrado. Aguardando 3 segundos...")
                     import time
-                    time.sleep(3)
+                    eventlet.sleep(3)
                     logging.info(f"🔄 RETRY: Verificando pedido {external_reference} novamente...")
                     check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
                 
@@ -478,16 +549,18 @@ def mercadopago_webhook():
                 if not check_order.data:
                     logging.warning(f"⚠️ Pedido não encontrado. Aguardando 3 segundos...")
                     import time
-                    time.sleep(3)
+                    eventlet.sleep(3)
                     logging.info(f"🔄 RETRY: Verificando pedido {external_reference} novamente...")
                     check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
                 
                 if check_order.data:
                     supabase_client.table('orders').update({
-                        'status_pagamento': status,
-                        'id_transacao_mp': resource_id
+                        'status': 'cancelled',
+                        'status_pagamento': 'rejected',
+                        'id_transacao_mp': resource_id,
+                        'cancellation_reason': 'payment_rejected'
                     }).eq('id', external_reference).execute()
-                    logging.info(f"✅ Pedido {external_reference} marcado como pagamento rejeitado")
+                    logging.info(f"✅ Pedido {external_reference} cancelado — pagamento rejeitado")
                 else:
                     logging.error(f"❌ Pedido {external_reference} não encontrado mesmo após retry!")
 
