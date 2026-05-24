@@ -457,10 +457,7 @@ def mercadopago_webhook():
                     comissao_plataforma = valor_total_itens * current_app.config['PLATFORM_COMMISSION_RATE']
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
 
-                    # Entregador recebe a taxa de entrega menos a comissão da plataforma sobre entrega
-                    _delivery_commission_rate = float(os.environ.get('DELIVERY_COMMISSION_RATE', '0.15'))
-                    delivery_fee = float(pedido_do_bd.get('delivery_fee', 0.0))
-                    valor_para_entregador = round(delivery_fee * (1 - _delivery_commission_rate), 2)
+                    valor_para_entregador = float(pedido_do_bd.get('delivery_fee', 0.0))  # entregador recebe 100% do frete
                     
                     # ✅ DADOS QUE SERÃO ATUALIZADOS
                     update_data = {
