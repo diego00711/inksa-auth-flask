@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 # src/routes/gamification_routes.py
+import os
 import uuid
 import traceback
 from functools import wraps
+from datetime import datetime
 
 from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 import psycopg2.extras
 
-from ..utils.helpers import get_user_id_from_token
+from ..utils.helpers import get_user_id_from_token, supabase
 
 _CORS_ORIGINS = [
     "http://localhost:3000", "http://127.0.0.1:3000",
@@ -1405,3 +1407,63 @@ def mark_redemption_delivered(redemption_id):
     finally:
         try: conn.close()
         except Exception: pass
+
+
+_REWARD_IMG_BUCKET = "rewards-images"
+_REWARD_IMG_ALLOWED = {"jpg", "jpeg", "png", "webp"}
+_REWARD_IMG_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+
+
+@gamification_bp.post("/rewards/upload-image")
+def upload_reward_image():
+    """POST /api/gamification/rewards/upload-image — upload de imagem de recompensa (admin)."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+
+    if "image" not in request.files:
+        return _err("Nenhum arquivo enviado (campo 'image')", 400)
+
+    file = request.files["image"]
+    if not file or file.filename == "":
+        return _err("Arquivo vazio", 400)
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in _REWARD_IMG_ALLOWED:
+        return _err(f"Tipo não permitido. Use: {', '.join(_REWARD_IMG_ALLOWED)}", 400)
+
+    file.seek(0, os.SEEK_END)
+    size = file.tell()
+    file.seek(0)
+    if size > _REWARD_IMG_MAX_BYTES:
+        return _err("Arquivo muito grande. Máximo: 2 MB", 400)
+
+    unique_name = f"reward_{uuid.uuid4().hex}_{int(datetime.now().timestamp())}.{ext}"
+    content_type = "image/jpeg" if ext == "jpg" else f"image/{ext}"
+
+    try:
+        file_content = file.read()
+        supabase.storage.from_(_REWARD_IMG_BUCKET).upload(
+            path=unique_name,
+            file=file_content,
+            file_options={"content-type": content_type},
+        )
+
+        try:
+            url_resp = supabase.storage.from_(_REWARD_IMG_BUCKET).get_public_url(unique_name)
+            if hasattr(url_resp, "data"):
+                public_url = url_resp.data
+            elif hasattr(url_resp, "publicURL"):
+                public_url = url_resp.publicURL
+            elif isinstance(url_resp, str):
+                public_url = url_resp
+            else:
+                raise ValueError("URL desconhecida")
+        except Exception:
+            supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+            public_url = f"{supabase_url}/storage/v1/object/public/{_REWARD_IMG_BUCKET}/{unique_name}"
+
+        return _ok({"url": public_url, "filename": unique_name})
+    except Exception as e:
+        current_app.logger.exception("gamification.upload_reward_image failed")
+        return _err("Erro ao fazer upload da imagem", 500, detail=str(e))
