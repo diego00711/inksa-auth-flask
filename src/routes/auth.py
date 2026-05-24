@@ -4,11 +4,13 @@ import logging
 import re
 from flask import Blueprint, request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from src.extensions import limiter
 
 auth_bp = Blueprint('auth_bp', __name__)
 logger = logging.getLogger(__name__)
 
 @auth_bp.route('/login', methods=['POST'])
+@limiter.limit("10 per minute")
 def login():
     try:
         data = request.get_json()
@@ -181,6 +183,7 @@ def logout():
 
 # ✅ NOVO ENDPOINT: CADASTRO DE RESTAURANTE
 @auth_bp.route('/register', methods=['POST'])
+@limiter.limit("5 per minute")
 def register():
     """
     Cadastra um novo restaurante no Supabase Auth e cria o perfil inicial.

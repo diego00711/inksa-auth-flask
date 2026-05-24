@@ -9,6 +9,7 @@ import psycopg2
 import psycopg2.extras
 import logging
 from ..utils.helpers import get_db_connection, get_user_id_from_token
+from src.extensions import limiter
 
 try:
     from .gamification_routes import award_completion_points as _award_completion_points
@@ -101,6 +102,7 @@ def handle_options():
         return response
 
 @orders_bp.route('/', methods=['GET', 'POST'])
+@limiter.limit("30 per minute")
 def handle_orders():
     conn = None
     try:

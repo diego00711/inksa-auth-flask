@@ -11,6 +11,21 @@ import mercadopago
 import psycopg2
 import re
 
+# --- Sentry Error Monitoring ---
+import sentry_sdk
+from sentry_sdk.integrations.flask import FlaskIntegration
+
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[FlaskIntegration()],
+        traces_sample_rate=0.05,
+        environment=os.environ.get("FLASK_ENV", "production"),
+    )
+    logging.info("Sentry inicializado com sucesso")
+# Variável de ambiente SENTRY_DSN: configure em Render → Environment Variables
+
 # --- Configuração de Path e Logging ---
 current_dir = Path(__file__).parent
 project_root = current_dir.parent
@@ -66,6 +81,19 @@ except ImportError as e:
 # --- Inicialização do App ---
 app = Flask(__name__)
 app.url_map.strict_slashes = False
+
+# --- Rate Limiting ---
+from flask import jsonify as _jsonify
+from src.extensions import limiter
+
+limiter.init_app(app)
+
+@app.errorhandler(429)
+def ratelimit_error(e):
+    return _jsonify({
+        "error": "Muitas requisições. Aguarde um momento e tente novamente.",
+        "retry_after": str(e.description)
+    }), 429
 
 # --- Configuração do Banco para Gamificação ---
 app.config["DB_CONN_FACTORY"] = lambda: psycopg2.connect(os.environ["DATABASE_URL"])
