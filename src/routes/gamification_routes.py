@@ -987,3 +987,331 @@ def award_completion_points(user_id: str, user_type: str, order_id: str = None) 
         order_id=order_id,
     )
     return ok
+
+
+# ============================================================
+# REWARDS CRUD
+# Tabelas necessárias (criar via migração Supabase):
+#
+# CREATE TABLE IF NOT EXISTS public.rewards (
+#     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+#     name TEXT NOT NULL,
+#     description TEXT,
+#     points_required INT NOT NULL,
+#     reward_type TEXT NOT NULL DEFAULT 'gift',
+#     benefit_value DECIMAL(10,2),
+#     target_audience TEXT[] DEFAULT '{}',
+#     stock INT,
+#     valid_until DATE,
+#     icon TEXT DEFAULT '🎁',
+#     is_active BOOLEAN DEFAULT TRUE,
+#     created_at TIMESTAMPTZ DEFAULT NOW(),
+#     updated_at TIMESTAMPTZ DEFAULT NOW()
+# );
+#
+# CREATE TABLE IF NOT EXISTS public.reward_redemptions (
+#     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+#     reward_id UUID REFERENCES public.rewards(id) ON DELETE SET NULL,
+#     user_id UUID NOT NULL,
+#     user_type TEXT NOT NULL,
+#     user_name TEXT,
+#     points_used INT NOT NULL,
+#     status TEXT DEFAULT 'pending',
+#     created_at TIMESTAMPTZ DEFAULT NOW(),
+#     delivered_at TIMESTAMPTZ
+# );
+# ============================================================
+
+def _table_exists(cur, table_name: str) -> bool:
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=%s) AS e",
+        (table_name,)
+    )
+    return bool(cur.fetchone()["e"])
+
+
+@gamification_bp.get("/rewards/summary")
+def rewards_summary():
+    """GET /api/gamification/rewards/summary — cards de resumo para o admin."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if not _table_exists(cur, "rewards"):
+                return _ok({"active_rewards": 0, "redemptions_this_month": 0, "top_reward": None})
+
+            cur.execute("SELECT COUNT(*)::int AS c FROM public.rewards WHERE is_active = TRUE")
+            active_rewards = int(cur.fetchone()["c"])
+            redemptions_this_month = 0
+            top_reward = None
+
+            if _table_exists(cur, "reward_redemptions"):
+                cur.execute("""
+                    SELECT COUNT(*)::int AS c FROM public.reward_redemptions
+                    WHERE created_at >= date_trunc('month', NOW())
+                """)
+                redemptions_this_month = int(cur.fetchone()["c"])
+                cur.execute("""
+                    SELECT r.name, COUNT(rr.id)::int AS cnt
+                    FROM public.reward_redemptions rr
+                    JOIN public.rewards r ON r.id = rr.reward_id
+                    GROUP BY r.name ORDER BY cnt DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+                if row:
+                    top_reward = {"name": row["name"], "count": row["cnt"]}
+
+            return _ok({"active_rewards": active_rewards,
+                        "redemptions_this_month": redemptions_this_month,
+                        "top_reward": top_reward})
+    except Exception as e:
+        current_app.logger.exception("gamification.rewards_summary failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.get("/rewards")
+def list_rewards():
+    """GET /api/gamification/rewards — listar recompensas."""
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if not _table_exists(cur, "rewards"):
+                return _ok({"items": [], "total": 0})
+
+            audience = request.args.get("audience")
+            status   = request.args.get("status")
+            conditions, params = [], []
+            if audience:
+                conditions.append("%s = ANY(target_audience)")
+                params.append(audience)
+            if status == "active":
+                conditions.append("is_active = TRUE")
+            elif status == "inactive":
+                conditions.append("is_active = FALSE")
+            where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            cur.execute(f"""
+                SELECT id, name, description, points_required, reward_type, benefit_value,
+                       target_audience, stock, valid_until, icon, is_active, created_at, updated_at
+                FROM public.rewards {where_sql} ORDER BY created_at DESC
+            """, params)
+
+            rows = []
+            for r in cur.fetchall():
+                d = dict(r)
+                d["id"] = str(d["id"])
+                for ts in ("created_at", "updated_at"):
+                    if d.get(ts) and hasattr(d[ts], "isoformat"):
+                        d[ts] = d[ts].isoformat()
+                if d.get("valid_until"):
+                    d["valid_until"] = str(d["valid_until"])
+                rows.append(d)
+            return _ok({"items": rows, "total": len(rows)})
+    except Exception as e:
+        current_app.logger.exception("gamification.list_rewards failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.post("/rewards")
+def create_reward():
+    """POST /api/gamification/rewards — criar recompensa (admin)."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return _err("name é obrigatório", 422)
+    try:
+        points_required = int(body["points_required"])
+        if points_required <= 0:
+            raise ValueError()
+    except (KeyError, ValueError, TypeError):
+        return _err("points_required deve ser inteiro positivo", 422)
+
+    target_audience = body.get("target_audience", ["client"])
+    if not isinstance(target_audience, list):
+        target_audience = [target_audience]
+
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                INSERT INTO public.rewards
+                    (name, description, points_required, reward_type, benefit_value,
+                     target_audience, stock, valid_until, icon, is_active)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id, created_at
+            """, (
+                name,
+                body.get("description", ""),
+                points_required,
+                body.get("reward_type", "gift"),
+                body.get("benefit_value") or None,
+                target_audience,
+                body.get("stock") or None,
+                body.get("valid_until") or None,
+                body.get("icon", "🎁"),
+                bool(body.get("is_active", True)),
+            ))
+            row = cur.fetchone()
+            return _ok({"id": str(row["id"]),
+                        "created_at": row["created_at"].isoformat(),
+                        "message": "Recompensa criada com sucesso"}), 201
+    except Exception as e:
+        current_app.logger.exception("gamification.create_reward failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.put("/rewards/<reward_id>")
+def update_reward(reward_id):
+    """PUT /api/gamification/rewards/<id> — editar recompensa (admin)."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+    body = request.get_json(silent=True) or {}
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id FROM public.rewards WHERE id = %s", (reward_id,))
+            if not cur.fetchone():
+                return _err("Recompensa não encontrada", 404)
+
+            fields, params = [], []
+            for col in ("name", "description", "reward_type", "icon"):
+                if col in body:
+                    fields.append(f"{col} = %s"); params.append(body[col])
+            if "points_required" in body:
+                fields.append("points_required = %s"); params.append(int(body["points_required"]))
+            if "benefit_value" in body:
+                fields.append("benefit_value = %s"); params.append(body["benefit_value"] or None)
+            if "target_audience" in body:
+                ta = body["target_audience"]
+                fields.append("target_audience = %s"); params.append(ta if isinstance(ta, list) else [ta])
+            if "stock" in body:
+                fields.append("stock = %s"); params.append(body["stock"] or None)
+            if "valid_until" in body:
+                fields.append("valid_until = %s"); params.append(body["valid_until"] or None)
+            if "is_active" in body:
+                fields.append("is_active = %s"); params.append(bool(body["is_active"]))
+            if not fields:
+                return _err("Nenhum campo para atualizar", 422)
+            fields.append("updated_at = NOW()")
+            params.append(reward_id)
+            cur.execute(f"UPDATE public.rewards SET {', '.join(fields)} WHERE id = %s", params)
+            return _ok({"message": "Recompensa atualizada com sucesso"})
+    except Exception as e:
+        current_app.logger.exception("gamification.update_reward failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.delete("/rewards/<reward_id>")
+def delete_reward(reward_id):
+    """DELETE /api/gamification/rewards/<id> — excluir recompensa (admin)."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("DELETE FROM public.rewards WHERE id = %s RETURNING id", (reward_id,))
+            if not cur.fetchone():
+                return _err("Recompensa não encontrada", 404)
+            return _ok({"message": "Recompensa excluída com sucesso"})
+    except Exception as e:
+        current_app.logger.exception("gamification.delete_reward failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.get("/rewards/redemptions")
+def list_reward_redemptions():
+    """GET /api/gamification/rewards/redemptions — histórico de resgates (admin)."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+    page  = max(int(request.args.get("page", 1)), 1)
+    limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+    offset = (page - 1) * limit
+    status = request.args.get("status")
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if not _table_exists(cur, "reward_redemptions"):
+                return _ok({"items": [], "total": 0, "page": page, "limit": limit})
+
+            conditions, params = [], []
+            if status in ("pending", "delivered"):
+                conditions.append("rr.status = %s"); params.append(status)
+            where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            cur.execute(f"""
+                SELECT rr.id, rr.user_id, rr.user_type, rr.user_name,
+                       rr.points_used, rr.status, rr.created_at, rr.delivered_at,
+                       r.name AS reward_name, r.reward_type, r.icon
+                FROM public.reward_redemptions rr
+                LEFT JOIN public.rewards r ON r.id = rr.reward_id
+                {where_sql}
+                ORDER BY rr.created_at DESC LIMIT %s OFFSET %s
+            """, params + [limit, offset])
+
+            rows = []
+            for r in cur.fetchall():
+                d = dict(r)
+                d["id"] = str(d["id"])
+                d["user_id"] = str(d["user_id"])
+                for ts in ("created_at", "delivered_at"):
+                    if d.get(ts) and hasattr(d[ts], "isoformat"):
+                        d[ts] = d[ts].isoformat()
+                rows.append(d)
+
+            cur.execute(f"SELECT COUNT(*)::int AS c FROM public.reward_redemptions rr {where_sql}", params)
+            total = int(cur.fetchone()["c"])
+            return _ok({"items": rows, "total": total, "page": page, "limit": limit})
+    except Exception as e:
+        current_app.logger.exception("gamification.list_reward_redemptions failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.patch("/rewards/redemptions/<redemption_id>/deliver")
+def mark_redemption_delivered(redemption_id):
+    """PATCH /api/gamification/rewards/redemptions/<id>/deliver — marcar como entregue (admin)."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                UPDATE public.reward_redemptions
+                SET status = 'delivered', delivered_at = NOW()
+                WHERE id = %s RETURNING id
+            """, (redemption_id,))
+            if not cur.fetchone():
+                return _err("Resgate não encontrado", 404)
+            return _ok({"message": "Marcado como entregue"})
+    except Exception as e:
+        current_app.logger.exception("gamification.mark_redemption_delivered failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
