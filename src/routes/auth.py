@@ -186,8 +186,9 @@ def logout():
 @limiter.limit("5 per minute")
 def register():
     """
-    Cadastra um novo restaurante no Supabase Auth e cria o perfil inicial.
+    Cadastra um novo usuário no Supabase Auth.
     Campos obrigatórios: name, email, password
+    Campo opcional: user_type (default: 'client')
     """
     try:
         data = request.get_json()
@@ -197,6 +198,12 @@ def register():
         name = (data.get('name') or '').strip()
         email = (data.get('email') or '').strip().lower()
         password = data.get('password') or ''
+        # Aceita tanto snake_case quanto camelCase; padrão é 'client'
+        user_type = (data.get('user_type') or data.get('userType') or 'client').strip().lower()
+
+        VALID_USER_TYPES = {'client', 'restaurant', 'delivery'}
+        if user_type not in VALID_USER_TYPES:
+            user_type = 'client'
 
         # --- Validações ---
         if not name:
@@ -224,7 +231,7 @@ def register():
                 "options": {
                     "data": {
                         "name": name,
-                        "user_type": "restaurant"
+                        "user_type": user_type
                     }
                 }
             })
@@ -242,7 +249,7 @@ def register():
             return jsonify({"status": "error", "error": "E-mail já cadastrado"}), 409
 
         user_id = str(user.id)
-        logger.info(f"Restaurante registrado: user_id={user_id}, email={email}")
+        logger.info(f"Usuário registrado: user_id={user_id}, email={email}, user_type={user_type}")
 
         return jsonify({
             "status": "success",
@@ -251,7 +258,7 @@ def register():
                 "user": {
                     "id": user_id,
                     "email": user.email,
-                    "user_type": "restaurant"
+                    "user_type": user_type
                 }
             }
         }), 201
