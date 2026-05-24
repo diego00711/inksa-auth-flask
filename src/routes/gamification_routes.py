@@ -1292,6 +1292,96 @@ def list_reward_redemptions():
         except Exception: pass
 
 
+@gamification_bp.post("/rewards/<reward_id>/redeem")
+def redeem_reward(reward_id):
+    """POST /api/gamification/rewards/<id>/redeem — resgatar recompensa."""
+    body = request.get_json(silent=True) or {}
+    user_id   = body.get("user_id")
+    user_type = body.get("user_type", "client")
+    user_name = body.get("user_name", "")
+
+    if not user_id:
+        return _err("user_id é obrigatório", 422)
+
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # 1. Verifica se recompensa existe, está ativa e dentro da validade
+            cur.execute("""
+                SELECT id, name, points_required, stock, is_active
+                FROM public.rewards
+                WHERE id = %s
+                  AND is_active = TRUE
+                  AND (valid_until IS NULL OR valid_until >= CURRENT_DATE)
+            """, (reward_id,))
+            reward = cur.fetchone()
+            if not reward:
+                return _err("Recompensa não encontrada ou não disponível", 404)
+
+            points_required = int(reward["points_required"])
+
+            # 2. Verifica pontos do usuário
+            cur.execute("SELECT total_points FROM public.user_points WHERE user_id = %s", (user_id,))
+            up = cur.fetchone()
+            user_pts = int(up["total_points"]) if up else 0
+
+            if user_pts < points_required:
+                return _err(
+                    f"Pontos insuficientes. Você tem {user_pts} ponto(s), precisa de {points_required}.",
+                    400
+                )
+
+            # 3. Verifica e debita estoque (atomicamente)
+            if reward["stock"] is not None:
+                cur.execute("""
+                    UPDATE public.rewards SET stock = stock - 1, updated_at = NOW()
+                    WHERE id = %s AND stock > 0 RETURNING stock
+                """, (reward_id,))
+                if not cur.fetchone():
+                    return _err("Estoque esgotado", 400)
+
+            # 4. Debita pontos atomicamente
+            cur.execute("""
+                UPDATE public.user_points
+                SET total_points = total_points - %s, last_updated = NOW()
+                WHERE user_id = %s AND total_points >= %s
+                RETURNING total_points
+            """, (points_required, user_id, points_required))
+            row = cur.fetchone()
+            if not row:
+                return _err("Pontos insuficientes (race condition)", 400)
+            new_balance = int(row["total_points"])
+
+            # 5. Registra no histórico de pontos
+            cur.execute("""
+                INSERT INTO public.points_history
+                    (id, user_id, points_earned, points_type, description)
+                VALUES (gen_random_uuid(), %s, %s, 'reward_redeem', %s)
+            """, (user_id, -points_required, f"Resgate: {reward['name']}"))
+
+            # 6. Cria registro de resgate
+            cur.execute("""
+                INSERT INTO public.reward_redemptions
+                    (user_id, reward_id, user_type, user_name, points_used, status)
+                VALUES (%s, %s, %s, %s, %s, 'pending')
+                RETURNING id
+            """, (user_id, reward_id, user_type, user_name, points_required))
+            redemption_id = str(cur.fetchone()["id"])
+
+            return _ok({
+                "message": "Resgate solicitado! Em breve você receberá mais informações.",
+                "redemption_id": redemption_id,
+                "points_used": points_required,
+                "new_balance": new_balance,
+            })
+    except Exception as e:
+        current_app.logger.exception("gamification.redeem_reward failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
 @gamification_bp.patch("/rewards/redemptions/<redemption_id>/deliver")
 def mark_redemption_delivered(redemption_id):
     """PATCH /api/gamification/rewards/redemptions/<id>/deliver — marcar como entregue (admin)."""
