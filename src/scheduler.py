@@ -82,15 +82,28 @@ def _run_payouts_job() -> None:
 # Expire pending payments job
 # ---------------------------------------------------------------------------
 
+_KEEP_ALIVE_SERVICES = [
+    "https://inksa-auth-flask-dev.onrender.com/api/health",
+    "https://clientes.inksadelivery.com.br",
+    "https://entregadores.inksadelivery.com.br",
+    "https://restaurante.inksadelivery.com.br",
+    "https://admin.inksadelivery.com.br",
+]
+
+
 def _keep_alive_job() -> None:
-    """Pings /api/health every 10 min to prevent Render free tier cold start."""
+    """Pings all Inksa services every 10 min to prevent free-tier cold starts."""
     import requests as _requests
-    url = os.environ.get("KEEP_ALIVE_URL", "https://inksa-auth-flask-dev.onrender.com/api/health")
-    try:
-        resp = _requests.get(url, timeout=10)
-        logger.info("[SCHEDULER] Keep-alive %s → %d", url, resp.status_code)
-    except Exception as exc:
-        logger.warning("[SCHEDULER] Keep-alive ping failed: %s", exc)
+
+    extra = [u.strip() for u in os.environ.get("KEEP_ALIVE_EXTRA_URLS", "").split(",") if u.strip()]
+    services = _KEEP_ALIVE_SERVICES + extra
+
+    for url in services:
+        try:
+            resp = _requests.get(url, timeout=8)
+            logger.info("[KEEP-ALIVE] %s → %d", url, resp.status_code)
+        except Exception as exc:
+            logger.warning("[KEEP-ALIVE] %s → FAILED: %s", url, exc)
 
 
 def _expire_pending_payments_job() -> None:

@@ -298,11 +298,13 @@ def debug_routes():
 @app.route('/api/health')
 def health_check():
     return jsonify({
-        "status": "healthy",
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "service": "inksa-auth-flask",
+        "version": "1.0.0",
         "database": "connected" if supabase else "disconnected",
         "mercado_pago": "configured" if app.mp_sdk else "not_configured",
-        "cors_enabled": True
-    })
+    }), 200
 
 # --- Handlers de SocketIO ---
 @socketio.on('connect')
