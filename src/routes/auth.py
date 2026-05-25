@@ -251,6 +251,53 @@ def register():
         user_id = str(user.id)
         logger.info(f"Usuário registrado: user_id={user_id}, email={email}, user_type={user_type}")
 
+        # --- Cria o perfil na tabela correspondente ao user_type ---
+        phone = (data.get('phone') or '').strip()
+        _db_conn = None
+        try:
+            _db_conn = get_db_connection()
+            if _db_conn:
+                with _db_conn.cursor() as _cur:
+                    if user_type == 'restaurant':
+                        _cur.execute(
+                            """INSERT INTO restaurant_profiles (id, user_id, restaurant_name, phone, is_open)
+                               VALUES (%s, %s, %s, %s, FALSE)
+                               ON CONFLICT (user_id) DO NOTHING""",
+                            (user_id, user_id, name, phone or None)
+                        )
+                        logger.info(f"✅ Perfil de restaurante criado para user_id={user_id}")
+                    elif user_type == 'delivery':
+                        first_name = name.split()[0] if name else 'Entregador'
+                        last_name = ' '.join(name.split()[1:]) if name and ' ' in name else ''
+                        _cur.execute(
+                            """INSERT INTO delivery_profiles (user_id, first_name, last_name, phone)
+                               VALUES (%s, %s, %s, %s)
+                               ON CONFLICT (user_id) DO NOTHING""",
+                            (user_id, first_name, last_name or None, phone or '00000000000')
+                        )
+                        logger.info(f"✅ Perfil de entregador criado para user_id={user_id}")
+                    elif user_type == 'client':
+                        _cur.execute(
+                            """INSERT INTO client_profiles (user_id, name, phone)
+                               VALUES (%s, %s, %s)
+                               ON CONFLICT (user_id) DO NOTHING""",
+                            (user_id, name, phone or None)
+                        )
+                        logger.info(f"✅ Perfil de cliente criado para user_id={user_id}")
+                _db_conn.commit()
+            else:
+                logger.warning(f"⚠️ Não foi possível criar perfil de {user_type} — conexão DB falhou")
+        except Exception as _profile_err:
+            logger.error(f"⚠️ Erro ao criar perfil de {user_type} para {user_id}: {_profile_err}", exc_info=True)
+            if _db_conn:
+                try: _db_conn.rollback()
+                except Exception: pass
+            # Não bloqueia o cadastro — perfil será auto-criado na primeira requisição autenticada
+        finally:
+            if _db_conn:
+                try: _db_conn.close()
+                except Exception: pass
+
         return jsonify({
             "status": "success",
             "data": {

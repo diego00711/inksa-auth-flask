@@ -119,6 +119,32 @@ def handle_profile():
                 cur.execute("SELECT * FROM restaurant_profiles WHERE user_id = %s", (user_id,))
                 profile = cur.fetchone()
                 if not profile:
+                    # Auto-cria o perfil na primeira requisição autenticada
+                    try:
+                        name_meta, phone_meta = '', ''
+                        if supabase:
+                            auth_header = request.headers.get('Authorization')
+                            token = auth_header.split()[-1] if auth_header else None
+                            if token:
+                                try:
+                                    ur = supabase.auth.get_user(token)
+                                    if ur and ur.user:
+                                        m = ur.user.user_metadata or {}
+                                        name_meta = m.get('name', '')
+                                        phone_meta = m.get('phone', '')
+                                except Exception:
+                                    pass
+                        cur.execute(
+                            """INSERT INTO restaurant_profiles (id, user_id, restaurant_name, phone, is_open)
+                               VALUES (%s, %s, %s, %s, FALSE) RETURNING *""",
+                            (user_id, user_id, name_meta or 'Meu Restaurante', phone_meta or None)
+                        )
+                        profile = cur.fetchone()
+                        conn.commit()
+                    except Exception as create_err:
+                        traceback.print_exc()
+                        return jsonify({"status": "error", "error": "Profile not found"}), 404
+                if not profile:
                     return jsonify({"status": "error", "error": "Profile not found"}), 404
                 return jsonify({"status": "success", "data": dict(profile)})
 
