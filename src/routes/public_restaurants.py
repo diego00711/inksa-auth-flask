@@ -82,10 +82,7 @@ def list_restaurants():
                 if has_coords else "NULL"
             )
 
-            where = [
-                "COALESCE(approved, TRUE) = TRUE",
-                "COALESCE(active,   TRUE) = TRUE",
-            ]
+            where = []
             params = []
 
             if has_coords:
@@ -100,7 +97,7 @@ def list_restaurants():
                 where.append("restaurant_name ILIKE %s")
                 params.append(f"%{search}%")
 
-            where_sql  = "WHERE " + " AND ".join(where)
+            where_sql  = ("WHERE " + " AND ".join(where)) if where else ""
             order_sql  = "ORDER BY distance_km ASC NULLS LAST" if has_coords else "ORDER BY restaurant_name"
 
             cur.execute(
@@ -181,8 +178,6 @@ def get_restaurant(restaurant_id):
                     longitude
                 FROM restaurant_profiles
                 WHERE id = %s
-                  AND COALESCE(approved, TRUE) = TRUE
-                  AND COALESCE(active,   TRUE) = TRUE
                 """,
                 (str(restaurant_id),),
             )
@@ -233,8 +228,6 @@ def get_restaurant_menu(restaurant_id):
                 """
                 SELECT id FROM restaurant_profiles
                 WHERE id = %s
-                  AND COALESCE(approved, TRUE) = TRUE
-                  AND COALESCE(active,   TRUE) = TRUE
                 """,
                 (str(restaurant_id),),
             )

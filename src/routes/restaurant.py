@@ -169,6 +169,13 @@ def handle_profile():
             values = list(updates.values()) + [user_id]
 
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                # UPSERT: cria o perfil se ainda não existir, depois aplica as atualizações
+                cur.execute(
+                    """INSERT INTO restaurant_profiles (id, user_id, restaurant_name, is_open)
+                       VALUES (%s, %s, %s, FALSE)
+                       ON CONFLICT (user_id) DO NOTHING""",
+                    (user_id, user_id, updates.get('restaurant_name', 'Meu Restaurante'))
+                )
                 cur.execute(
                     f"UPDATE restaurant_profiles SET {set_clause} WHERE user_id = %s RETURNING *",
                     values
