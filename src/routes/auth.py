@@ -277,11 +277,13 @@ def register():
                         )
                         logger.info(f"✅ Perfil de entregador criado para user_id={user_id}")
                     elif user_type == 'client':
+                        name_parts = name.split(' ', 1)
+                        client_first = name_parts[0]
+                        client_last = name_parts[1] if len(name_parts) > 1 else ''
                         _cur.execute(
-                            """INSERT INTO client_profiles (user_id, name, phone)
-                               VALUES (%s, %s, %s)
-                               ON CONFLICT (user_id) DO NOTHING""",
-                            (user_id, name, phone or None)
+                            """INSERT INTO client_profiles (user_id, first_name, last_name, phone)
+                               VALUES (%s, %s, %s, %s)""",
+                            (user_id, client_first, client_last, phone or None)
                         )
                         logger.info(f"✅ Perfil de cliente criado para user_id={user_id}")
                 _db_conn.commit()
