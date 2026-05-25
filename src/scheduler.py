@@ -82,6 +82,17 @@ def _run_payouts_job() -> None:
 # Expire pending payments job
 # ---------------------------------------------------------------------------
 
+def _keep_alive_job() -> None:
+    """Pings /api/health every 10 min to prevent Render free tier cold start."""
+    import requests as _requests
+    url = os.environ.get("KEEP_ALIVE_URL", "https://inksa-auth-flask-dev.onrender.com/api/health")
+    try:
+        resp = _requests.get(url, timeout=10)
+        logger.info("[SCHEDULER] Keep-alive %s → %d", url, resp.status_code)
+    except Exception as exc:
+        logger.warning("[SCHEDULER] Keep-alive ping failed: %s", exc)
+
+
 def _expire_pending_payments_job() -> None:
     """Cancela pedidos em status 'awaiting_payment' criados há mais de 30 minutos."""
     import os
@@ -156,6 +167,16 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=300,
     )
     logger.info("[SCHEDULER] Job de expiração de pagamentos: a cada 30 minutos")
+    _scheduler.add_job(
+        func=_keep_alive_job,
+        trigger="interval",
+        minutes=10,
+        id="keep_alive",
+        name="Keep-alive ping to prevent Render cold start",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+    logger.info("[SCHEDULER] Keep-alive job: a cada 10 minutos")
     _scheduler.start()
 
     logger.info(

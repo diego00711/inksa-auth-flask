@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 from flask import Flask, jsonify, request, Blueprint, make_response
 from flask_cors import CORS
+from flask_compress import Compress
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
 import mercadopago
@@ -82,6 +83,7 @@ except ImportError as e:
 # --- Inicialização do App ---
 app = Flask(__name__)
 app.url_map.strict_slashes = False
+Compress(app)
 
 # --- Rate Limiting ---
 from flask import jsonify as _jsonify
@@ -162,6 +164,16 @@ def handle_preflight():
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         return resp, 204
+
+_CACHEABLE_PREFIXES = ('/api/restaurants', '/api/menu', '/api/banners', '/api/categories')
+
+@app.after_request
+def add_cache_headers(response):
+    if request.method == 'GET' and response.status_code == 200:
+        if any(request.path.startswith(p) for p in _CACHEABLE_PREFIXES):
+            response.headers.setdefault('Cache-Control', 'public, max-age=120')
+    return response
+
 
 @app.after_request
 def add_cors_headers(response):
