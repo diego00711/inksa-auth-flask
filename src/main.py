@@ -297,12 +297,22 @@ def debug_routes():
 
 @app.route('/api/health')
 def health_check():
+    # Executa uma consulta real: valida a conexão de verdade e conta como
+    # atividade no Supabase, evitando a pausa automática do plano gratuito.
+    db_status = "disconnected"
+    if supabase:
+        try:
+            supabase.table("orders").select("id").limit(1).execute()
+            db_status = "connected"
+        except Exception as exc:
+            logger.warning(f"Health check: consulta ao banco falhou: {exc}")
+            db_status = "error"
     return jsonify({
-        "status": "ok",
+        "status": "ok" if db_status == "connected" else "degraded",
         "timestamp": datetime.now().isoformat(),
         "service": "inksa-auth-flask",
         "version": "1.0.0",
-        "database": "connected" if supabase else "disconnected",
+        "database": db_status,
         "mercado_pago": "configured" if app.mp_sdk else "not_configured",
     }), 200
 

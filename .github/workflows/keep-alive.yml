@@ -1,0 +1,23 @@
+name: Keep-alive (Supabase + Render)
+
+# Backup externo do keep-alive interno (src/scheduler.py).
+# O /api/health executa uma consulta real no banco, o que conta como
+# atividade no Supabase e impede a pausa automática do plano gratuito.
+# Roda mesmo que o serviço no Render tenha caído ou hibernado
+# (a propria requisicao acorda o Render de novo).
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"  # a cada 4 horas
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /api/health
+        run: |
+          curl --fail --silent --show-error \
+            --max-time 120 --retry 3 --retry-delay 30 --retry-all-errors \
+            https://inksa-auth-flask-dev.onrender.com/api/health
+          echo "Ping OK"
