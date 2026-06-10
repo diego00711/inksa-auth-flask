@@ -4,6 +4,7 @@ import os
 import uuid
 import traceback
 import json
+import logging
 from flask import Blueprint, request, jsonify, g, current_app
 import psycopg2
 import psycopg2.extras
@@ -283,7 +284,7 @@ def accept_delivery(order_id):
                     'delivery_fee': updated_order['delivery_fee']
                 })
             except Exception as gamification_error:
-                print(f"Erro na gamificação: {gamification_error}")
+                logging.error(f"Erro na gamificação: {gamification_error}")
             
             return jsonify({
                 "status": "success",
@@ -358,7 +359,7 @@ def complete_delivery(order_id):
                     'completion_time': datetime.now().isoformat()
                 })
             except Exception as gamification_error:
-                print(f"Erro na gamificação: {gamification_error}")
+                logging.error(f"Erro na gamificação: {gamification_error}")
             
             return jsonify({
                 "status": "success",

@@ -1,5 +1,6 @@
 # src/routes/categories.py
 from flask import Blueprint, jsonify, request
+import logging
 import psycopg2
 import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
@@ -27,7 +28,7 @@ def get_categories():
             categories = [dict(row) for row in cur.fetchall()]
             return jsonify({"status": "success", "data": categories}), 200
     except Exception as e:
-        print(e)
+        logging.error("Erro em categorias: %s", e)
         return jsonify({"error": "Erro interno ao buscar categorias"}), 500
     finally:
         if conn:
@@ -65,7 +66,7 @@ def add_category():
         return jsonify({"error": f"A categoria '{category_name}' já existe."}), 409
     except Exception as e:
         conn.rollback()
-        print(e)
+        logging.error("Erro em categorias: %s", e)
         return jsonify({"error": "Erro interno ao adicionar categoria"}), 500
     finally:
         if conn:
@@ -99,7 +100,7 @@ def delete_category(category_id):
             return jsonify({"status": "success", "message": "Categoria excluída com sucesso"}), 200
     except Exception as e:
         conn.rollback()
-        print(e)
+        logging.error("Erro em categorias: %s", e)
         return jsonify({"error": "Erro interno ao excluir categoria"}), 500
     finally:
         if conn:

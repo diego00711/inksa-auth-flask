@@ -1,5 +1,6 @@
 # src/routes/avaliacao/cliente_reviews.py
 
+import logging
 from flask import Blueprint, request, jsonify
 # Importa o DictCursor para facilitar a manipulação dos resultados
 import psycopg2.extras
@@ -137,7 +138,7 @@ def get_my_client_reviews():
             }), 200
             
     except Exception as e:
-        print(f"Erro ao buscar avaliações do cliente: {e}")
+        logging.error(f"Erro ao buscar avaliações do cliente: {e}")
         return jsonify({'error': 'Erro interno do servidor'}), 500
     finally:
         if conn:

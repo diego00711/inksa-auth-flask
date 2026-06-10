@@ -1,6 +1,7 @@
 # Arquivo: src/utils/geocoding_utils.py
 import requests
 import os
+import logging
 
 def geocode_address(street, number, neighborhood, city, state, zipcode):
     """
@@ -29,7 +30,7 @@ def geocode_address(street, number, neighborhood, city, state, zipcode):
     full_address = ", ".join(filter(None, address_parts)) 
     
     if not full_address:
-        print("Geocodificação: Endereço vazio, retornando None, None.")
+        logging.info("Geocodificação: Endereço vazio, retornando None, None.")
         return None, None 
 
     # IMPORTANTE: Para Nominatim, um User-Agent é obrigatório.
@@ -56,16 +57,16 @@ def geocode_address(street, number, neighborhood, city, state, zipcode):
         if results and len(results) > 0:
             lat = float(results[0].get('lat'))
             lon = float(results[0].get('lon'))
-            print(f"Geocodificação bem-sucedida para '{full_address}': Lat={lat}, Lon={lon}")
+            logging.info(f"Geocodificação bem-sucedida para '{full_address}': Lat={lat}, Lon={lon}")
             return lat, lon
         else:
-            print(f"Geocodificação falhou para o endereço: '{full_address}'. Nenhum resultado encontrado.")
+            logging.warning(f"Geocodificação falhou para o endereço: '{full_address}'. Nenhum resultado encontrado.")
             return None, None
     except requests.exceptions.RequestException as e:
-        print(f"Erro na requisição HTTP de geocodificação para '{full_address}': {e}")
+        logging.error(f"Erro na requisição HTTP de geocodificação para '{full_address}': {e}")
         return None, None
     except ValueError as e:
-        print(f"Erro ao processar resposta JSON da geocodificação para '{full_address}': {e}")
+        logging.error(f"Erro ao processar resposta JSON da geocodificação para '{full_address}': {e}")
         return None, None
 
 # Teste (opcional, pode ser removido depois)

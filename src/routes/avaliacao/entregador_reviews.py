@@ -1,6 +1,7 @@
 # src/routes/avaliacao/entregador_reviews.py
 
 import uuid
+import logging
 from flask import Blueprint, request, jsonify
 import psycopg2.extras
 from src.utils.helpers import get_db_connection, get_user_id_from_token
@@ -67,7 +68,7 @@ def create_delivery_review(delivery_id):
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Erro ao criar avaliação do entregador: {e}")
+        logging.error(f"Erro ao criar avaliação do entregador: {e}")
         return jsonify({'error': 'Erro interno do servidor'}), 500
     finally:
         if conn:
@@ -115,7 +116,7 @@ def get_my_delivery_reviews():
                 'total_reviews': count
             }), 200
     except Exception as e:
-        print(f"Erro ao buscar avaliações do entregador: {e}")
+        logging.error(f"Erro ao buscar avaliações do entregador: {e}")
         return jsonify({'error': 'Erro interno do servidor'}), 500
     finally:
         if conn:
@@ -153,7 +154,7 @@ def list_delivery_reviews(delivery_id):
                 'total_reviews': count
             }), 200
     except Exception as e:
-        print(f"Erro ao listar avaliações do entregador: {e}")
+        logging.error(f"Erro ao listar avaliações do entregador: {e}")
         return jsonify({'error': 'Erro interno do servidor'}), 500
     finally:
         if conn:
