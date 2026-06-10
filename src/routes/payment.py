@@ -359,6 +359,163 @@ def criar_preferencia_mercado_pago():
         return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
 
 
+# ─── PAGAMENTO TRANSPARENTE COM CARTÃO (in-app, sem redirecionar) ────────────
+def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items):
+    """Revalida precos no banco e calcula o total no servidor (nao confia no front).
+    Retorna (total_seguro, subtotal_validado, desconto). Lanca ValueError se invalido.
+    """
+    subtotal = 0.0
+    for item in items_from_request:
+        menu_item_id = item.get('menu_item_id')
+        quantidade = int(item.get('quantity', 1))
+        if quantidade <= 0:
+            continue
+        if not menu_item_id:
+            # Itens sem id (ex.: taxa) sao ignorados no subtotal de produtos
+            continue
+        db = supabase_client.table('menu_items').select('price').eq('id', menu_item_id).execute()
+        if not db.data:
+            raise ValueError("Item de cardápio inválido.")
+        preco_real = float(db.data[0]['price'])
+        subtotal += preco_real * quantidade
+
+    # Desconto de cupom validado no backend
+    desconto = 0.0
+    if coupon_code:
+        cr = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).eq('is_active', True).execute()
+        if cr.data:
+            c = cr.data[0]
+            if subtotal >= float(c.get('min_order_amount') or 0):
+                if c.get('discount_type') == 'percentage':
+                    desconto = round(subtotal * float(c.get('discount_value', 0)) / 100, 2)
+                else:
+                    desconto = round(float(c.get('discount_value', 0)), 2)
+                desconto = min(desconto, subtotal)
+
+    total = max(0.0, round(subtotal + float(delivery_fee or 0) - desconto, 2))
+    return total, round(subtotal, 2), desconto
+
+
+@mp_payment_bp.route('/pagamentos/processar_cartao', methods=['POST'])
+def processar_pagamento_cartao():
+    """Processa pagamento com cartao via token do MP Bricks (sem redirecionar)."""
+    logging.info("💳 === PROCESSANDO PAGAMENTO COM CARTÃO (transparente) ===")
+    try:
+        sdk = current_app.mp_sdk
+        if sdk is None:
+            return jsonify({"erro": "Serviço de pagamento indisponível."}), 503
+        if not supabase_client:
+            return jsonify({"erro": "Serviço de banco indisponível."}), 500
+
+        d = request.json or {}
+        token = d.get('token')
+        payment_method_id = d.get('payment_method_id')
+        installments = int(d.get('installments') or 1)
+        issuer_id = d.get('issuer_id')
+        cliente_email = (d.get('cliente_email') or d.get('payer_email') or '').strip()
+        payer_identification = d.get('payer_identification')  # {type, number} opcional
+
+        if not token or not payment_method_id:
+            return jsonify({"erro": "Dados do cartão incompletos."}), 400
+        if not cliente_email:
+            return jsonify({"erro": "Email do cliente é obrigatório."}), 400
+
+        items_req = d.get('itens', [])
+        try:
+            total_seguro, subtotal_validado, desconto = _validar_itens_e_total(
+                items_req, d.get('delivery_fee', 0), (d.get('coupon_code') or '').strip(), d.get('total_amount_items', 0)
+            )
+        except ValueError as ve:
+            return jsonify({"erro": str(ve)}), 400
+
+        if total_seguro <= 0:
+            return jsonify({"erro": "Valor do pedido inválido."}), 400
+
+        # 1) Cria o pedido (aguardando pagamento)
+        import uuid
+        from datetime import datetime
+        pedido_id = d.get('pedido_id') or str(uuid.uuid4())
+        order_data = {
+            'id': pedido_id,
+            'client_id': d.get('client_id'),
+            'restaurant_id': d.get('restaurant_id'),
+            'delivery_id': None,
+            'status': 'awaiting_payment',
+            'items': items_req,
+            'total_amount_items': subtotal_validado,
+            'delivery_fee': d.get('delivery_fee', 0),
+            'total_amount': total_seguro,
+            'delivery_address': d.get('delivery_address', ''),
+            'notes': d.get('notes', ''),
+            'client_latitude': d.get('client_latitude'),
+            'client_longitude': d.get('client_longitude'),
+            'delivery_distance_km': d.get('delivery_distance_km'),
+            'payment_method': payment_method_id,
+            'created_at': datetime.utcnow().isoformat(),
+            'updated_at': datetime.utcnow().isoformat(),
+        }
+        ins = supabase_client.table('orders').insert(order_data).execute()
+        if not ins.data:
+            return jsonify({"erro": "Erro ao criar pedido."}), 500
+
+        # 2) Cria o pagamento no MP com o token do cartao
+        base = os.environ.get("MERCADO_PAGO_WEBHOOK_URL")
+        payment_payload = {
+            "transaction_amount": float(total_seguro),
+            "token": token,
+            "description": "Pedido Inksa Delivery",
+            "installments": installments,
+            "payment_method_id": payment_method_id,
+            "external_reference": pedido_id,
+            "statement_descriptor": "INKSA DELIVERY",
+            "payer": {"email": cliente_email},
+        }
+        if issuer_id:
+            payment_payload["issuer_id"] = issuer_id
+        if base:
+            payment_payload["notification_url"] = f"{base}/api/pagamentos/webhook_mp"
+        if payer_identification and payer_identification.get('number'):
+            payment_payload["payer"]["identification"] = payer_identification
+
+        result = sdk.payment().create(payment_payload)
+        resp = result.get("response", {}) if isinstance(result, dict) else {}
+        status = resp.get("status")
+        payment_id = resp.get("id")
+        logging.info(f"💳 Pagamento MP criado: id={payment_id} status={status}")
+
+        if status == 'approved':
+            rate = current_app.config.get('PLATFORM_COMMISSION_RATE', 0.15)
+            comissao = round(subtotal_validado * rate, 2)
+            supabase_client.table('orders').update({
+                'status': 'pending',  # ativa o pedido para o restaurante
+                'status_pagamento': 'approved',
+                'comissao_plataforma': comissao,
+                'valor_repassado_restaurante': round(subtotal_validado - comissao, 2),
+                'valor_repassado_entregador': round(float(d.get('delivery_fee', 0)), 2),
+                'id_transacao_mp': str(payment_id),
+            }).eq('id', pedido_id).execute()
+            return jsonify({"status": "approved", "pedido_id": pedido_id, "payment_id": payment_id}), 200
+
+        if status in ('in_process', 'pending'):
+            supabase_client.table('orders').update({
+                'status_pagamento': status, 'id_transacao_mp': str(payment_id),
+            }).eq('id', pedido_id).execute()
+            return jsonify({"status": status, "pedido_id": pedido_id, "payment_id": payment_id}), 200
+
+        # rejeitado: cancela o pedido
+        motivo = resp.get("status_detail", "rejected")
+        supabase_client.table('orders').update({
+            'status': 'cancelled', 'status_pagamento': 'rejected',
+            'id_transacao_mp': str(payment_id) if payment_id else None,
+            'cancellation_reason': f'payment_rejected:{motivo}',
+        }).eq('id', pedido_id).execute()
+        return jsonify({"status": "rejected", "detail": motivo, "pedido_id": pedido_id}), 402
+
+    except Exception as e:
+        logging.error(f"❌ Erro ao processar pagamento com cartão: {e}", exc_info=True)
+        return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
+
+
 # ✅ WEBHOOK COM LOGS DETALHADOS PARA DIAGNÓSTICO
 @mp_payment_bp.route('/pagamentos/webhook_mp', methods=['POST'])
 def mercadopago_webhook():
