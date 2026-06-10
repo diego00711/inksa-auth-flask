@@ -164,3 +164,132 @@ def upload_avatar(conn):
     except Exception as e:
         logging.error(f"Avatar Upload Error: {e}", exc_info=True)
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ─── Endereços do cliente (múltiplos) ────────────────────────────────────────
+ADDRESS_FIELDS = [
+    'label', 'street', 'number', 'complement', 'neighborhood',
+    'city', 'state', 'zipcode', 'reference', 'latitude', 'longitude',
+]
+
+
+def _auth_client():
+    """Retorna (user_id, None) se for um cliente válido, ou (None, error_response)."""
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return None, error
+    if user_type != 'client':
+        return None, (jsonify({"status": "error", "error": "Unauthorized access"}), 403)
+    return user_id, None
+
+
+@client_bp.route('/addresses', methods=['GET'])
+@handle_db_errors
+def list_addresses(conn):
+    user_id, err = _auth_client()
+    if err:
+        return err
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            "SELECT * FROM client_addresses WHERE user_id = %s ORDER BY is_default DESC, created_at DESC",
+            (user_id,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    return jsonify({"status": "success", "data": rows}), 200
+
+
+@client_bp.route('/addresses', methods=['POST'])
+@handle_db_errors
+def create_address(conn):
+    user_id, err = _auth_client()
+    if err:
+        return err
+    data = request.get_json() or {}
+    payload = {k: data.get(k) for k in ADDRESS_FIELDS if k in data}
+    payload.setdefault('label', 'Endereço')
+
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # Primeiro endereço do cliente vira o padrão automaticamente
+        cur.execute("SELECT COUNT(*) AS c FROM client_addresses WHERE user_id = %s", (user_id,))
+        is_first = cur.fetchone()['c'] == 0
+        make_default = bool(data.get('is_default')) or is_first
+        if make_default:
+            cur.execute("UPDATE client_addresses SET is_default = false WHERE user_id = %s", (user_id,))
+
+        cols = ['user_id'] + list(payload.keys()) + ['is_default']
+        vals = [user_id] + list(payload.values()) + [make_default]
+        placeholders = ', '.join(['%s'] * len(cols))
+        cur.execute(
+            f"INSERT INTO client_addresses ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *",
+            vals,
+        )
+        row = dict(cur.fetchone())
+        conn.commit()
+    return jsonify({"status": "success", "data": row}), 201
+
+
+@client_bp.route('/addresses/<uuid:address_id>', methods=['PUT'])
+@handle_db_errors
+def update_address(conn, address_id):
+    user_id, err = _auth_client()
+    if err:
+        return err
+    data = request.get_json() or {}
+    updates = {k: data.get(k) for k in ADDRESS_FIELDS if k in data}
+    if not updates:
+        return jsonify({"status": "error", "error": "No valid fields to update"}), 400
+
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        set_clause = ", ".join([f"{k} = %s" for k in updates.keys()])
+        values = list(updates.values()) + [str(address_id), user_id]
+        cur.execute(
+            f"UPDATE client_addresses SET {set_clause} WHERE id = %s AND user_id = %s RETURNING *",
+            values,
+        )
+        row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return jsonify({"status": "error", "error": "Endereço não encontrado"}), 404
+    return jsonify({"status": "success", "data": dict(row)}), 200
+
+
+@client_bp.route('/addresses/<uuid:address_id>', methods=['DELETE'])
+@handle_db_errors
+def delete_address(conn, address_id):
+    user_id, err = _auth_client()
+    if err:
+        return err
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            "DELETE FROM client_addresses WHERE id = %s AND user_id = %s RETURNING is_default",
+            (str(address_id), user_id),
+        )
+        deleted = cur.fetchone()
+        if not deleted:
+            return jsonify({"status": "error", "error": "Endereço não encontrado"}), 404
+        # Se removeu o padrão, promove o endereço mais recente a padrão
+        if deleted['is_default']:
+            cur.execute(
+                """UPDATE client_addresses SET is_default = true
+                   WHERE id = (SELECT id FROM client_addresses WHERE user_id = %s
+                               ORDER BY created_at DESC LIMIT 1)""",
+                (user_id,),
+            )
+        conn.commit()
+    return jsonify({"status": "success"}), 200
+
+
+@client_bp.route('/addresses/<uuid:address_id>/default', methods=['POST'])
+@handle_db_errors
+def set_default_address(conn, address_id):
+    user_id, err = _auth_client()
+    if err:
+        return err
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("SELECT id FROM client_addresses WHERE id = %s AND user_id = %s", (str(address_id), user_id))
+        if not cur.fetchone():
+            return jsonify({"status": "error", "error": "Endereço não encontrado"}), 404
+        cur.execute("UPDATE client_addresses SET is_default = false WHERE user_id = %s", (user_id,))
+        cur.execute("UPDATE client_addresses SET is_default = true WHERE id = %s AND user_id = %s", (str(address_id), user_id))
+        conn.commit()
+    return jsonify({"status": "success"}), 200
