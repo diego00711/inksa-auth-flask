@@ -1,14 +1,16 @@
 name: Keep-alive (Supabase + Render)
 
-# Backup externo do keep-alive interno (src/scheduler.py).
-# O /api/health executa uma consulta real no banco, o que conta como
-# atividade no Supabase e impede a pausa automática do plano gratuito.
-# Roda mesmo que o serviço no Render tenha caído ou hibernado
-# (a propria requisicao acorda o Render de novo).
+# Mantém o backend do Render QUENTE (o plano free hiberna após ~15 min sem
+# tráfego, causando cold start de ~50s na próxima visita). Pingar a cada 10
+# min evita a hibernação. O /api/health faz uma consulta real no banco, o que
+# também conta como atividade no Supabase e impede a pausa automática dele.
+# Obs.: o cron do GitHub Actions pode atrasar alguns minutos sob carga. Para
+# produção de verdade, considere um monitor externo (cron-job.org a cada 5min)
+# ou um plano pago do Render (sem hibernação).
 
 on:
   schedule:
-    - cron: "0 */4 * * *"  # a cada 4 horas
+    - cron: "*/10 * * * *"  # a cada 10 minutos (mantém o Render quente)
   workflow_dispatch: {}
 
 jobs:
