@@ -135,6 +135,100 @@ def _expire_pending_payments_job() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Abertura automatica por horario de funcionamento
+# ---------------------------------------------------------------------------
+
+_WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _is_within_hours(opening_hours, now) -> bool:
+    """True se `now` (datetime local) cai dentro do horario configurado para o dia.
+
+    Formato esperado de opening_hours:
+      { "mon": {"enabled": true, "open": "18:00", "close": "23:00"}, ... }
+    Suporta intervalos que cruzam a meia-noite (close < open).
+    """
+    if not isinstance(opening_hours, dict):
+        return False
+    day = _WEEKDAY_KEYS[now.weekday()]
+    today = opening_hours.get(day)
+    # Verifica tambem o dia anterior para intervalos que cruzam a meia-noite
+    prev = opening_hours.get(_WEEKDAY_KEYS[(now.weekday() - 1) % 7])
+    cur_min = now.hour * 60 + now.minute
+
+    def _parse(hhmm):
+        try:
+            h, m = str(hhmm).split(":")
+            return int(h) * 60 + int(m)
+        except Exception:
+            return None
+
+    def _check(slot, allow_overnight_tail=False):
+        if not isinstance(slot, dict) or not slot.get("enabled"):
+            return False
+        o = _parse(slot.get("open"))
+        c = _parse(slot.get("close"))
+        if o is None or c is None:
+            return False
+        if c > o:  # mesmo dia
+            return o <= cur_min < c
+        # cruza a meia-noite
+        if allow_overnight_tail:
+            return cur_min < c  # madrugada do dia seguinte
+        return cur_min >= o
+    return _check(today) or _check(prev, allow_overnight_tail=True)
+
+
+def _apply_opening_hours_job() -> None:
+    """A cada poucos minutos, abre/fecha restaurantes com hours_auto ligado."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo(os.environ.get("SCHEDULER_TIMEZONE", "America/Sao_Paulo")))
+    except Exception:
+        now = datetime.now()
+
+    from .utils.helpers import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("[HOURS] Sem conexao ao banco — job abortado")
+            return
+        import psycopg2.extras
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                "SELECT id, is_open, opening_hours FROM restaurant_profiles WHERE hours_auto = true"
+            )
+            rows = cur.fetchall()
+            changed = 0
+            for r in rows:
+                should_open = _is_within_hours(r["opening_hours"], now)
+                if bool(r["is_open"]) != should_open:
+                    cur.execute(
+                        "UPDATE restaurant_profiles SET is_open = %s WHERE id = %s",
+                        (should_open, r["id"]),
+                    )
+                    changed += 1
+            if changed:
+                conn.commit()
+                logger.info("[HOURS] %d restaurante(s) atualizados por horario", changed)
+    except Exception:
+        logger.exception("[HOURS] Erro no job de abertura automatica")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -190,6 +284,16 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=120,
     )
     logger.info("[SCHEDULER] Keep-alive job: a cada 10 minutos")
+    _scheduler.add_job(
+        func=_apply_opening_hours_job,
+        trigger="interval",
+        minutes=5,
+        id="opening_hours",
+        name="Abre/fecha restaurantes por horario de funcionamento",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+    logger.info("[SCHEDULER] Abertura automatica por horario: a cada 5 minutos")
     _scheduler.start()
 
     logger.info(

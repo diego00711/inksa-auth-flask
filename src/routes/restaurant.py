@@ -154,16 +154,21 @@ def handle_profile():
                 return jsonify({"status": "error", "error": "No data provided"}), 400
 
             allowed_fields = [
-                'restaurant_name', 'business_name', 'cnpj', 'phone', 'logo_url', 'address_street', 
-                'address_number', 'address_complement', 'address_neighborhood', 'address_city', 
-                'address_state', 'address_zipcode', 'latitude', 'longitude', 'category', 
-                'delivery_time', 'cuisine_type', 'description', 'is_open', 'delivery_fee', 
-                'minimum_order', 'payout_frequency', 'bank_name', 'bank_agency', 
-                'bank_account_number', 'bank_account_type', 'pix_key', 'mp_account_id', 'delivery_type'
+                'restaurant_name', 'business_name', 'cnpj', 'phone', 'logo_url', 'address_street',
+                'address_number', 'address_complement', 'address_neighborhood', 'address_city',
+                'address_state', 'address_zipcode', 'latitude', 'longitude', 'category',
+                'delivery_time', 'cuisine_type', 'description', 'is_open', 'delivery_fee',
+                'minimum_order', 'payout_frequency', 'bank_name', 'bank_agency',
+                'bank_account_number', 'bank_account_type', 'pix_key', 'mp_account_id', 'delivery_type',
+                'opening_hours', 'hours_auto'
             ]
             updates = {k: v for k, v in data.items() if k in allowed_fields}
             if not updates:
                 return jsonify({"status": "error", "error": "No valid fields to update"}), 400
+
+            # opening_hours é jsonb: adapta o dict para evitar erro de tipo
+            if 'opening_hours' in updates and updates['opening_hours'] is not None:
+                updates['opening_hours'] = psycopg2.extras.Json(updates['opening_hours'])
 
             set_clause = ", ".join([f"{k} = %s" for k in updates.keys()])
             values = list(updates.values()) + [user_id]
