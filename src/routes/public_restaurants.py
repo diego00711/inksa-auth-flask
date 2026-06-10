@@ -69,6 +69,11 @@ def list_restaurants():
     search   = (request.args.get("search")   or "").strip()
     user_lat = request.args.get("user_lat", type=float)
     user_lon = request.args.get("user_lon", type=float)
+    # Paginação: cap padrão evita payload ilimitado conforme o catálogo cresce
+    limit  = request.args.get("limit",  default=50, type=int)
+    offset = request.args.get("offset", default=0,  type=int)
+    limit  = max(1, min(limit, 100))
+    offset = max(0, offset)
 
     conn = None
     try:
@@ -100,6 +105,9 @@ def list_restaurants():
             where_sql  = ("WHERE " + " AND ".join(where)) if where else ""
             order_sql  = "ORDER BY distance_km ASC NULLS LAST" if has_coords else "ORDER BY restaurant_name"
 
+            # Busca limit+1 para saber se há próxima página sem um COUNT extra
+            params += [limit + 1, offset]
+
             cur.execute(
                 f"""
                 SELECT
@@ -120,12 +128,21 @@ def list_restaurants():
                 FROM restaurant_profiles
                 {where_sql}
                 {order_sql}
+                LIMIT %s OFFSET %s
                 """,
-                params if params else None,
+                params,
             )
 
             rows = [_serialize(dict(r)) for r in cur.fetchall()]
-        return jsonify({"status": "success", "data": rows}), 200
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+        return jsonify({
+            "status": "success",
+            "data": rows,
+            "has_more": has_more,
+            "limit": limit,
+            "offset": offset,
+        }), 200
 
     except Exception as e:
         logger.exception("Erro ao listar restaurantes: %s", e)
