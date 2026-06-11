@@ -161,9 +161,12 @@ def is_allowed_origin(origin: str) -> bool:
         return True
     return False
 
+# Usa o MESMO allowlist do is_allowed_origin (em vez de "*"), pois "*" com
+# credenciais libera qualquer origem. Inclui os domínios de produção, *.vercel.app
+# e localhost — alinhado aos handlers manuais abaixo.
 CORS(
     app,
-    resources={r"/api/*": {"origins": "*"}},
+    resources={r"/api/*": {"origins": list(ALLOWED_ORIGINS) + [re.compile(r"^https://.*\.vercel\.app$")]}},
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization"],
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
