@@ -98,9 +98,28 @@ def ratelimit_error(e):
         "retry_after": str(e.description)
     }), 429
 
+# --- Segredos: nunca cair para um default inseguro e conhecido ---
+import secrets as _secrets
+
+def _secure_secret(env_name, weak_default):
+    """Retorna o segredo do ambiente. Se ausente ou igual ao default inseguro,
+    gera um valor aleatório (fail-closed) e avisa para configurar no Render —
+    em vez de subir com uma chave pública conhecida."""
+    val = os.environ.get(env_name)
+    if not val or val == weak_default:
+        logging.critical(
+            "%s nao configurado (ou usando default inseguro). Gerando valor "
+            "aleatorio temporario — CONFIGURE %s nas variaveis do Render!",
+            env_name, env_name,
+        )
+        return _secrets.token_urlsafe(48)
+    return val
+
 # --- Configuração do Banco para Gamificação ---
 app.config["DB_CONN_FACTORY"] = lambda: psycopg2.connect(os.environ["DATABASE_URL"])
-app.config["GAMIFICATION_INTERNAL_TOKEN"] = os.environ.get("GAMIFICATION_INTERNAL_TOKEN", "token-secreto-trocar")
+app.config["GAMIFICATION_INTERNAL_TOKEN"] = _secure_secret(
+    "GAMIFICATION_INTERNAL_TOKEN", "token-secreto-trocar"
+)
 
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
 if os.path.exists(config_path):
@@ -108,7 +127,7 @@ if os.path.exists(config_path):
 else:
     logging.warning("Arquivo config.py não encontrado. Usando configurações padrão.")
 
-app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET', 'fallback-secret-key-change-in-production')
+app.config['SECRET_KEY'] = _secure_secret('JWT_SECRET', 'fallback-secret-key-change-in-production')
 app.config.update(
     SESSION_COOKIE_SAMESITE="None",
     SESSION_COOKIE_SECURE=True,
