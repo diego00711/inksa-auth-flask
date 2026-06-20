@@ -579,7 +579,7 @@ def list_delivery_incidents():
             params.append(resolution)
         rows = _fetchall(conn, f"""
             SELECT di.id, di.order_id, di.delivery_id, di.reason, di.notes,
-                   di.contact_attempts, di.resolution, di.created_at, di.resolved_at,
+                   di.contact_attempts, di.resolution, di.outcome, di.created_at, di.resolved_at,
                    o.total_amount, o.status AS order_status,
                    COALESCE(cp.first_name || ' ' || cp.last_name, '') AS client_name,
                    cp.phone AS client_phone,
@@ -600,6 +600,7 @@ def list_delivery_incidents():
             "notes": r.get("notes"),
             "contact_attempts": r.get("contact_attempts"),
             "resolution": r.get("resolution"),
+            "outcome": r.get("outcome"),
             "order_status": r.get("order_status"),
             "total_amount": _safe_float(r.get("total_amount")),
             "client_name": (r.get("client_name") or "").strip(),

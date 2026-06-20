@@ -83,6 +83,13 @@ DELIVERY_INCIDENT_REASONS = {
     'payment_issue',        # problema no pagamento (dinheiro)
 }
 
+# Desfechos (o que o entregador faz com o pedido) — padrão iFood
+DELIVERY_INCIDENT_OUTCOMES = {
+    'return_to_restaurant',  # devolver ao restaurante
+    'dispose',               # descartar (perecível / não vale a volta)
+    'keep',                  # entregador liberado / fica com o pedido
+}
+
 def generate_verification_code(length=4):
     chars = string.ascii_uppercase.replace('I', '').replace('O', '')
     chars += string.digits.replace('0', '').replace('1', '')
@@ -488,6 +495,9 @@ def report_delivery_incident(order_id):
         notes = (data.get('notes') or '').strip() or None
         photo_url = (data.get('photo_url') or '').strip() or None
         contact_attempts = data.get('contact_attempts') or {}
+        outcome = (data.get('outcome') or '').strip() or None
+        if outcome and outcome not in DELIVERY_INCIDENT_OUTCOMES:
+            return jsonify({"error": "Desfecho inválido"}), 400
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -508,11 +518,11 @@ def report_delivery_incident(order_id):
             )
             cur.execute(
                 """INSERT INTO delivery_incidents
-                       (order_id, delivery_id, reason, notes, photo_url, contact_attempts)
-                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                       (order_id, delivery_id, reason, notes, photo_url, contact_attempts, outcome)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                 (str(order_id),
                  str(order['delivery_id']) if order['delivery_id'] else None,
-                 reason, notes, photo_url, psycopg2.extras.Json(contact_attempts)),
+                 reason, notes, photo_url, psycopg2.extras.Json(contact_attempts), outcome),
             )
             incident_id = cur.fetchone()['id']
             conn.commit()
@@ -542,6 +552,44 @@ def report_delivery_incident(order_id):
 
     except Exception as e:
         logger.error(f"Erro em report_delivery_incident: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+@orders_bp.route('/<uuid:order_id>/confirm-return', methods=['POST'])
+def confirm_delivery_return(order_id):
+    """Entregador confirma que devolveu o pedido ao restaurante (encerra a devolução)."""
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'delivery':
+            return jsonify({"error": "Apenas o entregador pode confirmar a devolução"}), 403
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """UPDATE delivery_incidents
+                      SET resolution = 'returned', resolved_at = NOW(),
+                          outcome = COALESCE(outcome, 'return_to_restaurant')
+                    WHERE id = (SELECT id FROM delivery_incidents
+                                 WHERE order_id = %s
+                              ORDER BY created_at DESC LIMIT 1)
+                  RETURNING id""",
+                (str(order_id),),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            if not row:
+                return jsonify({"error": "Ocorrência não encontrada para este pedido"}), 404
+        return jsonify({"status": "success", "message": "Devolução confirmada"}), 200
+
+    except Exception as e:
+        logger.error(f"Erro em confirm_delivery_return: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return jsonify({"error": "Erro interno do servidor"}), 500
