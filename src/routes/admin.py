@@ -561,3 +561,98 @@ def create_admin():
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         conn.close()
+
+
+# --------- Ocorrências de entrega ---------
+@admin_bp.route("/incidents", methods=["GET"])
+@admin_required
+def list_delivery_incidents():
+    """Lista ocorrências de entrega para a equipe tratar."""
+    resolution = (request.args.get("resolution") or "").strip()
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+    try:
+        where, params = "", []
+        if resolution:
+            where = "WHERE di.resolution = %s"
+            params.append(resolution)
+        rows = _fetchall(conn, f"""
+            SELECT di.id, di.order_id, di.delivery_id, di.reason, di.notes,
+                   di.contact_attempts, di.resolution, di.created_at, di.resolved_at,
+                   o.total_amount, o.status AS order_status,
+                   COALESCE(cp.first_name || ' ' || cp.last_name, '') AS client_name,
+                   cp.phone AS client_phone,
+                   COALESCE(dp.first_name || ' ' || dp.last_name, '') AS courier_name,
+                   dp.phone AS courier_phone
+              FROM delivery_incidents di
+              LEFT JOIN orders o ON o.id = di.order_id
+              LEFT JOIN client_profiles cp ON cp.user_id = o.client_id
+              LEFT JOIN delivery_profiles dp ON dp.user_id = di.delivery_id
+             {where}
+          ORDER BY di.created_at DESC
+             LIMIT 200
+        """, params)
+        result = [{
+            "id": str(r.get("id")),
+            "order_id": str(r.get("order_id")) if r.get("order_id") else None,
+            "reason": r.get("reason"),
+            "notes": r.get("notes"),
+            "contact_attempts": r.get("contact_attempts"),
+            "resolution": r.get("resolution"),
+            "order_status": r.get("order_status"),
+            "total_amount": _safe_float(r.get("total_amount")),
+            "client_name": (r.get("client_name") or "").strip(),
+            "client_phone": r.get("client_phone"),
+            "courier_name": (r.get("courier_name") or "").strip(),
+            "courier_phone": r.get("courier_phone"),
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            "resolved_at": r["resolved_at"].isoformat() if r.get("resolved_at") else None,
+        } for r in rows]
+        return jsonify({"status": "success", "data": result}), 200
+    except Exception as e:
+        logger.exception("Erro em list_delivery_incidents")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        conn.close()
+
+
+_INCIDENT_RESOLUTIONS = {"pending", "returned", "refunded", "retry", "closed"}
+
+@admin_bp.route("/incidents/<uuid:incident_id>/resolve", methods=["POST"])
+@admin_required
+def resolve_delivery_incident(incident_id):
+    """Define a resolução de uma ocorrência (retornado, reembolsado, etc.)."""
+    data = request.get_json() or {}
+    resolution = (data.get("resolution") or "").strip()
+    if resolution not in _INCIDENT_RESOLUTIONS:
+        return jsonify({"status": "error", "message": "Resolução inválida"}), 400
+    note = (data.get("note") or "").strip()
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if note:
+                cur.execute(
+                    "UPDATE delivery_incidents SET resolution = %s, resolved_at = NOW(), "
+                    "notes = COALESCE(notes,'') || %s WHERE id = %s RETURNING id",
+                    (resolution, f"\n[admin] {note}", str(incident_id)),
+                )
+            else:
+                cur.execute(
+                    "UPDATE delivery_incidents SET resolution = %s, resolved_at = NOW() WHERE id = %s RETURNING id",
+                    (resolution, str(incident_id)),
+                )
+            row = cur.fetchone()
+            conn.commit()
+            if not row:
+                return jsonify({"status": "error", "message": "Ocorrência não encontrada"}), 404
+        return jsonify({"status": "success", "message": "Ocorrência atualizada"}), 200
+    except Exception as e:
+        logger.exception("Erro em resolve_delivery_incident")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        conn.close()
