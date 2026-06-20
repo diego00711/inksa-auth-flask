@@ -67,8 +67,20 @@ STATUS_DISPLAY_MAP = {
     'accepted_by_delivery': 'Aguardando Retirada',
     'delivering': 'Saiu para Entrega',
     'delivered': 'Entregue',
+    'delivery_failed': 'Entrega não realizada',
     'cancelled': 'Cancelado',
     'archived': 'Arquivado'
+}
+
+# Motivos de falha de entrega aceitos (códigos)
+DELIVERY_INCIDENT_REASONS = {
+    'customer_not_found',   # cliente não localizado / não atende
+    'wrong_address',        # endereço errado ou incompleto
+    'customer_refused',     # cliente recusou o pedido
+    'customer_absent',      # ninguém para receber
+    'courier_issue',        # problema com o entregador
+    'wrong_order',          # pedido errado/incompleto
+    'payment_issue',        # problema no pagamento (dinheiro)
 }
 
 def generate_verification_code(length=4):
@@ -450,6 +462,86 @@ def complete_order(order_id):
 
     except Exception as e:
         logger.error(f"Erro em complete_order: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+@orders_bp.route('/<uuid:order_id>/report-incident', methods=['POST'])
+def report_delivery_incident(order_id):
+    """Entregador reporta que não conseguiu concluir a entrega (ex.: cliente não localizado)."""
+    logger.info(f"=== INÍCIO report_delivery_incident para {order_id} ===")
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'delivery':
+            return jsonify({"error": "Apenas o entregador pode reportar ocorrência de entrega"}), 403
+
+        data = request.get_json() or {}
+        reason = str(data.get('reason', '')).strip()
+        if reason not in DELIVERY_INCIDENT_REASONS:
+            return jsonify({"error": "Motivo da ocorrência inválido"}), 400
+        notes = (data.get('notes') or '').strip() or None
+        photo_url = (data.get('photo_url') or '').strip() or None
+        contact_attempts = data.get('contact_attempts') or {}
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT status, delivery_id, client_id FROM orders WHERE id = %s", (str(order_id),))
+            order = cur.fetchone()
+            if not order:
+                return jsonify({"error": "Pedido não encontrado"}), 404
+
+            # Só quem está com o pedido (em rota / aguardando retirada) pode reportar
+            if order['status'] not in ('delivering', 'accepted_by_delivery', 'ready'):
+                return jsonify({
+                    "error": f"Não é possível reportar ocorrência no status: {STATUS_DISPLAY_MAP.get(order['status'], order['status'])}"
+                }), 400
+
+            cur.execute(
+                "UPDATE orders SET status = 'delivery_failed', cancellation_reason = %s, updated_at = NOW() WHERE id = %s",
+                (f"delivery_incident:{reason}", str(order_id)),
+            )
+            cur.execute(
+                """INSERT INTO delivery_incidents
+                       (order_id, delivery_id, reason, notes, photo_url, contact_attempts)
+                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                (str(order_id),
+                 str(order['delivery_id']) if order['delivery_id'] else None,
+                 reason, notes, photo_url, psycopg2.extras.Json(contact_attempts)),
+            )
+            incident_id = cur.fetchone()['id']
+            conn.commit()
+            logger.info(f"Ocorrência {incident_id} registrada para pedido {order_id} (motivo={reason})")
+
+            # FCM: avisa o cliente que houve um problema com a entrega
+            try:
+                if order['client_id']:
+                    _nc = get_db_connection()
+                    if _nc:
+                        try:
+                            with _nc.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
+                                cli_token = _get_fcm_token(_ncur, 'client_profiles', str(order['client_id']))
+                                _notify(cli_token, "Problema com sua entrega",
+                                        "Tivemos um problema ao entregar seu pedido. Nossa equipe vai te contatar.",
+                                        {"order_id": str(order_id), "status": "delivery_failed"})
+                        finally:
+                            _nc.close()
+            except Exception as _e:
+                logger.warning(f"FCM report_incident: {_e}")
+
+        return jsonify({
+            "status": "success",
+            "incident_id": str(incident_id),
+            "order_status": "delivery_failed",
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Erro em report_delivery_incident: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return jsonify({"error": "Erro interno do servidor"}), 500
