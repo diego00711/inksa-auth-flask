@@ -111,7 +111,7 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
                 FROM orders
                 WHERE {partner_col} = %s
                   AND status IN ('delivered', 'delivery_failed')
-                  AND status_pagamento = 'approved'
+                  AND (status_pagamento = 'approved' OR status = 'delivery_failed')
                   AND (payout_status = 'pending' OR payout_status IS NULL)
                   AND {payout_col} IS NULL
                   AND COALESCE({amount_col}, 0) > 0
@@ -131,7 +131,7 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
                 FROM orders
                 WHERE {partner_col} = %s
                   AND status IN ('delivered', 'delivery_failed')
-                  AND status_pagamento = 'approved'
+                  AND (status_pagamento = 'approved' OR status = 'delivery_failed')
                   AND {payout_col} IS NULL
                   AND COALESCE({amount_col}, 0) > 0
                   AND updated_at >= %s AND updated_at <= %s
@@ -390,7 +390,7 @@ def process_payouts(conn, partner_type: str, cycle_type: str) -> list:
             FROM orders o
             WHERE o.{partner_col} IS NOT NULL
               AND o.status IN ('delivered', 'delivery_failed')
-              AND o.status_pagamento = 'approved'
+              AND (o.status_pagamento = 'approved' OR o.status = 'delivery_failed')
               AND COALESCE(o.{amount_col}, 0) > 0
               AND o.{payout_col} IS NULL
               AND o.updated_at >= %s AND o.updated_at <= %s
@@ -408,7 +408,7 @@ def process_payouts(conn, partner_type: str, cycle_type: str) -> list:
                 FROM orders
                 WHERE {partner_col} = %s
                   AND status IN ('delivered', 'delivery_failed')
-                  AND status_pagamento = 'approved'
+                  AND (status_pagamento = 'approved' OR status = 'delivery_failed')
                   AND COALESCE({amount_col}, 0) > 0
                   AND {payout_col} IS NULL
                   AND updated_at >= %s AND updated_at <= %s
