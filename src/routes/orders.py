@@ -4,7 +4,7 @@ import json
 import random
 import string
 from datetime import datetime
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 import psycopg2
 import psycopg2.extras
 import logging
@@ -518,7 +518,7 @@ def report_delivery_incident(order_id):
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
-                "SELECT status, delivery_id, client_id, total_amount, status_pagamento "
+                "SELECT status, delivery_id, client_id, total_amount, status_pagamento, id_transacao_mp "
                 "FROM orders WHERE id = %s",
                 (str(order_id),),
             )
@@ -578,6 +578,36 @@ def report_delivery_incident(order_id):
                 f"Ocorrência {incident_id} registrada para pedido {order_id} "
                 f"(motivo={reason}, culpa={policy['fault']}, reembolso={refund_amount} {refund_status})"
             )
+
+            # Reembolso AUTOMÁTICO (padrão dos grandes): tenta agora; se o MP falhar,
+            # fica 'pending' para o admin processar pelo botão (fallback seguro).
+            if refund_status == 'pending':
+                try:
+                    sdk = current_app.mp_sdk
+                    if sdk and order['id_transacao_mp']:
+                        res = sdk.refund().create(order['id_transacao_mp'])
+                        code = res.get('status', 200) if isinstance(res, dict) else 200
+                        if code < 400:
+                            cur.execute(
+                                "UPDATE delivery_incidents SET refund_status = 'done', "
+                                "resolution = CASE WHEN resolution = 'pending' THEN 'refunded' ELSE resolution END, "
+                                "resolved_at = NOW() WHERE id = %s",
+                                (str(incident_id),),
+                            )
+                            cur.execute(
+                                "UPDATE orders SET status_pagamento = 'refunded', updated_at = NOW() WHERE id = %s",
+                                (str(order_id),),
+                            )
+                            conn.commit()
+                            logger.info(f"Reembolso automático OK: pedido {order_id} R${refund_amount}")
+                        else:
+                            logger.warning(f"MP recusou reembolso automático do pedido {order_id}: {res.get('response')}")
+                except Exception as _re:
+                    logger.warning(f"Reembolso automático falhou (fica pendente p/ admin): {_re}")
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
             # FCM: avisa o cliente que houve um problema com a entrega
             try:
