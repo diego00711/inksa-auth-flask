@@ -3,7 +3,7 @@ import re
 import logging
 from functools import wraps
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
@@ -579,7 +579,8 @@ def list_delivery_incidents():
             params.append(resolution)
         rows = _fetchall(conn, f"""
             SELECT di.id, di.order_id, di.delivery_id, di.reason, di.notes,
-                   di.contact_attempts, di.resolution, di.outcome, di.created_at, di.resolved_at,
+                   di.contact_attempts, di.resolution, di.outcome,
+                   di.fault, di.refund_amount, di.refund_status, di.created_at, di.resolved_at,
                    o.total_amount, o.status AS order_status,
                    COALESCE(cp.first_name || ' ' || cp.last_name, '') AS client_name,
                    cp.phone AS client_phone,
@@ -601,6 +602,9 @@ def list_delivery_incidents():
             "contact_attempts": r.get("contact_attempts"),
             "resolution": r.get("resolution"),
             "outcome": r.get("outcome"),
+            "fault": r.get("fault"),
+            "refund_amount": _safe_float(r.get("refund_amount")),
+            "refund_status": r.get("refund_status"),
             "order_status": r.get("order_status"),
             "total_amount": _safe_float(r.get("total_amount")),
             "client_name": (r.get("client_name") or "").strip(),
@@ -652,6 +656,64 @@ def resolve_delivery_incident(incident_id):
         return jsonify({"status": "success", "message": "Ocorrência atualizada"}), 200
     except Exception as e:
         logger.exception("Erro em resolve_delivery_incident")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@admin_bp.route("/incidents/<uuid:incident_id>/refund", methods=["POST"])
+@admin_required
+def refund_delivery_incident(incident_id):
+    """Processa o reembolso ao cliente (Mercado Pago) de uma ocorrência pendente."""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT di.refund_status, di.order_id, o.id_transacao_mp
+                  FROM delivery_incidents di
+                  LEFT JOIN orders o ON o.id = di.order_id
+                 WHERE di.id = %s
+            """, (str(incident_id),))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"status": "error", "message": "Ocorrência não encontrada"}), 404
+            if row["refund_status"] == "done":
+                return jsonify({"status": "error", "message": "Reembolso já processado"}), 400
+            if row["refund_status"] != "pending":
+                return jsonify({"status": "error", "message": "Sem reembolso pendente para esta ocorrência"}), 400
+            payment_id = row["id_transacao_mp"]
+            if not payment_id:
+                return jsonify({"status": "error", "message": "Pedido sem transação do Mercado Pago"}), 400
+
+            sdk = current_app.mp_sdk
+            if sdk is None:
+                return jsonify({"status": "error", "message": "Mercado Pago indisponível"}), 503
+
+            result = sdk.refund().create(payment_id)
+            resp = result.get("response", {}) if isinstance(result, dict) else {}
+            code = result.get("status", 200) if isinstance(result, dict) else 200
+            if code >= 400:
+                logger.error("MP recusou reembolso: %s", resp)
+                return jsonify({"status": "error", "message": "Mercado Pago recusou o reembolso"}), 400
+
+            cur.execute(
+                "UPDATE delivery_incidents SET refund_status = 'done', "
+                "resolution = CASE WHEN resolution = 'pending' THEN 'refunded' ELSE resolution END, "
+                "resolved_at = COALESCE(resolved_at, NOW()) WHERE id = %s",
+                (str(incident_id),),
+            )
+            cur.execute(
+                "UPDATE orders SET status_pagamento = 'refunded', updated_at = NOW() WHERE id = %s",
+                (str(row["order_id"]),),
+            )
+            conn.commit()
+        return jsonify({"status": "success", "message": "Reembolso processado"}), 200
+    except Exception as e:
+        logger.exception("Erro em refund_delivery_incident")
         try: conn.rollback()
         except Exception: pass
         return jsonify({"status": "error", "message": str(e)}), 500

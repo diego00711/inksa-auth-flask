@@ -110,7 +110,7 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
                        COALESCE(delivery_fee, 0)   AS delivery_fee
                 FROM orders
                 WHERE {partner_col} = %s
-                  AND status = 'delivered'
+                  AND status IN ('delivered', 'delivery_failed')
                   AND status_pagamento = 'approved'
                   AND (payout_status = 'pending' OR payout_status IS NULL)
                   AND {payout_col} IS NULL
@@ -130,7 +130,7 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
                        COALESCE(delivery_fee, 0) AS delivery_fee
                 FROM orders
                 WHERE {partner_col} = %s
-                  AND status = 'delivered'
+                  AND status IN ('delivered', 'delivery_failed')
                   AND status_pagamento = 'approved'
                   AND {payout_col} IS NULL
                   AND COALESCE({amount_col}, 0) > 0
@@ -389,7 +389,7 @@ def process_payouts(conn, partner_type: str, cycle_type: str) -> list:
             SELECT DISTINCT o.{partner_col} AS partner_id
             FROM orders o
             WHERE o.{partner_col} IS NOT NULL
-              AND o.status = 'delivered'
+              AND o.status IN ('delivered', 'delivery_failed')
               AND o.status_pagamento = 'approved'
               AND COALESCE(o.{amount_col}, 0) > 0
               AND o.{payout_col} IS NULL
@@ -407,7 +407,7 @@ def process_payouts(conn, partner_type: str, cycle_type: str) -> list:
                 SELECT id, {amount_col} AS repasse
                 FROM orders
                 WHERE {partner_col} = %s
-                  AND status = 'delivered'
+                  AND status IN ('delivered', 'delivery_failed')
                   AND status_pagamento = 'approved'
                   AND COALESCE({amount_col}, 0) > 0
                   AND {payout_col} IS NULL

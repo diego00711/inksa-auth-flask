@@ -90,6 +90,22 @@ DELIVERY_INCIDENT_OUTCOMES = {
     'keep',                  # entregador liberado / fica com o pedido
 }
 
+# Regra de dinheiro por motivo (padrão dos grandes deliverys), baseada na culpa.
+# pay_restaurant/pay_courier = continuam recebendo; refund_client = cliente reembolsado.
+DELIVERY_INCIDENT_POLICY = {
+    # Culpa do cliente: ele NÃO é reembolsado; restaurante e entregador recebem.
+    'customer_not_found': {'fault': 'customer',   'pay_restaurant': True,  'pay_courier': True,  'refund_client': False},
+    'customer_absent':    {'fault': 'customer',   'pay_restaurant': True,  'pay_courier': True,  'refund_client': False},
+    'wrong_address':      {'fault': 'customer',   'pay_restaurant': True,  'pay_courier': True,  'refund_client': False},
+    'customer_refused':   {'fault': 'customer',   'pay_restaurant': True,  'pay_courier': True,  'refund_client': False},
+    # Culpa do restaurante: cliente reembolsado; restaurante NÃO recebe; entregador recebe.
+    'wrong_order':        {'fault': 'restaurant', 'pay_restaurant': False, 'pay_courier': True,  'refund_client': True},
+    # Culpa do entregador: cliente reembolsado; entregador NÃO recebe; restaurante recebe.
+    'courier_issue':      {'fault': 'courier',    'pay_restaurant': True,  'pay_courier': False, 'refund_client': True},
+    # Pagamento (dinheiro): nada foi cobrado pela plataforma.
+    'payment_issue':      {'fault': 'none',       'pay_restaurant': False, 'pay_courier': False, 'refund_client': False},
+}
+
 def generate_verification_code(length=4):
     chars = string.ascii_uppercase.replace('I', '').replace('O', '')
     chars += string.digits.replace('0', '').replace('1', '')
@@ -501,7 +517,11 @@ def report_delivery_incident(order_id):
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT status, delivery_id, client_id FROM orders WHERE id = %s", (str(order_id),))
+            cur.execute(
+                "SELECT status, delivery_id, client_id, total_amount, status_pagamento "
+                "FROM orders WHERE id = %s",
+                (str(order_id),),
+            )
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado"}), 404
@@ -525,8 +545,39 @@ def report_delivery_incident(order_id):
                  reason, notes, photo_url, psycopg2.extras.Json(contact_attempts), outcome),
             )
             incident_id = cur.fetchone()['id']
+
+            # --- Regra de dinheiro por culpa (padrão dos grandes deliverys) ---
+            policy = DELIVERY_INCIDENT_POLICY.get(
+                reason, {'fault': 'none', 'pay_restaurant': False, 'pay_courier': False, 'refund_client': False}
+            )
+            is_online = (order['status_pagamento'] == 'approved')
+            # Zera o repasse de quem não deve receber; quem recebe fica com o valor já calculado
+            zero_parts = []
+            if not policy['pay_restaurant']:
+                zero_parts.append("valor_repassado_restaurante = 0")
+            if not policy['pay_courier']:
+                zero_parts.append("valor_repassado_entregador = 0")
+            if zero_parts:
+                cur.execute(
+                    f"UPDATE orders SET {', '.join(zero_parts)}, updated_at = NOW() WHERE id = %s",
+                    (str(order_id),),
+                )
+            # Reembolso só se houver culpa não-cliente E pagamento online aprovado
+            refund_amount = 0
+            refund_status = 'not_due'
+            if policy['refund_client'] and is_online:
+                refund_amount = float(order['total_amount'] or 0)
+                refund_status = 'pending' if refund_amount > 0 else 'not_due'
+            cur.execute(
+                "UPDATE delivery_incidents SET fault = %s, refund_amount = %s, refund_status = %s WHERE id = %s",
+                (policy['fault'], refund_amount, refund_status, str(incident_id)),
+            )
+
             conn.commit()
-            logger.info(f"Ocorrência {incident_id} registrada para pedido {order_id} (motivo={reason})")
+            logger.info(
+                f"Ocorrência {incident_id} registrada para pedido {order_id} "
+                f"(motivo={reason}, culpa={policy['fault']}, reembolso={refund_amount} {refund_status})"
+            )
 
             # FCM: avisa o cliente que houve um problema com a entrega
             try:
