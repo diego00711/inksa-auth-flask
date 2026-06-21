@@ -8,7 +8,7 @@ from flask import Blueprint, request, jsonify, current_app
 import psycopg2
 import psycopg2.extras
 import logging
-from ..utils.helpers import get_db_connection, get_user_id_from_token
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from src.extensions import limiter
 
 try:
@@ -639,6 +639,36 @@ def report_delivery_incident(order_id):
     finally:
         if conn:
             conn.close()
+
+@orders_bp.route('/<uuid:order_id>/incident-photo', methods=['POST'])
+def upload_incident_photo(order_id):
+    """Entregador envia uma foto-comprovante da ocorrência (ex.: foto do local)."""
+    user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'delivery':
+        return jsonify({"error": "Apenas o entregador pode enviar a foto"}), 403
+    if not supabase:
+        return jsonify({"error": "Storage indisponível"}), 503
+    if 'file' not in request.files:
+        return jsonify({"error": "Nenhum arquivo enviado com o campo 'file'"}), 400
+    file = request.files['file']
+    if not file or file.filename == '':
+        return jsonify({"error": "Arquivo inválido"}), 400
+    try:
+        import os as _os
+        ext = _os.path.splitext(file.filename)[1] or '.jpg'
+        unique = f"incident_{order_id}_{uuid.uuid4()}{ext}"
+        supabase.storage.from_("incident-photos").upload(
+            path=unique,
+            file=file.read(),
+            file_options={"content-type": file.mimetype or "image/jpeg", "upsert": "true"},
+        )
+        public_url = supabase.storage.from_("incident-photos").get_public_url(unique)
+        return jsonify({"status": "success", "photo_url": public_url}), 200
+    except Exception as e:
+        logger.error(f"Erro ao enviar foto da ocorrência {order_id}: {e}", exc_info=True)
+        return jsonify({"error": "Erro ao enviar a foto"}), 500
 
 @orders_bp.route('/<uuid:order_id>/confirm-return', methods=['POST'])
 def confirm_delivery_return(order_id):

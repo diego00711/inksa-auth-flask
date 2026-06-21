@@ -578,7 +578,7 @@ def list_delivery_incidents():
             where = "WHERE di.resolution = %s"
             params.append(resolution)
         rows = _fetchall(conn, f"""
-            SELECT di.id, di.order_id, di.delivery_id, di.reason, di.notes,
+            SELECT di.id, di.order_id, di.delivery_id, di.reason, di.notes, di.photo_url,
                    di.contact_attempts, di.resolution, di.outcome,
                    di.fault, di.refund_amount, di.refund_status, di.created_at, di.resolved_at,
                    o.total_amount, o.status AS order_status,
@@ -599,6 +599,7 @@ def list_delivery_incidents():
             "order_id": str(r.get("order_id")) if r.get("order_id") else None,
             "reason": r.get("reason"),
             "notes": r.get("notes"),
+            "photo_url": r.get("photo_url"),
             "contact_attempts": r.get("contact_attempts"),
             "resolution": r.get("resolution"),
             "outcome": r.get("outcome"),
