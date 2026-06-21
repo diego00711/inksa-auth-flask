@@ -344,10 +344,26 @@ def forgot_password():
             logger.error("Supabase client não inicializado em /forgot-password")
             return jsonify({"status": "error", "error": "Serviço de autenticação indisponível"}), 500
 
+        # --- Para onde o link do e-mail deve levar (a página de redefinição do
+        # app que pediu) — derivado do Origin, validado contra os domínios aceitos.
+        origin = (request.headers.get('Origin') or '').rstrip('/')
+        origin_ok = bool(origin) and (
+            origin.endswith('.inksadelivery.com.br')
+            or origin.endswith('.vercel.app')
+            or origin.startswith('http://localhost')
+            or origin.startswith('http://127.0.0.1')
+        )
+        redirect_to = (f"{origin}/reset-password" if origin_ok
+                       else "https://clientes.inksadelivery.com.br/reset-password")
+
         # --- Envia o e-mail de reset via Supabase Auth ---
         try:
-            supabase.auth.reset_password_email(email)
-            logger.info(f"Reset de senha solicitado para: {email}")
+            try:
+                supabase.auth.reset_password_email(email, {"redirect_to": redirect_to})
+            except TypeError:
+                # SDK sem suporte a options nesse formato — envia sem redirect
+                supabase.auth.reset_password_email(email)
+            logger.info(f"Reset de senha solicitado para: {email} (redirect={redirect_to})")
         except Exception as reset_err:
             # Registra internamente mas NÃO revela ao cliente se o e-mail existe ou não
             logger.warning(f"Erro ao enviar reset de senha para {email}: {reset_err}")
@@ -363,3 +379,43 @@ def forgot_password():
     except Exception as e:
         logger.error(f"Erro crítico em /forgot-password: {e}", exc_info=True)
         return jsonify({"status": "error", "error": "Erro interno ao processar solicitação"}), 500
+
+
+@auth_bp.route('/reset-password', methods=['POST'])
+def reset_password():
+    """Redefine a senha usando o token de recuperação (access_token vindo do link do e-mail).
+    Campos: token (ou access_token) + new_password (ou password).
+    """
+    try:
+        data = request.get_json() or {}
+        access_token = (data.get('token') or data.get('access_token') or '').strip()
+        new_password = data.get('new_password') or data.get('password') or ''
+
+        if not access_token:
+            return jsonify({"status": "error", "error": "Token de redefinição ausente"}), 400
+        if len(new_password) < 6:
+            return jsonify({"status": "error", "error": "A nova senha deve ter no mínimo 6 caracteres"}), 400
+        if not supabase:
+            return jsonify({"status": "error", "error": "Serviço de autenticação indisponível"}), 500
+
+        # Valida o token de recuperação e identifica o usuário
+        try:
+            user_resp = supabase.auth.get_user(access_token)
+            user = getattr(user_resp, "user", None)
+        except Exception as ve:
+            logger.warning(f"Token de reset inválido: {ve}")
+            user = None
+        if not user:
+            return jsonify({"status": "error", "error": "Link expirado ou inválido. Solicite um novo."}), 401
+
+        # Atualiza a senha via admin API (service_role)
+        supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
+        logger.info(f"Senha redefinida com sucesso para o usuário {user.id}")
+        return jsonify({
+            "status": "success",
+            "message": "Senha redefinida com sucesso! Faça login com a nova senha.",
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Erro em /reset-password: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": "Erro ao redefinir a senha"}), 500
