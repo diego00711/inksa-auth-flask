@@ -6,6 +6,7 @@ import psycopg2.extras
 from flask import Blueprint, jsonify, request
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token
+from ..utils.platform_settings import invalidate_cache as invalidate_settings_cache
 
 logger = logging.getLogger(__name__)
 settings_bp = Blueprint("settings_bp", __name__)
@@ -84,6 +85,7 @@ def update_settings():
                     (str(key), str(value) if value is not None else None),
                 )
         conn.commit()
+        invalidate_settings_cache()
         return jsonify({"message": "Configurações salvas com sucesso"}), 200
     except Exception:
         try:

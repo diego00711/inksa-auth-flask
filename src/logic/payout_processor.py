@@ -1,15 +1,13 @@
 # src/logic/payout_processor.py
 import logging
-import os
 import uuid as uuidlib
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import psycopg2.extras
 
-logger = logging.getLogger(__name__)
+from ..utils.platform_settings import get_settings
 
-# Platform keeps 15% of delivery_fee; delivery partner gets 85%
-_DELIVERY_PLATFORM_SHARE = Decimal("0.15")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -17,15 +15,26 @@ _DELIVERY_PLATFORM_SHARE = Decimal("0.15")
 # ---------------------------------------------------------------------------
 
 def get_commission_rate() -> Decimal:
-    """Returns platform commission rate from env PLATFORM_COMMISSION_RATE (default 10%)."""
+    """Returns platform commission rate from platform_settings (admin editable)."""
     try:
-        raw = os.environ.get("PLATFORM_COMMISSION_RATE", "0.10")
-        rate = Decimal(str(raw))
+        rate = get_settings()["commission_rate"]
         if not (Decimal("0") < rate < Decimal("1")):
             raise ValueError("must be between 0 and 1")
         return rate
     except Exception:
         return Decimal("0.10")
+
+
+def get_delivery_platform_share() -> Decimal:
+    """
+    Returns the platform's share of the delivery fee (e.g. 0.15 = 15% to platform, 85% to courier).
+
+    NOTE: this is used by the legacy share-of-fee model. The new repasse model is
+    `delivery_base_fee + delivery_per_km_fee * distance` (calculated upstream and
+    written to orders.valor_repassado_entregador).
+    """
+    s = get_settings()
+    return s.get("delivery_platform_share", Decimal("0.15"))
 
 
 def is_payout_day(cycle_type: str, reference_date: date = None) -> bool:
@@ -144,7 +153,7 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
 
 def _calculate_amounts(orders, partner_type: str, commission_rate: Decimal):
     """Returns (total_gross, commission_fee, total_net, per_order list)."""
-    delivery_platform_share = _DELIVERY_PLATFORM_SHARE
+    delivery_platform_share = get_delivery_platform_share()
     per_order = []
     total_gross = Decimal("0")
     total_net = Decimal("0")

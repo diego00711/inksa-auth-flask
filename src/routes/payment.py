@@ -12,6 +12,9 @@ import eventlet
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Helpers de cálculo (admin-configuráveis via platform_settings)
+from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
+
 # Criação do Blueprint
 mp_payment_bp = Blueprint('mp_payment_bp', __name__)
 
@@ -484,14 +487,18 @@ def processar_pagamento_cartao():
         logging.info(f"💳 Pagamento MP criado: id={payment_id} status={status}")
 
         if status == 'approved':
-            rate = current_app.config.get('PLATFORM_COMMISSION_RATE', 0.15)
-            comissao = round(subtotal_validado * rate, 2)
+            # Comissão e repasse vêm de platform_settings (editáveis no admin)
+            comissao = float(calculate_platform_commission(subtotal_validado))
+            courier_payout = float(calculate_courier_payout(
+                d.get('delivery_distance_km'),
+                delivery_fee=d.get('delivery_fee', 0),
+            ))
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',
                 'comissao_plataforma': comissao,
                 'valor_repassado_restaurante': round(subtotal_validado - comissao, 2),
-                'valor_repassado_entregador': round(float(d.get('delivery_fee', 0)), 2),
+                'valor_repassado_entregador': courier_payout,
                 'id_transacao_mp': str(payment_id),
             }).eq('id', pedido_id).execute()
             return jsonify({"status": "approved", "pedido_id": pedido_id, "payment_id": payment_id}), 200
@@ -611,10 +618,14 @@ def mercadopago_webhook():
                     
                     valor_total_itens = float(pedido_do_bd.get('total_amount_items', 0.0))
 
-                    comissao_plataforma = valor_total_itens * current_app.config['PLATFORM_COMMISSION_RATE']
+                    # Comissão e repasse vêm de platform_settings (editáveis no admin)
+                    comissao_plataforma = float(calculate_platform_commission(valor_total_itens))
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
 
-                    valor_para_entregador = float(pedido_do_bd.get('delivery_fee', 0.0))  # entregador recebe 100% do frete
+                    valor_para_entregador = float(calculate_courier_payout(
+                        pedido_do_bd.get('delivery_distance_km'),
+                        delivery_fee=pedido_do_bd.get('delivery_fee', 0.0),
+                    ))
                     
                     # ✅ DADOS QUE SERÃO ATUALIZADOS
                     update_data = {

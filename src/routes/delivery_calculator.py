@@ -1,10 +1,10 @@
 
 from flask import Blueprint, request, jsonify
 from flask_cors import CORS
-import os
 import math
 import logging
 from ..utils.helpers import supabase
+from ..utils.platform_settings import get_settings
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO)
@@ -12,11 +12,6 @@ logger = logging.getLogger(__name__)
 
 delivery_calculator_bp = Blueprint('delivery_calculator', __name__)
 CORS(delivery_calculator_bp)  # Habilita CORS para este blueprint
-
-# Configurações de frete
-FIXED_DELIVERY_FEE = float(os.environ.get('FIXED_DELIVERY_FEE', '3.0'))
-FREE_DELIVERY_THRESHOLD_KM = float(os.environ.get('FREE_DELIVERY_THRESHOLD_KM', '2.0'))
-PER_KM_DELIVERY_FEE = float(os.environ.get('PER_KM_DELIVERY_FEE', '1.5'))
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calcula a distância entre duas coordenadas usando a fórmula de Haversine"""
@@ -125,17 +120,20 @@ def calculate_delivery_fee():
             
             logger.info(f"Distância calculada: {distance_km} km")
 
-            # Calcular taxa baseada na distância
-            delivery_fee = FIXED_DELIVERY_FEE
-            
-            if distance_km > FREE_DELIVERY_THRESHOLD_KM:
-                additional_km = distance_km - FREE_DELIVERY_THRESHOLD_KM
-                additional_cost = additional_km * PER_KM_DELIVERY_FEE
-                delivery_fee += additional_cost
-                calculation_method = f"Taxa base R$ {FIXED_DELIVERY_FEE} + R$ {PER_KM_DELIVERY_FEE}/km extra"
+            # Calcular taxa baseada na distância (lê do platform_settings com cache)
+            s = get_settings()
+            fixed_fee = float(s["fixed_delivery_fee"])
+            per_km_fee = float(s["per_km_delivery_fee"])
+            free_threshold = float(s["free_delivery_threshold_km"])
+
+            delivery_fee = fixed_fee
+            if distance_km > free_threshold:
+                additional_km = distance_km - free_threshold
+                delivery_fee += additional_km * per_km_fee
+                calculation_method = f"Taxa base R$ {fixed_fee:.2f} + R$ {per_km_fee:.2f}/km extra"
             else:
-                calculation_method = f"Taxa base R$ {FIXED_DELIVERY_FEE} (dentro do limite gratuito)"
-                
+                calculation_method = f"Taxa base R$ {fixed_fee:.2f} (dentro do limite gratuito)"
+
             logger.info(f"Taxa calculada: R$ {delivery_fee}")
         
         else:
@@ -181,12 +179,13 @@ def calculate_delivery_fee():
 @delivery_calculator_bp.route('/test', methods=['GET'])
 def test_delivery_calculator():
     """Endpoint de teste para verificar se o serviço está funcionando"""
+    s = get_settings()
     return jsonify({
         "status": "success",
         "message": "Serviço de cálculo de frete funcionando",
         "config": {
-            "fixed_fee": FIXED_DELIVERY_FEE,
-            "free_threshold_km": FREE_DELIVERY_THRESHOLD_KM,
-            "per_km_fee": PER_KM_DELIVERY_FEE
+            "fixed_fee": float(s["fixed_delivery_fee"]),
+            "free_threshold_km": float(s["free_delivery_threshold_km"]),
+            "per_km_fee": float(s["per_km_delivery_fee"]),
         }
     }), 200
