@@ -457,6 +457,9 @@ def get_admin_profile():
             return jsonify({"status": "success", "data": profile}), 200
         finally:
             conn.close()
+    except Exception as e:
+        logger.exception("Erro em get_admin_profile")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @admin_bp.route("/profile", methods=["PUT"])
