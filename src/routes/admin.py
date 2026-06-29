@@ -427,6 +427,7 @@ def get_admin_profile():
 
         try:
             user_row = _fetchrow(conn, "SELECT user_type, created_at FROM users WHERE id = %s", (user_id,))
+            extra = _fetchrow(conn, "SELECT name, cargo, phone, avatar_url FROM admin_profiles WHERE user_id = %s", (user_id,)) or {}
             recent_logs = _fetchall(conn, """
                 SELECT timestamp, action, details
                   FROM admin_logs
@@ -440,6 +441,10 @@ def get_admin_profile():
                 "email": email,
                 "user_type": user_row.get("user_type", "admin") if user_row else "admin",
                 "created_at": user_row["created_at"].isoformat() if user_row and user_row.get("created_at") else None,
+                "name": extra.get("name"),
+                "cargo": extra.get("cargo"),
+                "phone": extra.get("phone"),
+                "avatar_url": extra.get("avatar_url"),
                 "recent_actions": [
                     {
                         "timestamp": r["timestamp"].isoformat() if r.get("timestamp") else None,
@@ -452,6 +457,109 @@ def get_admin_profile():
             return jsonify({"status": "success", "data": profile}), 200
         finally:
             conn.close()
+
+
+@admin_bp.route("/profile", methods=["PUT"])
+@admin_required
+def update_admin_profile():
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip() or None
+    cargo = (data.get("cargo") or "").strip() or None
+    phone = (data.get("phone") or "").strip() or None
+
+    token = _extract_bearer_token(request.headers.get("Authorization"))
+    try:
+        user_resp = supabase.auth.get_user(token)
+        user = getattr(user_resp, "user", None)
+        if not user:
+            return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
+
+        user_id = str(user.id)
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO admin_profiles (user_id, name, cargo, phone, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                        SET name = EXCLUDED.name,
+                            cargo = EXCLUDED.cargo,
+                            phone = EXCLUDED.phone,
+                            updated_at = NOW()
+                """, (user_id, name, cargo, phone))
+            conn.commit()
+            log_admin_action_auto("UpdateProfile", f"Atualizou perfil: nome={name}, cargo={cargo}")
+            return jsonify({"status": "success", "data": {"name": name, "cargo": cargo, "phone": phone}}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("Erro em update_admin_profile")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@admin_bp.route("/profile/avatar", methods=["POST"])
+@admin_required
+def upload_admin_avatar():
+    if "avatar" not in request.files:
+        return jsonify({"status": "error", "message": "Nenhum arquivo enviado"}), 400
+
+    file = request.files["avatar"]
+    if not file or file.filename == "":
+        return jsonify({"status": "error", "message": "Arquivo inválido"}), 400
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "png"
+    if ext not in {"png", "jpg", "jpeg", "gif", "webp"}:
+        return jsonify({"status": "error", "message": "Tipo de arquivo não permitido"}), 400
+
+    file.seek(0, 2)
+    size = file.tell()
+    file.seek(0)
+    if size > 5 * 1024 * 1024:
+        return jsonify({"status": "error", "message": "Arquivo muito grande (máx 5MB)"}), 400
+
+    token = _extract_bearer_token(request.headers.get("Authorization"))
+    try:
+        user_resp = supabase.auth.get_user(token)
+        user = getattr(user_resp, "user", None)
+        if not user:
+            return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
+
+        user_id = str(user.id)
+        import uuid as _uuid
+        filename = f"admin_{user_id}_{_uuid.uuid4().hex}.{ext}"
+
+        supabase.storage.from_("banner-images").upload(
+            path=filename,
+            file=file.read(),
+            file_options={"content-type": f"image/{ext}", "upsert": "true"},
+        )
+
+        import os as _os
+        supabase_url = (_os.environ.get("SUPABASE_URL") or "").rstrip("/")
+        avatar_url = f"{supabase_url}/storage/v1/object/public/banner-images/{filename}"
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO admin_profiles (user_id, avatar_url, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                        SET avatar_url = EXCLUDED.avatar_url,
+                            updated_at = NOW()
+                """, (user_id, avatar_url))
+            conn.commit()
+            log_admin_action_auto("UpdateAvatar", "Admin atualizou foto de perfil")
+            return jsonify({"status": "success", "data": {"avatar_url": avatar_url}}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("Erro em upload_admin_avatar")
+        return jsonify({"status": "error", "message": str(e)}), 500
     except Exception as e:
         logger.exception("Erro em get_admin_profile")
         return jsonify({"status": "error", "message": str(e)}), 500
