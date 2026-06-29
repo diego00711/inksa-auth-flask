@@ -85,6 +85,30 @@ app = Flask(__name__)
 app.url_map.strict_slashes = False
 Compress(app)
 
+# --- JSON encoder: serializa date/datetime/Decimal/UUID em todos jsonify() ---
+from src.utils.helpers import CustomJSONEncoder
+try:
+    # Flask >= 2.3 (provider-based)
+    from flask.json.provider import DefaultJSONProvider
+    import datetime as _dt
+    import decimal as _dec
+    import uuid as _uuid
+
+    class _InksaProvider(DefaultJSONProvider):
+        def default(self, obj):
+            if isinstance(obj, _dec.Decimal):
+                return float(obj)
+            if isinstance(obj, (_dt.datetime, _dt.date, _dt.time)):
+                return obj.isoformat()
+            if isinstance(obj, _uuid.UUID):
+                return str(obj)
+            return super().default(obj)
+
+    app.json = _InksaProvider(app)
+except Exception:
+    # Fallback Flask < 2.3
+    app.json_encoder = CustomJSONEncoder
+
 # --- Rate Limiting ---
 from flask import jsonify as _jsonify
 from src.extensions import limiter
