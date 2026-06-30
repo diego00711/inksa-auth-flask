@@ -389,6 +389,76 @@ def admin_revenue_series():
     finally:
         conn.close()
 
+@admin_bp.route("/user-metrics", methods=["GET", "OPTIONS"])
+@admin_required
+def admin_user_metrics():
+    """Métricas agregadas de usuários: totais por tipo, ativos, novos cadastros."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "DB connection error"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT
+                  COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'client') AS clientes,
+                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'restaurant') AS restaurantes,
+                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'delivery') AS entregadores,
+                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'admin') AS admins,
+                  COUNT(*) FILTER (WHERE last_sign_in_at > NOW() - INTERVAL '15 minutes') AS online_agora,
+                  COUNT(*) FILTER (WHERE last_sign_in_at > NOW() - INTERVAL '24 hours') AS ativos_24h,
+                  COUNT(*) FILTER (WHERE last_sign_in_at > NOW() - INTERVAL '7 days') AS ativos_7d,
+                  COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS novos_24h,
+                  COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') AS novos_7d,
+                  COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') AS novos_30d
+                FROM auth.users
+                WHERE deleted_at IS NULL;
+            """)
+            totals = dict(cur.fetchone())
+
+            cur.execute("""
+                SELECT
+                  TO_CHAR((created_at AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS dia,
+                  TO_CHAR((created_at AT TIME ZONE 'America/Sao_Paulo')::date, 'DD/MM') AS rotulo,
+                  COUNT(*) AS qtd
+                FROM auth.users
+                WHERE deleted_at IS NULL
+                  AND created_at > NOW() - INTERVAL '14 days'
+                GROUP BY 1, 2
+                ORDER BY 1 ASC;
+            """)
+            serie = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT
+                  email,
+                  raw_user_meta_data->>'user_type' AS tipo,
+                  TO_CHAR(created_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SS') AS criado_em,
+                  TO_CHAR(last_sign_in_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SS') AS ultimo_login
+                FROM auth.users
+                WHERE deleted_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 10;
+            """)
+            recentes = [dict(r) for r in cur.fetchall()]
+
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "totals": totals,
+                    "registros_por_dia": serie,
+                    "cadastros_recentes": recentes,
+                }
+            }), 200
+    except Exception:
+        logger.exception("Erro em admin_user_metrics")
+        return jsonify({"status": "error", "message": "Erro ao buscar métricas"}), 500
+    finally:
+        conn.close()
+
+
 @admin_bp.route("/transactions", methods=["GET", "OPTIONS"])
 @admin_required
 def admin_transactions():
