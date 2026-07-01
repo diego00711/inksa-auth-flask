@@ -9,42 +9,81 @@ from src.extensions import limiter
 auth_bp = Blueprint('auth_bp', __name__)
 logger = logging.getLogger(__name__)
 
+# Rótulos amigáveis por tipo de conta (usado nas mensagens de erro)
+USER_TYPE_LABELS = {
+    'client': 'Cliente',
+    'restaurant': 'Restaurante',
+    'delivery': 'Entregador',
+    'admin': 'Administrador',
+}
+
+
+def _traduzir_erro_supabase(err_msg: str) -> str:
+    """Converte mensagens de erro do Supabase (em inglês) para PT-BR amigável."""
+    m = (err_msg or '').lower()
+    if 'invalid login credentials' in m or 'invalid credentials' in m:
+        return 'E-mail ou senha incorretos. Confira e tente de novo.'
+    if 'email not confirmed' in m:
+        return 'Seu e-mail ainda não foi confirmado. Verifique sua caixa de entrada.'
+    if 'user not found' in m:
+        return 'Não encontramos uma conta com esse e-mail.'
+    if 'too many requests' in m or 'rate limit' in m:
+        return 'Muitas tentativas em pouco tempo. Aguarde um momento e tente de novo.'
+    if 'network' in m or 'timeout' in m:
+        return 'Falha de conexão. Verifique sua internet e tente novamente.'
+    return 'Não foi possível entrar. Verifique seus dados e tente novamente.'
+
+
 @auth_bp.route('/login', methods=['POST'])
 @limiter.limit("10 per minute")
 def login():
     try:
         data = request.get_json()
         if not data or 'email' not in data or 'password' not in data:
-            return jsonify({"status": "error", "error": "Email e senha são obrigatórios"}), 400
+            return jsonify({"status": "error", "error": "Preencha e-mail e senha."}), 400
 
         email, password = data.get('email'), data.get('password')
-        auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
-        
+        # Cada app envia o tipo esperado (client/restaurant/delivery) para bloquear login cruzado
+        expected_user_type = (data.get('expected_user_type') or '').strip().lower() or None
+
+        try:
+            auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        except Exception as auth_err:
+            friendly = _traduzir_erro_supabase(str(auth_err.args[0]) if auth_err.args else str(auth_err))
+            return jsonify({"status": "error", "error": friendly}), 401
+
         user, session = auth_response.user, auth_response.session
         if not user or not session:
-            return jsonify({"status": "error", "error": "Falha na autenticação"}), 401
+            return jsonify({"status": "error", "error": "E-mail ou senha incorretos."}), 401
 
-        # A resposta agora inclui o user_type, que é crucial para o front-end.
         user_metadata = user.user_metadata or {}
         user_type = user_metadata.get('user_type', 'unknown')
+
+        # --- Bloqueia login cruzado entre apps ---
+        if expected_user_type and user_type != expected_user_type:
+            conta_label = USER_TYPE_LABELS.get(user_type, 'de outro tipo')
+            app_label = USER_TYPE_LABELS.get(expected_user_type, 'este')
+            return jsonify({
+                "status": "error",
+                "error": f"Esta conta é de {conta_label}, não pode entrar no app de {app_label}. Use o app correto ou crie uma conta de {app_label}.",
+                "error_code": "WRONG_ACCOUNT_TYPE"
+            }), 403
 
         return jsonify({
             "status": "success",
             "data": {
                 "message": "Login realizado com sucesso",
                 "token": session.access_token,
-                "user": { 
-                    "id": user.id, 
+                "user": {
+                    "id": user.id,
                     "email": user.email,
-                    "user_type": user_type 
+                    "user_type": user_type
                 }
             }
         }), 200
     except Exception as e:
         logger.error(f"Erro no login: {str(e)}", exc_info=True)
-        # Retorna o erro específico do Supabase se disponível
-        error_message = str(e.args[0]) if e.args else "Credenciais inválidas ou erro interno"
-        return jsonify({"status": "error", "error": error_message}), 401
+        return jsonify({"status": "error", "error": "Erro interno ao entrar. Tente novamente em instantes."}), 500
 
 
 # ✅ NOVO ENDPOINT: RETORNA DADOS DO USUÁRIO AUTENTICADO (INCLUI EMAIL)
