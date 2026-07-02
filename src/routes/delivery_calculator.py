@@ -101,38 +101,37 @@ def calculate_delivery_fee():
             logger.info(f"Entrega própria: R$ {delivery_fee}")
             
         elif delivery_type == 'platform':
-            # Plataforma calcula baseado na distância
-            restaurant_latitude = restaurant_data.get('latitude')
-            restaurant_longitude = restaurant_data.get('longitude')
-
-            if not restaurant_latitude or not restaurant_longitude:
-                logger.error("Coordenadas do restaurante não encontradas")
-                return jsonify({
-                    "status": "error",
-                    "error": "Coordenadas do restaurante não cadastradas"
-                }), 400
-
-            # Calcular distância
-            distance_km = haversine_distance(
-                float(restaurant_latitude), float(restaurant_longitude),
-                float(client_latitude), float(client_longitude)
-            )
-            
-            logger.info(f"Distância calculada: {distance_km} km")
-
-            # Calcular taxa baseada na distância (lê do platform_settings com cache)
+            # Plataforma calcula baseado na distância (lê do platform_settings com cache)
             s = get_settings()
             fixed_fee = float(s["fixed_delivery_fee"])
             per_km_fee = float(s["per_km_delivery_fee"])
             free_threshold = float(s["free_delivery_threshold_km"])
 
-            delivery_fee = fixed_fee
-            if distance_km > free_threshold:
-                additional_km = distance_km - free_threshold
-                delivery_fee += additional_km * per_km_fee
-                calculation_method = f"Taxa base R$ {fixed_fee:.2f} + R$ {per_km_fee:.2f}/km extra"
+            restaurant_latitude = restaurant_data.get('latitude')
+            restaurant_longitude = restaurant_data.get('longitude')
+
+            # Se o restaurante ainda não tem coordenadas, NÃO quebra o carrinho:
+            # cobra a taxa base (fixa) e sinaliza que a distância não foi calculada.
+            if not restaurant_latitude or not restaurant_longitude:
+                logger.warning("Restaurante sem coordenadas — usando taxa base fixa")
+                delivery_fee = fixed_fee
+                distance_km = 0.0
+                calculation_method = f"Taxa base R$ {fixed_fee:.2f} (restaurante sem localização cadastrada)"
             else:
-                calculation_method = f"Taxa base R$ {fixed_fee:.2f} (dentro do limite gratuito)"
+                # Calcular distância
+                distance_km = haversine_distance(
+                    float(restaurant_latitude), float(restaurant_longitude),
+                    float(client_latitude), float(client_longitude)
+                )
+                logger.info(f"Distância calculada: {distance_km} km")
+
+                delivery_fee = fixed_fee
+                if distance_km > free_threshold:
+                    additional_km = distance_km - free_threshold
+                    delivery_fee += additional_km * per_km_fee
+                    calculation_method = f"Taxa base R$ {fixed_fee:.2f} + R$ {per_km_fee:.2f}/km extra"
+                else:
+                    calculation_method = f"Taxa base R$ {fixed_fee:.2f} (dentro do limite gratuito)"
 
             logger.info(f"Taxa calculada: R$ {delivery_fee}")
         
