@@ -6,7 +6,7 @@ import psycopg2.extras
 from flask import Blueprint, request, jsonify
 from flask_cors import CORS
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from ..utils.audit import log_admin_action_auto
 
 # Create blueprint for admin users API endpoints
@@ -566,7 +566,9 @@ def update_user(user_id):
                         ),
                         400,
                     )
-                # Status não é salvo diretamente em users; mantemos para auditoria
+                # Persiste em users.is_active (ativar/desativar acesso)
+                updates.append("is_active = %s")
+                params.append(new_status == "active")
                 update_details.append(f"status: -> {new_status}")
 
             if updates:
@@ -601,6 +603,95 @@ def update_user(user_id):
             ),
             500,
         )
+    finally:
+        if conn:
+            conn.close()
+
+
+@admin_users_bp.route("/<uuid:user_id>/reset-password", methods=["POST"])
+@admin_users_bp.route("/<uuid:user_id>/reset-password/", methods=["POST"])
+@admin_required
+def admin_reset_user_password(user_id):
+    """
+    Envia um e-mail de redefinição de senha para o usuário.
+    O admin NUNCA vê nem define a senha — o próprio usuário cria a nova pelo link.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT email FROM users WHERE id = %s", (str(user_id),))
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
+        email = row["email"]
+
+        if not supabase:
+            return jsonify({"status": "error", "message": "Serviço de autenticação indisponível"}), 503
+
+        redirect_to = "https://clientes.inksadelivery.com.br/reset-password"
+        try:
+            supabase.auth.reset_password_email(email, {"redirect_to": redirect_to})
+        except TypeError:
+            supabase.auth.reset_password_email(email)
+
+        log_admin_action_auto("ResetUserPassword", f"Enviou reset de senha para {email} (ID: {user_id})")
+        return jsonify({"status": "success", "message": f"E-mail de redefinição enviado para {email}."}), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Erro ao enviar redefinição de senha.", "detail": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+@admin_users_bp.route("/<uuid:user_id>", methods=["DELETE"])
+@admin_users_bp.route("/<uuid:user_id>/", methods=["DELETE"])
+@admin_required
+def admin_delete_user(user_id):
+    """
+    Exclui permanentemente o usuário do Supabase Auth. Os perfis relacionados
+    (client/restaurant/delivery) são removidos por cascade (FK ON DELETE CASCADE).
+    Ação irreversível — o frontend deve pedir confirmação.
+    """
+    # Nao permite o admin excluir a si mesmo
+    requester_id, _, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if not err and str(requester_id) == str(user_id):
+        return jsonify({"status": "error", "message": "Você não pode excluir a própria conta."}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT email, user_type FROM users WHERE id = %s", (str(user_id),))
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
+        email = row["email"]
+
+        if not supabase:
+            return jsonify({"status": "error", "message": "Serviço de autenticação indisponível"}), 503
+
+        # Remove do Supabase Auth (dispara cascade nas tabelas de perfil via FK)
+        supabase.auth.admin.delete_user(str(user_id))
+
+        # Garante limpeza da linha em public.users caso não haja cascade nela
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM users WHERE id = %s", (str(user_id),))
+            conn.commit()
+        except Exception:
+            conn.rollback()  # se já foi removido por cascade, ignora
+
+        log_admin_action_auto("DeleteUser", f"Excluiu usuário {email} (ID: {user_id})")
+        return jsonify({"status": "success", "message": f"Usuário {email} excluído com sucesso."}), 200
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Erro ao excluir usuário.", "detail": str(e)}), 500
     finally:
         if conn:
             conn.close()
