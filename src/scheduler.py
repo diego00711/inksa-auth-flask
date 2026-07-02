@@ -228,6 +228,48 @@ def _apply_opening_hours_job() -> None:
                 pass
 
 
+def _close_stale_restaurants_job() -> None:
+    """Fecha restaurantes 'abertos' cujo painel parou de dar sinal de vida.
+
+    Cobre o caso do restaurante que perde o token (sessão expira) ou fecha o
+    app sem clicar em 'Fechar': sem heartbeat ha 45 min, volta para Fechado
+    para o cliente nao fazer pedido em restaurante ausente.
+    Restaurantes com hours_auto ligado sao ignorados (o job de horario cuida).
+    """
+    from .utils.helpers import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("[STALE] Sem conexao ao banco — job abortado")
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE restaurant_profiles
+                   SET is_open = false
+                   WHERE is_open = true
+                     AND COALESCE(hours_auto, false) = false
+                     AND (last_heartbeat IS NULL OR last_heartbeat < NOW() - INTERVAL '45 minutes')"""
+            )
+            closed = cur.rowcount
+            conn.commit()
+        if closed:
+            logger.info("[STALE] %d restaurante(s) fechados por inatividade", closed)
+    except Exception:
+        logger.exception("[STALE] Erro no job de fechamento por inatividade")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -294,6 +336,16 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=120,
     )
     logger.info("[SCHEDULER] Abertura automatica por horario: a cada 5 minutos")
+    _scheduler.add_job(
+        func=_close_stale_restaurants_job,
+        trigger="interval",
+        minutes=10,
+        id="close_stale_restaurants",
+        name="Fecha restaurantes abertos sem heartbeat recente",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+    logger.info("[SCHEDULER] Fechamento por inatividade: a cada 10 minutos")
     _scheduler.start()
 
     logger.info(

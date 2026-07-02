@@ -14,6 +14,33 @@ from datetime import datetime, date, time
 
 restaurant_bp = Blueprint('restaurant_bp', __name__)
 
+
+def _geocode_address(street, number, neighborhood, city, state):
+    """Geocodifica o endereço via Nominatim (best-effort, timeout curto).
+
+    Fallback server-side para quando o geocode do frontend falha — sem coordenadas
+    o restaurante não consegue abrir (gate) nem ter frete calculado.
+    """
+    try:
+        import requests as _rq
+        q = ", ".join([p for p in [
+            f"{street}, {number}" if street and number else street,
+            neighborhood, city, state, "Brasil",
+        ] if p])
+        resp = _rq.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": q, "format": "json", "limit": 1, "countrycodes": "br"},
+            headers={"User-Agent": "InksaDelivery/1.0 (suporte@inksadelivery.com.br)"},
+            timeout=4,
+        )
+        arr = resp.json()
+        if isinstance(arr, list) and arr:
+            lat, lon = float(arr[0]["lat"]), float(arr[0]["lon"])
+            return lat, lon
+    except Exception:
+        pass
+    return None, None
+
 def make_serializable(data):
     """Converte dados para JSON serializável"""
     if isinstance(data, dict): 
@@ -170,6 +197,32 @@ def handle_profile():
             if 'opening_hours' in updates and updates['opening_hours'] is not None:
                 updates['opening_hours'] = psycopg2.extras.Json(updates['opening_hours'])
 
+            # Geocode server-side: se o endereço está sendo salvo sem coordenadas,
+            # resolve lat/lng aqui (fallback para quando o front não conseguiu).
+            if ('address_street' in updates or 'address_city' in updates) and \
+               not (updates.get('latitude') and updates.get('longitude')):
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _c:
+                    _c.execute(
+                        "SELECT address_street, address_number, address_neighborhood, address_city, address_state, latitude, longitude FROM restaurant_profiles WHERE user_id = %s",
+                        (user_id,),
+                    )
+                    _cur_prof = _c.fetchone() or {}
+                _street = updates.get('address_street', _cur_prof.get('address_street'))
+                _number = updates.get('address_number', _cur_prof.get('address_number'))
+                _neigh = updates.get('address_neighborhood', _cur_prof.get('address_neighborhood'))
+                _city = updates.get('address_city', _cur_prof.get('address_city'))
+                _state = updates.get('address_state', _cur_prof.get('address_state'))
+                if _street and _city:
+                    _lat, _lng = _geocode_address(_street, _number, _neigh, _city, _state)
+                    if _lat is not None:
+                        updates['latitude'] = _lat
+                        updates['longitude'] = _lng
+
+            # Ao ABRIR o restaurante, registra heartbeat (o job de limpeza fecha
+            # restaurantes abertos sem heartbeat recente — sessão abandonada/token expirado)
+            if updates.get('is_open') is True or updates.get('is_open') == 'true':
+                updates['last_heartbeat'] = datetime.now()
+
             set_clause = ", ".join([f"{k} = %s" for k in updates.keys()])
             values = list(updates.values()) + [user_id]
 
@@ -199,6 +252,36 @@ def handle_profile():
     finally:
         if conn: 
             conn.close()
+
+@restaurant_bp.route('/heartbeat', methods=['POST'])
+@handle_db_errors
+def restaurant_heartbeat(conn):
+    """Sinal de vida do painel do restaurante.
+
+    O app envia a cada poucos minutos enquanto estiver aberto. Um job no
+    scheduler fecha (is_open=false) restaurantes sem heartbeat recente —
+    cobre sessão abandonada, token expirado ou app fechado sem 'Fechar'.
+    """
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'restaurant':
+        return jsonify({"status": "error", "error": "Unauthorized"}), 403
+
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """UPDATE restaurant_profiles
+               SET last_heartbeat = NOW()
+               WHERE user_id = %s
+               RETURNING is_open""",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    if not row:
+        return jsonify({"status": "error", "error": "Profile not found"}), 404
+    return jsonify({"status": "success", "data": {"is_open": row["is_open"]}}), 200
+
 
 @restaurant_bp.route('/upload-logo', methods=['POST'])
 def upload_logo():
