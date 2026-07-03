@@ -12,7 +12,7 @@ admin_permissions_bp = Blueprint("admin_permissions_bp", __name__)
 
 VALID_ROLES = {"super_admin", "admin", "operator", "viewer"}
 VALID_PAGES = {
-    "dashboard", "usuarios", "restaurantes", "avaliacoes", "banners",
+    "dashboard", "usuarios", "restaurantes", "avaliacoes", "gamificacao", "banners",
     "logs", "administradores", "relatorios", "financeiro", "payouts",
     "suporte", "configuracoes", "integracoes",
 }
