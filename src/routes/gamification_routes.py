@@ -742,6 +742,41 @@ def award_points():
     })
 
 
+@gamification_bp.get("/points-history/<user_id>")
+def get_points_history(user_id):
+    """
+    GET /api/gamification/points-history/<user_id>
+    Historico de eventos de pontos (points_history) -- o front sempre tentou
+    ler isso do endpoint /user-points/<id>, que nunca retornou historico
+    nenhum (so o total atual). Endpoint dedicado, mais correto.
+    """
+    limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT id, points_earned, points_type, description, order_id, created_at
+                  FROM public.points_history
+                 WHERE user_id = %s
+              ORDER BY created_at DESC
+                 LIMIT %s
+            """, (user_id, limit))
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["id"] = str(r["id"])
+                if r.get("order_id"):
+                    r["order_id"] = str(r["order_id"])
+            return _ok({"items": rows})
+    except Exception as e:
+        current_app.logger.exception("gamification.points_history failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @gamification_bp.get("/user-points/<user_id>")
 def get_user_points(user_id):
     """
