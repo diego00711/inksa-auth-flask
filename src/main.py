@@ -368,6 +368,16 @@ def debug_service_key_claims():
             }
         except Exception as e:
             result[env_name] = {"present": True, "error": str(e), "length": len(key)}
+
+    # Testa a chave de verdade contra a API admin do Supabase (chamada
+    # inofensiva: apenas lista 1 usuario, nao altera nada).
+    try:
+        from .utils.helpers import supabase as _sb
+        resp = _sb.auth.admin.list_users(page=1, per_page=1)
+        result["live_admin_call"] = {"ok": True, "sample": str(resp)[:150]}
+    except Exception as e:
+        result["live_admin_call"] = {"ok": False, "error": str(e)}
+
     return jsonify(result)
 
 @app.route('/api/health')
