@@ -238,7 +238,9 @@ def gamification_leaderboard():
                        COALESCE(rp.restaurant_name,
                                 dp.first_name || ' ' || dp.last_name,
                                 cp.first_name || ' ' || cp.last_name,
-                                'Anônimo') AS name
+                                'Anônimo') AS name,
+                       dp.total_deliveries,
+                       COALESCE(rp.rating, dp.rating) AS rating
                   FROM public.user_points up
                   {join}
                   {where_sql}
