@@ -106,15 +106,22 @@ def handle_profile():
                 
                 data = request.get_json()
                 allowed_fields = [
-                    'first_name', 'last_name', 'phone', 'cpf', 'birth_date', 'vehicle_type', 
-                    'address_street', 'address_number', 'address_complement', 'address_neighborhood', 
-                    'address_city', 'address_state', 'address_zipcode', 'is_available'
+                    'first_name', 'last_name', 'phone', 'cpf', 'birth_date', 'vehicle_type',
+                    'address_street', 'address_number', 'address_complement', 'address_neighborhood',
+                    'address_city', 'address_state', 'address_zipcode', 'is_available',
+                    'bank_name', 'bank_agency', 'bank_account_number', 'bank_account_type',
+                    'pix_key', 'payout_frequency',
                 ]
-                
+
                 update_data = {
                     field: sanitize_text(data[field]) if isinstance(data.get(field), str) else data.get(field)
                     for field in allowed_fields if field in data
                 }
+
+                # Coluna birth_date é DATE no Postgres: string vazia ('') quebra
+                # com "invalid input syntax for type date" -- normaliza pra NULL.
+                if update_data.get('birth_date') == '':
+                    update_data['birth_date'] = None
 
                 if not update_data:
                     return jsonify({"error": "Nenhum campo válido para atualização"}), 400
