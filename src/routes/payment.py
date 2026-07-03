@@ -7,7 +7,7 @@ import os
 import logging
 import hmac
 import hashlib
-import eventlet
+import gevent
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -600,7 +600,7 @@ def mercadopago_webhook():
                 if not response_supabase.data:
                     logging.warning(f"⚠️ Pedido não encontrado na primeira tentativa. Aguardando 3 segundos...")
                     import time
-                    eventlet.sleep(3)
+                    gevent.sleep(3)
                     logging.info(f"🔄 RETRY: Buscando pedido {external_reference} novamente...")
                     response_supabase = supabase_client.table('orders').select('*').eq('id', external_reference).execute()
                 
@@ -693,7 +693,7 @@ def mercadopago_webhook():
                 if not check_order.data:
                     logging.warning(f"⚠️ Pedido não encontrado. Aguardando 3 segundos...")
                     import time
-                    eventlet.sleep(3)
+                    gevent.sleep(3)
                     logging.info(f"🔄 RETRY: Verificando pedido {external_reference} novamente...")
                     check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
                 
@@ -714,7 +714,7 @@ def mercadopago_webhook():
                 if not check_order.data:
                     logging.warning(f"⚠️ Pedido não encontrado. Aguardando 3 segundos...")
                     import time
-                    eventlet.sleep(3)
+                    gevent.sleep(3)
                     logging.info(f"🔄 RETRY: Verificando pedido {external_reference} novamente...")
                     check_order = supabase_client.table('orders').select('id').eq('id', external_reference).execute()
                 
