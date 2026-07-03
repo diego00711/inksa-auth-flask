@@ -1,12 +1,13 @@
-# --- Eventlet: precisa ser a primeira coisa a rodar, antes de qualquer import
+# --- Gevent: precisa ser a primeira coisa a rodar, antes de qualquer import
 # que abra sockets (psycopg2, requests, etc.) — senão o monkey-patch chega
-# tarde e as conexoes continuam bloqueantes mesmo com o worker eventlet.
-import eventlet
-eventlet.monkey_patch()
-# psycopg2 usa a libpq em C pro I/O de rede: o monkey-patch do eventlet nao
+# tarde e as conexoes continuam bloqueantes mesmo com o worker gevent.
+# (Usamos gevent, não eventlet: o gunicorn 26+ removeu o worker "eventlet".)
+from gevent import monkey as _gevent_monkey
+_gevent_monkey.patch_all()
+# psycopg2 usa a libpq em C pro I/O de rede: o monkey-patch do gevent nao
 # enxerga isso sozinho. Sem esse patch extra, UMA query lenta trava o worker
-# inteiro (inclusive o /healthz), mesmo rodando `gunicorn -k eventlet`.
-from psycogreen.eventlet import patch_psycopg
+# inteiro (inclusive o /healthz), mesmo rodando `gunicorn -k gevent`.
+from psycogreen.gevent import patch_psycopg
 patch_psycopg()
 
 import os
@@ -246,7 +247,7 @@ def add_cors_headers(response):
     return response
 
 # --- Configuração do SocketIO ---
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', logger=False, engineio_logger=False)
 
 # --- REGISTRO DE BLUEPRINTS ---
 app.register_blueprint(banners_bp, url_prefix='/api/banners')
