@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 import uuid
+import psycopg2.extras
 from src.utils.helpers import get_db_connection, get_user_id_from_token
 
 restaurante_reviews_bp = Blueprint('restaurante_reviews_bp', __name__)
@@ -25,6 +26,8 @@ def create_restaurant_review(restaurant_id):
     rating = data.get('rating')
     comment = data.get('comment', '')
     order_id = data.get('order_id')
+    tags = data.get('tags')
+    category_ratings = data.get('categoryRatings') or data.get('category_ratings') or data.get('categories')
     if not order_id or not rating:
         return jsonify({'error': 'order_id e rating são obrigatórios'}), 400
 
@@ -49,10 +52,12 @@ def create_restaurant_review(restaurant_id):
                 return jsonify({'error': 'Você já avaliou esse pedido.'}), 400
 
             cur.execute("""
-                INSERT INTO restaurant_reviews (order_id, restaurant_id, client_id, rating, comment)
-                VALUES (%s, %s, (SELECT id FROM client_profiles WHERE user_id=%s), %s, %s)
+                INSERT INTO restaurant_reviews (order_id, restaurant_id, client_id, rating, comment, tags, category_ratings)
+                VALUES (%s, %s, (SELECT id FROM client_profiles WHERE user_id=%s), %s, %s, %s, %s)
                 RETURNING id
-            """, (order_id, restaurant_id, user_id, rating, comment))
+            """, (order_id, restaurant_id, user_id, rating, comment,
+                  psycopg2.extras.Json(tags) if tags else None,
+                  psycopg2.extras.Json(category_ratings) if category_ratings else None))
             conn.commit()
             return jsonify({'message': 'Avaliação registrada com sucesso!'}), 201
     finally:
@@ -68,10 +73,10 @@ def list_restaurant_reviews(restaurant_id):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT rating, comment, created_at FROM restaurant_reviews WHERE restaurant_id=%s ORDER BY created_at DESC",
+                "SELECT rating, comment, tags, category_ratings, created_at FROM restaurant_reviews WHERE restaurant_id=%s ORDER BY created_at DESC",
                 (restaurant_id,)
             )
-            reviews = [dict(zip(['rating', 'comment', 'created_at'], row)) for row in cur.fetchall()]
+            reviews = [dict(zip(['rating', 'comment', 'tags', 'category_ratings', 'created_at'], row)) for row in cur.fetchall()]
             # Também retorna média e contagem
             cur.execute(
                 "SELECT AVG(rating)::float, COUNT(*) FROM restaurant_reviews WHERE restaurant_id=%s",

@@ -23,6 +23,9 @@ def create_client_review(client_id):
     rating = data.get('rating')
     comment = data.get('comment', '')
     order_id = data.get('order_id')
+    # "tags" (entregador) e "badges" (restaurante) são o mesmo conceito de
+    # marcação rápida com nomes diferentes por app -- aceita os dois.
+    tags = data.get('tags') or data.get('badges')
     if not order_id or not rating:
         return jsonify({'error': 'order_id e rating são obrigatórios'}), 400
 
@@ -58,10 +61,11 @@ def create_client_review(client_id):
             reviewer_id = cur.fetchone()[0]
 
             cur.execute("""
-                INSERT INTO client_reviews (order_id, client_id, reviewer_type, reviewer_id, rating, comment)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO client_reviews (order_id, client_id, reviewer_type, reviewer_id, rating, comment, tags)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (order_id, client_id, user_type, reviewer_id, rating, comment))
+            """, (order_id, client_id, user_type, reviewer_id, rating, comment,
+                  psycopg2.extras.Json(tags) if tags else None))
             conn.commit()
             return jsonify({'message': 'Avaliação do cliente registrada com sucesso!'}), 201
     finally:
@@ -98,10 +102,11 @@ def get_my_client_reviews():
             # 3. Busca as avaliações recebidas por este cliente, juntando com os perfis
             #    de quem avaliou para pegar seus nomes.
             cur.execute("""
-                SELECT 
-                    cr.reviewer_type, 
-                    cr.rating, 
-                    cr.comment, 
+                SELECT
+                    cr.reviewer_type,
+                    cr.rating,
+                    cr.comment,
+                    cr.tags,
                     cr.created_at,
                     -- Pega o nome do avaliador, seja ele um restaurante ou um entregador
                     CASE 
