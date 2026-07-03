@@ -675,7 +675,21 @@ def admin_delete_user(user_id):
             return jsonify({"status": "error", "message": "Serviço de autenticação indisponível"}), 503
 
         # Remove do Supabase Auth (dispara cascade nas tabelas de perfil via FK)
-        supabase.auth.admin.delete_user(str(user_id))
+        try:
+            supabase.auth.admin.delete_user(str(user_id))
+        except Exception as auth_err:
+            # Pedidos/repasses vinculados (orders, cash_payment_records) bloqueiam
+            # a exclusão de propósito — são registros financeiros/históricos.
+            if "foreign key constraint" in str(auth_err).lower():
+                return jsonify({
+                    "status": "error",
+                    "message": (
+                        f"Não é possível excluir {email}: existem pedidos ou registros "
+                        "financeiros vinculados a esta conta. Desative o usuário em vez "
+                        "de excluir para preservar o histórico."
+                    ),
+                }), 409
+            raise
 
         # Garante limpeza da linha em public.users caso não haja cascade nela
         try:
