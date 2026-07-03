@@ -378,6 +378,17 @@ def debug_service_key_claims():
     except Exception as e:
         result["live_admin_call"] = {"ok": False, "error": str(e)}
 
+    # TEMPORARIO: tenta excluir de verdade o usuario que ja estava travado
+    # nas tentativas anteriores do admin (mesma conta, acao ja desejada).
+    target_id = request.args.get("try_delete")
+    if target_id:
+        try:
+            from .utils.helpers import supabase as _sb2
+            _sb2.auth.admin.delete_user(target_id)
+            result["delete_attempt"] = {"ok": True}
+        except Exception as e:
+            result["delete_attempt"] = {"ok": False, "error": str(e), "type": type(e).__name__}
+
     return jsonify(result)
 
 @app.route('/api/health')
