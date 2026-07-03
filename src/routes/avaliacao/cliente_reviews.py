@@ -29,6 +29,13 @@ def create_client_review(client_id):
     if not order_id or not rating:
         return jsonify({'error': 'order_id e rating são obrigatórios'}), 400
 
+    try:
+        rating = int(rating)
+        if not 1 <= rating <= 5:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({'error': 'rating deve ser um número inteiro entre 1 e 5'}), 400
+
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:

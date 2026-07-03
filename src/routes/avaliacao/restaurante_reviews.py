@@ -31,6 +31,13 @@ def create_restaurant_review(restaurant_id):
     if not order_id or not rating:
         return jsonify({'error': 'order_id e rating são obrigatórios'}), 400
 
+    try:
+        rating = int(rating)
+        if not 1 <= rating <= 5:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({'error': 'rating deve ser um número inteiro entre 1 e 5'}), 400
+
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -85,7 +92,7 @@ def list_restaurant_reviews(restaurant_id):
             avg, count = cur.fetchone()
             return jsonify({
                 'reviews': reviews,
-                'average_rating': avg or 0,
+                'average_rating': round(avg or 0, 1),
                 'total_reviews': count
             }), 200
     finally:
