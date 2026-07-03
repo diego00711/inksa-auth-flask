@@ -10,6 +10,8 @@ Concurrency safety (Render multi-dyno):
 """
 import logging
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -324,6 +326,10 @@ def start_scheduler(app=None) -> None:
         name="Keep-alive ping to prevent Render cold start",
         replace_existing=True,
         misfire_grace_time=120,
+        # Sem isso, o APScheduler so roda a 1a vez em now+10min — deixando o
+        # backend vulneravel a hibernar (free tier) logo apos cada deploy/restart,
+        # antes do 1o self-ping acontecer. Dispara imediatamente ao subir tambem.
+        next_run_time=datetime.now(ZoneInfo(tz)),
     )
     logger.info("[SCHEDULER] Keep-alive job: a cada 10 minutos")
     _scheduler.add_job(
