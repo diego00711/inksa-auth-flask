@@ -345,6 +345,31 @@ def debug_routes():
         rules.append({"rule": str(rule), "methods": methods, "endpoint": rule.endpoint})
     return jsonify({"routes": rules})
 
+@app.route('/api/debug/service-key-claims')
+def debug_service_key_claims():
+    # TEMPORARIO: diagnostica se SUPABASE_SERVICE_KEY tem a role/projeto certos,
+    # sem nunca expor a chave em si. Remover depois de resolver o bug de exclusao.
+    import base64, json as _json
+    result = {}
+    for env_name in ("SUPABASE_SERVICE_KEY", "SUPABASE_KEY"):
+        key = os.environ.get(env_name) or ""
+        if not key:
+            result[env_name] = {"present": False}
+            continue
+        try:
+            payload = key.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            data = _json.loads(base64.urlsafe_b64decode(payload))
+            result[env_name] = {
+                "present": True,
+                "role": data.get("role"),
+                "ref": data.get("ref"),
+                "length": len(key),
+            }
+        except Exception as e:
+            result[env_name] = {"present": True, "error": str(e), "length": len(key)}
+    return jsonify(result)
+
 @app.route('/api/health')
 def health_check():
     # Executa uma consulta real: valida a conexão de verdade e conta como
