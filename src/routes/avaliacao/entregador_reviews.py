@@ -6,6 +6,11 @@ from flask import Blueprint, request, jsonify
 import psycopg2.extras
 from src.utils.helpers import get_db_connection, get_user_id_from_token
 
+try:
+    from src.routes.gamification_routes import award_points_for_action as _award_points_for_action
+except Exception:
+    _award_points_for_action = None
+
 entregador_reviews_bp = Blueprint('entregador_reviews_bp', __name__)
 
 
@@ -64,6 +69,25 @@ def create_delivery_review(delivery_id):
                 VALUES (%s, %s, %s, %s, %s)
             """, (order_id, delivery_id, row['client_profile_id'], rating, comment))
             conn.commit()
+
+            if _award_points_for_action:
+                try:
+                    _award_points_for_action(
+                        user_id=str(row['client_profile_id']),
+                        action_key="review_given_client",
+                        order_id=str(order_id),
+                        description="Avaliação enviada",
+                    )
+                    if rating == 5:
+                        _award_points_for_action(
+                            user_id=str(delivery_id),
+                            action_key="five_star_received_delivery",
+                            order_id=str(order_id),
+                            description="Avaliação 5 estrelas recebida",
+                        )
+                except Exception:
+                    pass
+
             return jsonify({'message': 'Avaliação do entregador registrada com sucesso!'}), 201
     except Exception as e:
         if conn:

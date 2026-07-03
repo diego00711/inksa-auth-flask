@@ -700,6 +700,88 @@ def admin_gamification_adjust_points(user_id):
     return _ok(payload) if ok else _err(**payload)
 
 
+# ---------- Regras de pontuação (configurável pelo admin) ----------
+
+@admin_gamification_bp.get("/point-rules")
+def admin_list_point_rules():
+    """GET /api/admin/gamification/point-rules — lista todas as ações que geram pontos."""
+    _, err = _admin_required()
+    if err:
+        return err
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT id, action_key, label, description, points, applies_to,
+                       is_active, is_automatic, updated_at
+                  FROM public.gamification_point_rules
+              ORDER BY applies_to, points DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["id"] = str(r["id"])
+                if r.get("updated_at"):
+                    r["updated_at"] = r["updated_at"].isoformat()
+            return _ok({"items": rows})
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.list_point_rules failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@admin_gamification_bp.put("/point-rules/<action_key>")
+def admin_update_point_rule(action_key):
+    """PUT /api/admin/gamification/point-rules/<action_key> — Body: {points, is_active}."""
+    _, err = _admin_required()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+
+    fields, params = [], []
+    if "points" in body:
+        try:
+            points = int(body["points"])
+        except (ValueError, TypeError):
+            return _err("'points' deve ser um número inteiro", 422)
+        if points < 0:
+            return _err("'points' não pode ser negativo", 422)
+        fields.append("points = %s")
+        params.append(points)
+    if "is_active" in body:
+        fields.append("is_active = %s")
+        params.append(bool(body["is_active"]))
+
+    if not fields:
+        return _err("Nada para atualizar", 422)
+
+    fields.append("updated_at = NOW()")
+    params.append(action_key)
+
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(f"""
+                UPDATE public.gamification_point_rules
+                   SET {', '.join(fields)}
+                 WHERE action_key = %s
+             RETURNING id, action_key, label, description, points, applies_to, is_active, is_automatic
+            """, tuple(params))
+            row = cur.fetchone()
+            if not row:
+                return _err("Regra não encontrada", 404)
+            data = dict(row)
+            data["id"] = str(data["id"])
+            return _ok(data)
+    except Exception as e:
+        current_app.logger.exception("admin_gamification.update_point_rule failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
 # ---------- Novos endpoints exigidos pela especificação ----------
 
 @gamification_bp.post("/award-points")
@@ -1001,29 +1083,88 @@ def _check_and_award_badges(user_id: str, total_points: int) -> list:
 
 # ---------- Helper público: concede pontos ao completar pedido ----------
 
+def _get_point_rule(action_key: str):
+    """Busca uma regra de pontuação configurável (gamification_point_rules)."""
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT action_key, label, points, is_active, is_automatic
+                  FROM public.gamification_point_rules
+                 WHERE action_key = %s
+            """, (action_key,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+def award_points_for_action(user_id: str, action_key: str, order_id: str = None, description: str = None):
+    """
+    Concede pontos usando o valor configurado em gamification_point_rules
+    (editável pelo admin em /admin/gamificacao). No-op silencioso se a regra
+    não existir ou estiver desativada -- não quebra o fluxo chamador.
+    """
+    rule = _get_point_rule(action_key)
+    if not rule or not rule["is_active"] or not rule["points"]:
+        return True, {"message": "regra_inativa_ou_ausente"}
+
+    return _add_points_event(
+        user_id=user_id,
+        points=int(rule["points"]),
+        event_type=action_key,
+        description=description or rule["label"],
+        order_id=order_id,
+    )
+
+
 def award_completion_points(user_id: str, user_type: str, order_id: str = None) -> bool:
     """
-    Concede pontos ao completar um pedido:
-      - cliente: +50 pontos (event_type='order_delivered_client')
-      - entregador: +30 pontos (event_type='order_delivered_delivery')
+    Concede pontos ao completar um pedido (valores configuráveis via admin):
+      - cliente: event_type='order_delivered_client'
+      - entregador: event_type='order_delivered_delivery'
     Retorna True se sucesso, False caso contrário.
     Chamado de orders.py no endpoint /complete.
     """
-    POINTS_MAP = {
-        "client": 50,
-        "delivery": 30,
-    }
-    points = POINTS_MAP.get(user_type)
-    if not points:
+    if user_type not in ("client", "delivery"):
         return False
 
-    event_type = f"order_delivered_{user_type}"
-    ok, _ = _add_points_event(
+    ok, _ = award_points_for_action(
         user_id=user_id,
-        points=points,
-        event_type=event_type,
-        description=f"Pedido entregue — {user_type}",
+        action_key=f"order_delivered_{user_type}",
         order_id=order_id,
+        description=f"Pedido entregue — {user_type}",
+    )
+    return ok
+
+
+def award_first_order_bonus(client_id: str, order_id: str) -> bool:
+    """
+    Concede o bônus de 'primeiro pedido' (action_key=first_order_client) se este
+    for o primeiro pedido entregue do cliente. Chamado junto com
+    award_completion_points no /complete de orders.py.
+    """
+    conn = _db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) FROM public.orders
+                 WHERE client_id = %s AND status = 'delivered'
+            """, (client_id,))
+            count = cur.fetchone()[0]
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+    if count != 1:
+        return True
+
+    ok, _ = award_points_for_action(
+        user_id=client_id,
+        action_key="first_order_client",
+        order_id=order_id,
+        description="Bônus de primeiro pedido",
     )
     return ok
 

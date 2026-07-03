@@ -3,6 +3,11 @@ import uuid
 import psycopg2.extras
 from src.utils.helpers import get_db_connection, get_user_id_from_token
 
+try:
+    from src.routes.gamification_routes import award_points_for_action as _award_points_for_action
+except Exception:
+    _award_points_for_action = None
+
 restaurante_reviews_bp = Blueprint('restaurante_reviews_bp', __name__)
 
 @restaurante_reviews_bp.route('/restaurants/<uuid:restaurant_id>/reviews', methods=['POST'])
@@ -61,11 +66,24 @@ def create_restaurant_review(restaurant_id):
             cur.execute("""
                 INSERT INTO restaurant_reviews (order_id, restaurant_id, client_id, rating, comment, tags, category_ratings)
                 VALUES (%s, %s, (SELECT id FROM client_profiles WHERE user_id=%s), %s, %s, %s, %s)
-                RETURNING id
+                RETURNING id, client_id
             """, (order_id, restaurant_id, user_id, rating, comment,
                   psycopg2.extras.Json(tags) if tags else None,
                   psycopg2.extras.Json(category_ratings) if category_ratings else None))
+            review_row = cur.fetchone()
             conn.commit()
+
+            if _award_points_for_action:
+                try:
+                    _award_points_for_action(
+                        user_id=str(review_row[1]),
+                        action_key="review_given_client",
+                        order_id=str(order_id),
+                        description="Avaliação enviada",
+                    )
+                except Exception:
+                    pass
+
             return jsonify({'message': 'Avaliação registrada com sucesso!'}), 201
     finally:
         conn.close()

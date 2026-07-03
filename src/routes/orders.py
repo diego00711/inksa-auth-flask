@@ -12,9 +12,15 @@ from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from src.extensions import limiter
 
 try:
-    from .gamification_routes import award_completion_points as _award_completion_points
+    from .gamification_routes import (
+        award_completion_points as _award_completion_points,
+        award_first_order_bonus as _award_first_order_bonus,
+        award_points_for_action as _award_points_for_action,
+    )
 except Exception:
     _award_completion_points = None
+    _award_first_order_bonus = None
+    _award_points_for_action = None
 
 try:
     from ..services.notification_service import send_push_notification as _send_push
@@ -474,6 +480,8 @@ def complete_order(order_id):
                         _award_completion_points(
                             str(completed_order['client_id']), 'client', str(order_id)
                         )
+                        if _award_first_order_bonus:
+                            _award_first_order_bonus(str(completed_order['client_id']), str(order_id))
                     if completed_order['delivery_id']:
                         _award_completion_points(
                             str(completed_order['delivery_id']), 'delivery', str(order_id)
@@ -1020,6 +1028,17 @@ def accept_order_by_delivery(order_id):
 
             updated_order.pop('pickup_code', None)
             updated_order.pop('delivery_code', None)
+
+            if _award_points_for_action:
+                try:
+                    _award_points_for_action(
+                        user_id=str(delivery_profile_id),
+                        action_key="order_accepted_delivery",
+                        order_id=str(order_id),
+                        description="Pedido aceito",
+                    )
+                except Exception as _gam_err:
+                    logger.warning(f"Gamificação: falha ao conceder pontos de aceite para {order_id}: {_gam_err}")
 
             logger.info(f"✅ Pedido {order_id} aceito pelo entregador {delivery_profile_id}")
             return jsonify({
