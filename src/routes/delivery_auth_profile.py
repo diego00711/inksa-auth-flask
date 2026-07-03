@@ -123,6 +123,12 @@ def handle_profile():
                 if update_data.get('birth_date') == '':
                     update_data['birth_date'] = None
 
+                # vehicle_type tem CHECK constraint (valores fixos): string vazia
+                # (campo nao selecionado) nao esta na lista permitida -- normaliza
+                # pra NULL em vez de deixar o Postgres rejeitar o UPDATE inteiro.
+                if update_data.get('vehicle_type') == '':
+                    update_data['vehicle_type'] = None
+
                 if not update_data:
                     return jsonify({"error": "Nenhum campo válido para atualização"}), 400
 
