@@ -1,3 +1,14 @@
+# --- Eventlet: precisa ser a primeira coisa a rodar, antes de qualquer import
+# que abra sockets (psycopg2, requests, etc.) — senão o monkey-patch chega
+# tarde e as conexoes continuam bloqueantes mesmo com o worker eventlet.
+import eventlet
+eventlet.monkey_patch()
+# psycopg2 usa a libpq em C pro I/O de rede: o monkey-patch do eventlet nao
+# enxerga isso sozinho. Sem esse patch extra, UMA query lenta trava o worker
+# inteiro (inclusive o /healthz), mesmo rodando `gunicorn -k eventlet`.
+from psycogreen.eventlet import patch_psycopg
+patch_psycopg()
+
 import os
 import sys
 import logging
