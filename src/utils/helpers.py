@@ -138,6 +138,26 @@ def get_user_id_from_token(auth_header):
             conn.close()
 
 
+def get_user_info():
+    """
+    Extrai email/id do usuário autenticado a partir do header Authorization
+    da requisição Flask atual (contexto ambiente, sem precisar passá-lo).
+    Usado pelo audit log (best-effort) para saber qual admin fez a ação.
+    """
+    from flask import request as _request
+    token = _extract_bearer_token(_request.headers.get("Authorization"))
+    if not token or not supabase:
+        return None
+    try:
+        user_resp = supabase.auth.get_user(token)
+        user = getattr(user_resp, "user", None)
+        if not user:
+            return None
+        return {"id": str(user.id), "email": user.email}
+    except Exception:
+        return None
+
+
 # --- JSON utils ---
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
