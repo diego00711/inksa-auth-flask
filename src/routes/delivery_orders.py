@@ -10,6 +10,7 @@ import psycopg2
 import psycopg2.extras
 from datetime import date, timedelta, datetime, time
 from decimal import Decimal
+from ..utils.platform_settings import calculate_platform_commission
 from functools import wraps
 from flask_cors import cross_origin
 
@@ -415,8 +416,12 @@ def confirm_cash_payment(order_id):
             delivery_fee = float(order['delivery_fee'] or 0)
             commission = float(order.get('comissao_plataforma') or 0)
             if not commission:
-                rate = current_app.config.get('PLATFORM_COMMISSION_RATE', 0.10)
-                commission = round((total_amount - delivery_fee) * rate, 2)
+                # Antes usava PLATFORM_COMMISSION_RATE fixo em config.py (15%,
+                # nunca atualizado) -- desconectado do que o admin configura em
+                # Configurações > Taxas. Agora usa a mesma funcao/fonte dos
+                # pedidos online, garantindo a mesma taxa em qualquer forma de
+                # pagamento.
+                commission = float(calculate_platform_commission(total_amount - delivery_fee))
 
             restaurant_share = round(total_amount - delivery_fee - commission, 2)
             cash_debt = round(total_amount - delivery_fee, 2)
