@@ -377,10 +377,32 @@ def admin_gamification_root():
 
             rr_avg = avg_rating("restaurant_reviews")
             dr_avg = avg_rating("delivery_reviews")
-            review_counts_nz = [(rr_avg, rr_count), (dr_avg, dr_count)]
-            total_weighted = sum(a * c for a, c in review_counts_nz)
-            total_count_nz = rr_count + dr_count
-            global_avg = (total_weighted / total_count_nz) if total_count_nz else 0.0
+            try:
+                cr_avg = avg_rating("client_reviews")
+            except Exception:
+                cr_avg = 0.0
+                conn.rollback()
+
+            # partner_type filtra os cards de resumo (media e contagem) pro
+            # escopo selecionado; sem filtro, mantem o combinado restaurant+delivery
+            # (comportamento historico, menu_item_reviews nunca entrou na media).
+            if partner_type == "restaurant":
+                total_reviews = rr_count
+                total_count_nz = rr_count
+                global_avg = rr_avg
+            elif partner_type == "delivery":
+                total_reviews = dr_count
+                total_count_nz = dr_count
+                global_avg = dr_avg
+            elif partner_type == "client":
+                total_reviews = cr_count
+                total_count_nz = cr_count
+                global_avg = cr_avg
+            else:
+                review_counts_nz = [(rr_avg, rr_count), (dr_avg, dr_count)]
+                total_weighted = sum(a * c for a, c in review_counts_nz)
+                total_count_nz = rr_count + dr_count
+                global_avg = (total_weighted / total_count_nz) if total_count_nz else 0.0
 
             cur.execute("SELECT COUNT(*)::int FROM orders WHERE status = 'delivered' " + (
                 "AND created_at >= %s AND created_at <= %s" if (start_date and end_date) else
@@ -454,6 +476,12 @@ def admin_gamification_reviews():
                     f"SELECT id::text, 'delivery' AS type, rating, comment, created_at, client_id::text AS reviewer_id FROM delivery_reviews WHERE 1=1 {date_sql}"
                 )
                 params += date_params
+            if partner_type == "client":
+                # client_reviews: cliente e quem esta sendo avaliado (restaurante/entregador avalia o cliente).
+                queries.append(
+                    f"SELECT id::text, 'client' AS type, rating, comment, created_at, client_id::text AS reviewer_id FROM client_reviews WHERE 1=1 {date_sql}"
+                )
+                params += date_params
 
             if not queries:
                 return _ok({"items": []})
@@ -498,7 +526,12 @@ def admin_gamification_rating_distribution():
         params.append(end_date)
     date_sql = ("AND " + " AND ".join(date_where)) if date_where else ""
 
-    table = "delivery_reviews" if partner_type == "delivery" else "restaurant_reviews"
+    TABLE_BY_SCOPE = {
+        "delivery": "delivery_reviews",
+        "client": "client_reviews",
+        "restaurant": "restaurant_reviews",
+    }
+    table = TABLE_BY_SCOPE.get(partner_type, "restaurant_reviews")
 
     conn = _db()
     try:

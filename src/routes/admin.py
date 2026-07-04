@@ -319,9 +319,20 @@ def get_all_restaurants():
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT rp.*, u.created_at
+                SELECT rp.*, u.created_at,
+                       COALESCE(rr.avg_rating, 0)::float AS average_rating,
+                       COALESCE(rr.review_count, 0)::int AS total_reviews,
+                       up.total_points AS gamification_points,
+                       l.level_name AS gamification_level
                   FROM restaurant_profiles rp
                   JOIN users u ON rp.user_id = u.id
+                  LEFT JOIN (
+                      SELECT restaurant_id, AVG(rating) AS avg_rating, COUNT(*) AS review_count
+                        FROM restaurant_reviews
+                       GROUP BY restaurant_id
+                  ) rr ON rr.restaurant_id = rp.id
+                  LEFT JOIN public.user_points up ON up.user_id = rp.id
+                  LEFT JOIN public.levels l ON l.level_number = up.current_level
               ORDER BY u.created_at DESC;
             """)
             rows = [dict(r) for r in cur.fetchall()]
