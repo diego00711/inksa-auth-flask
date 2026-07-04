@@ -70,12 +70,12 @@ def get_dashboard_stats():
             # ✅ GANHOS E ENTREGAS DE HOJE
             logger.info(f"🔍 Buscando entregas de hoje para profile_id: {profile_id}")
             cur.execute("""
-                SELECT 
-                    COALESCE(COUNT(id), 0) as count, 
-                    COALESCE(SUM(delivery_fee), 0) as total
-                FROM orders 
-                WHERE delivery_id = %s 
-                AND status = 'delivered' 
+                SELECT
+                    COALESCE(COUNT(id), 0) as count,
+                    COALESCE(SUM(COALESCE(valor_repassado_entregador, delivery_fee)), 0) as total
+                FROM orders
+                WHERE delivery_id = %s
+                AND status IN ('delivered', 'delivery_failed')
                 AND DATE(created_at) = %s
             """, (profile_id, today))
             
@@ -107,14 +107,14 @@ def get_dashboard_stats():
             logger.info(f"📅 Buscando ganhos desde: {start_of_week}")
             
             cur.execute("""
-                SELECT 
-                    DATE_TRUNC('day', created_at)::date as day, 
-                    SUM(delivery_fee) as value
-                FROM orders 
-                WHERE delivery_id = %s 
-                AND status = 'delivered' 
+                SELECT
+                    DATE_TRUNC('day', created_at)::date as day,
+                    SUM(COALESCE(valor_repassado_entregador, delivery_fee)) as value
+                FROM orders
+                WHERE delivery_id = %s
+                AND status IN ('delivered', 'delivery_failed')
                 AND created_at >= %s
-                GROUP BY 1 
+                GROUP BY 1
                 ORDER BY 1;
             """, (profile_id, start_of_week))
             
@@ -245,15 +245,15 @@ def get_earnings_history():
             
             # Ganhos diários
             cur.execute("""
-                SELECT 
-                    DATE(o.created_at) AS earning_date, 
-                    COALESCE(SUM(o.delivery_fee), 0) AS total_earned_daily,
+                SELECT
+                    DATE(o.created_at) AS earning_date,
+                    COALESCE(SUM(COALESCE(o.valor_repassado_entregador, o.delivery_fee)), 0) AS total_earned_daily,
                     COUNT(o.id) AS total_deliveries_daily
                 FROM orders o
-                WHERE o.delivery_id = %s 
-                AND o.status = 'delivered'
+                WHERE o.delivery_id = %s
+                AND o.status IN ('delivered', 'delivery_failed')
                 AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
-                GROUP BY DATE(o.created_at) 
+                GROUP BY DATE(o.created_at)
                 ORDER BY earning_date ASC;
             """, (profile_id, start_date, end_date))
             
@@ -281,16 +281,18 @@ def get_earnings_history():
 
             # Entregas detalhadas
             cur.execute("""
-                SELECT 
-                    o.id, o.status, o.total_amount, o.delivery_fee, o.created_at, 
+                SELECT
+                    o.id, o.status, o.total_amount,
+                    COALESCE(o.valor_repassado_entregador, o.delivery_fee) AS delivery_fee,
+                    o.created_at,
                     o.delivery_address,
-                    CONCAT(cp.first_name, ' ', cp.last_name) as client_name, 
+                    CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
                     rp.restaurant_name
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE o.delivery_id = %s 
-                AND o.status = 'delivered'
+                WHERE o.delivery_id = %s
+                AND o.status IN ('delivered', 'delivery_failed')
                 AND o.created_at BETWEEN %s AND %s + INTERVAL '1 day' - INTERVAL '1 second'
                 ORDER BY o.created_at DESC;
             """, (profile_id, start_date, end_date))
