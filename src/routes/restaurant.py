@@ -343,5 +343,87 @@ def upload_logo():
         traceback.print_exc()
         return jsonify({"status": "error", "error": str(e)}), 500
     finally:
-        if conn: 
+        if conn:
+            conn.close()
+
+
+@restaurant_bp.route('/payouts', methods=['GET'])
+def get_my_payouts():
+    """GET /api/restaurant/payouts — repasses do proprio restaurante autenticado.
+
+    A pagina Financeiro do app do restaurante chamava /api/admin/payouts, que
+    e admin-only e sempre retornava 403 -- saldo/proximo repasse/historico
+    ficavam permanentemente vazios. Este endpoint devolve os mesmos dados,
+    mas escopados ao restaurante do token (sem acesso a dados de terceiros).
+    """
+    conn = None
+    try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'restaurant':
+            return jsonify({"status": "error", "error": "Acesso negado."}), 403
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "error": "Erro de conexão com banco de dados"}), 500
+
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_id,))
+            profile = cur.fetchone()
+            if not profile:
+                return jsonify({"status": "error", "error": "Perfil de restaurante não encontrado."}), 404
+            restaurant_id = profile['id']
+
+            limit = min(int(request.args.get('limit') or 20), 100)
+
+            cur.execute("""
+                SELECT id, period_start, period_end, total_gross, commission_fee,
+                       total_net, status, payment_method, payment_ref, created_at, updated_at
+                  FROM payouts
+                 WHERE partner_type = 'restaurant' AND partner_id = %s
+              ORDER BY created_at DESC
+                 LIMIT %s
+            """, (restaurant_id, limit))
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                for key in ('period_start', 'period_end', 'created_at', 'updated_at'):
+                    if r.get(key) and hasattr(r[key], 'isoformat'):
+                        r[key] = r[key].isoformat()
+
+            pending_rows = [r for r in rows if r['status'] in ('pending', 'pending_transfer')]
+            balance = sum(float(r['total_net'] or 0) for r in pending_rows)
+            next_payout_date = min((r['period_end'] for r in pending_rows), default=None) if pending_rows else None
+
+            cur.execute("""
+                SELECT COALESCE(SUM(total_net), 0) AS month_total
+                  FROM payouts
+                 WHERE partner_type = 'restaurant' AND partner_id = %s
+                   AND status = 'paid'
+                   AND date_trunc('month', updated_at) = date_trunc('month', CURRENT_DATE)
+            """, (restaurant_id,))
+            month_total = float(cur.fetchone()['month_total'] or 0)
+
+            return jsonify({
+                "status": "success",
+                "balance": round(balance, 2),
+                "next_payout_date": next_payout_date,
+                "month_total": round(month_total, 2),
+                "payouts": [
+                    {
+                        "id": str(r['id']),
+                        "date": r.get('updated_at') if r['status'] == 'paid' else r.get('period_end'),
+                        "amount": float(r['total_net'] or 0),
+                        "status": r['status'],
+                        "reference": r.get('payment_ref'),
+                    }
+                    for r in rows
+                ],
+            }), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "error": str(e)}), 500
+    finally:
+        if conn:
             conn.close()
