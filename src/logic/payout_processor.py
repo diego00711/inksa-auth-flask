@@ -25,18 +25,6 @@ def get_commission_rate() -> Decimal:
         return Decimal("0.10")
 
 
-def get_delivery_platform_share() -> Decimal:
-    """
-    Returns the platform's share of the delivery fee (e.g. 0.15 = 15% to platform, 85% to courier).
-
-    NOTE: this is used by the legacy share-of-fee model. The new repasse model is
-    `delivery_base_fee + delivery_per_km_fee * distance` (calculated upstream and
-    written to orders.valor_repassado_entregador).
-    """
-    s = get_settings()
-    return s.get("delivery_platform_share", Decimal("0.15"))
-
-
 def is_payout_day(cycle_type: str, reference_date: date = None) -> bool:
     """Returns True if *reference_date* (defaults to today) is a scheduled payout day.
 
@@ -115,8 +103,9 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
             cur.execute(
                 f"""
                 SELECT id,
-                       COALESCE({amount_col}, 0)   AS repasse,
-                       COALESCE(delivery_fee, 0)   AS delivery_fee
+                       COALESCE({amount_col}, 0)      AS repasse,
+                       COALESCE(delivery_fee, 0)      AS delivery_fee,
+                       COALESCE(comissao_plataforma, 0) AS comissao_historica
                 FROM orders
                 WHERE {partner_col} = %s
                   AND status IN ('delivered', 'delivery_failed')
@@ -135,8 +124,9 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
             cur.execute(
                 f"""
                 SELECT id,
-                       COALESCE({amount_col}, 0) AS repasse,
-                       COALESCE(delivery_fee, 0) AS delivery_fee
+                       COALESCE({amount_col}, 0)      AS repasse,
+                       COALESCE(delivery_fee, 0)      AS delivery_fee,
+                       COALESCE(comissao_plataforma, 0) AS comissao_historica
                 FROM orders
                 WHERE {partner_col} = %s
                   AND status IN ('delivered', 'delivery_failed')
@@ -152,8 +142,16 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
 
 
 def _calculate_amounts(orders, partner_type: str, commission_rate: Decimal):
-    """Returns (total_gross, commission_fee, total_net, per_order list)."""
-    delivery_platform_share = get_delivery_platform_share()
+    """Returns (total_gross, commission_fee, total_net, per_order list).
+
+    Usa a comissao HISTORICA de cada pedido (orders.comissao_plataforma,
+    gravada no momento da compra) em vez de reconstruir "gross" reaplicando
+    a taxa de comissao ATUAL sobre o valor liquido -- se a taxa mudar entre
+    a data do pedido e o dia do repasse, reaplicar a taxa atual produzia um
+    detalhamento (bruto/comissao) matematicamente inconsistente pra pedidos
+    antigos (o valor liquido pago sempre esteve correto, so o detalhamento
+    exibido no admin que ficava errado).
+    """
     per_order = []
     total_gross = Decimal("0")
     total_net = Decimal("0")
@@ -161,15 +159,21 @@ def _calculate_amounts(orders, partner_type: str, commission_rate: Decimal):
     for order in orders:
         net = Decimal(str(order["repasse"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if partner_type == "restaurant":
-            # net = gross * (1 - commission_rate)  →  gross = net / (1 - rate)
-            divisor = (Decimal("1") - commission_rate)
-            gross = (net / divisor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            comm = (gross - net).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            comm = Decimal(str(order.get("comissao_historica") or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if comm <= 0:
+                # Fallback so para pedidos antigos sem comissao_plataforma
+                # gravada (antes dessa coluna existir) -- reconstroi com a
+                # taxa atual como melhor esforco.
+                divisor = (Decimal("1") - commission_rate)
+                gross = (net / divisor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                comm = (gross - net).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            else:
+                gross = (net + comm).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         else:
-            # delivery: net = gross * 0.85  →  gross = net / 0.85
-            divisor = (Decimal("1") - delivery_platform_share)
-            gross = (net / divisor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            comm = (gross - net).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            # Entregador: modelo atual paga base + por km, sem "comissao"
+            # descontada do valor do entregador -- gross = net, sem desconto.
+            gross = net
+            comm = Decimal("0.00")
 
         total_gross += gross
         total_net += net
