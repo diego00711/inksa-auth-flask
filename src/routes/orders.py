@@ -449,9 +449,9 @@ def complete_order(order_id):
                 "UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = %s",
                 (str(order_id),)
             )
-            # Busca client_id e delivery_id antes de fechar o cursor
+            # Busca client_id, delivery_id e restaurant_id antes de fechar o cursor
             cur.execute(
-                "SELECT client_id, delivery_id FROM orders WHERE id = %s",
+                "SELECT client_id, delivery_id, restaurant_id FROM orders WHERE id = %s",
                 (str(order_id),)
             )
             completed_order = cur.fetchone()
@@ -485,6 +485,10 @@ def complete_order(order_id):
                     if completed_order['delivery_id']:
                         _award_completion_points(
                             str(completed_order['delivery_id']), 'delivery', str(order_id)
+                        )
+                    if completed_order['restaurant_id']:
+                        _award_completion_points(
+                            str(completed_order['restaurant_id']), 'restaurant', str(order_id)
                         )
                 except Exception as _gam_err:
                     logger.warning(f"Gamificação: falha ao conceder pontos para pedido {order_id}: {_gam_err}")

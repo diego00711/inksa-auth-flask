@@ -1124,10 +1124,11 @@ def award_completion_points(user_id: str, user_type: str, order_id: str = None) 
     Concede pontos ao completar um pedido (valores configuráveis via admin):
       - cliente: event_type='order_delivered_client'
       - entregador: event_type='order_delivered_delivery'
+      - restaurante: event_type='order_delivered_restaurant'
     Retorna True se sucesso, False caso contrário.
     Chamado de orders.py no endpoint /complete.
     """
-    if user_type not in ("client", "delivery"):
+    if user_type not in ("client", "delivery", "restaurant"):
         return False
 
     ok, _ = award_points_for_action(
