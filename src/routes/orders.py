@@ -8,6 +8,7 @@ from flask import Blueprint, request, jsonify, current_app
 import psycopg2
 import psycopg2.extras
 import logging
+import sentry_sdk
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from src.extensions import limiter
 
@@ -614,8 +615,13 @@ def report_delivery_incident(order_id):
                             logger.info(f"Reembolso automático OK: pedido {order_id} R${refund_amount}")
                         else:
                             logger.warning(f"MP recusou reembolso automático do pedido {order_id}: {res.get('response')}")
+                            sentry_sdk.capture_message(
+                                f"MP recusou reembolso automático do pedido {order_id} — fica pendente para o admin.",
+                                level="warning",
+                            )
                 except Exception as _re:
                     logger.warning(f"Reembolso automático falhou (fica pendente p/ admin): {_re}")
+                    sentry_sdk.capture_exception(_re)
                     try:
                         conn.rollback()
                     except Exception:

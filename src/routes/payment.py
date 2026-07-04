@@ -8,6 +8,8 @@ import logging
 import hmac
 import hashlib
 import gevent
+import sentry_sdk
+from mercadopago.config import RequestOptions
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -511,7 +513,11 @@ def processar_pagamento_cartao():
         if payer_identification and payer_identification.get('number'):
             payment_payload["payer"]["identification"] = payer_identification
 
-        result = sdk.payment().create(payment_payload)
+        # Chave de idempotencia estavel por pedido -- sem isso, o SDK gera uma
+        # chave aleatoria a cada chamada (mesmo em retry), entao um duplo-clique
+        # ou retry de rede pode gerar DUAS cobrancas reais pro mesmo pedido.
+        idempotency_options = RequestOptions(custom_headers={"x-idempotency-key": pedido_id})
+        result = sdk.payment().create(payment_payload, idempotency_options)
         resp = result.get("response", {}) if isinstance(result, dict) else {}
         status = resp.get("status")
         payment_id = resp.get("id")
@@ -558,11 +564,17 @@ def processar_pagamento_cartao():
 @mp_payment_bp.route('/pagamentos/webhook_mp', methods=['POST'])
 def mercadopago_webhook():
     webhook_secret = os.environ.get("MERCADO_PAGO_WEBHOOK_SECRET")
-    
-    if webhook_secret:
-        if not verify_mp_signature(request, webhook_secret):
-            logging.warning("⚠️ Webhook rejeitado: assinatura inválida")
-            return jsonify({'error': 'Assinatura inválida'}), 401
+
+    if not webhook_secret:
+        logging.critical(
+            "MERCADO_PAGO_WEBHOOK_SECRET não configurado — rejeitando webhook "
+            "por segurança (fail-closed). Configure a variável no Render."
+        )
+        return jsonify({'error': 'Webhook não configurado corretamente'}), 503
+
+    if not verify_mp_signature(request, webhook_secret):
+        logging.warning("⚠️ Webhook rejeitado: assinatura inválida")
+        return jsonify({'error': 'Assinatura inválida'}), 401
 
     logging.info("=" * 80)
     logging.info("✅ === WEBHOOK DO MERCADO PAGO RECEBIDO ===")
@@ -620,6 +632,7 @@ def mercadopago_webhook():
                         return jsonify({'status': 'already_processed'}), 200
                 except Exception as _idem_err:
                     logging.warning(f"⚠️ Falha na verificação de idempotência: {_idem_err} — continuando")
+                    sentry_sdk.capture_exception(_idem_err)
 
                 logging.info(f"✅ Pagamento {resource_id} APROVADO! Iniciando atualização do pedido...")
 
@@ -764,6 +777,7 @@ def mercadopago_webhook():
             logging.error("=" * 80)
             logging.error(f"❌ ERRO CRÍTICO ao processar webhook de pagamento: {e}", exc_info=True)
             logging.error("=" * 80)
+            sentry_sdk.capture_exception(e)
             return jsonify({"status": "error", "message": "Erro ao processar webhook"}), 500
     
     logging.info("=" * 80)
