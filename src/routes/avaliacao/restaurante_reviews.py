@@ -81,6 +81,13 @@ def create_restaurant_review(restaurant_id):
                         order_id=str(order_id),
                         description="Avaliação enviada",
                     )
+                    if rating == 5:
+                        _award_points_for_action(
+                            user_id=str(restaurant_id),
+                            action_key="five_star_received_restaurant",
+                            order_id=str(order_id),
+                            description="Avaliação 5 estrelas recebida",
+                        )
                 except Exception:
                     pass
 

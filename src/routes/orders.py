@@ -1120,6 +1120,17 @@ def restaurant_accept_order(order_id):
             except Exception as _e:
                 logger.warning(f"FCM restaurant_accept_order: {_e}")
 
+            if _award_points_for_action and updated.get('restaurant_id'):
+                try:
+                    _award_points_for_action(
+                        user_id=str(updated['restaurant_id']),
+                        action_key="order_accepted_restaurant",
+                        order_id=str(order_id),
+                        description="Pedido aceito",
+                    )
+                except Exception as _gam_err:
+                    logger.warning(f"Gamificação: falha ao conceder pontos de aceite (restaurante) para {order_id}: {_gam_err}")
+
             return jsonify(updated), 200
     except Exception as e:
         logger.error(f"Erro em restaurant_accept_order: {e}", exc_info=True)
