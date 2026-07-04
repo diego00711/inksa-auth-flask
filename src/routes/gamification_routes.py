@@ -963,6 +963,42 @@ def list_levels():
             pass
 
 
+@gamification_bp.get("/point-rules")
+def public_point_rules():
+    """
+    GET /api/gamification/point-rules?applies_to=client|delivery|restaurant
+    Regras de pontuação ATIVAS, pros apps mostrarem "como ganhar pontos".
+    Os mesmos valores que o admin edita em /admin/gamification/point-rules
+    (sem os campos internos de auto/manual).
+    """
+    applies_to = request.args.get("applies_to")
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if applies_to:
+                cur.execute("""
+                    SELECT action_key, label, description, points
+                      FROM public.gamification_point_rules
+                     WHERE is_active = TRUE AND applies_to = %s
+                  ORDER BY points DESC
+                """, (applies_to,))
+            else:
+                cur.execute("""
+                    SELECT action_key, label, description, points, applies_to
+                      FROM public.gamification_point_rules
+                     WHERE is_active = TRUE
+                  ORDER BY applies_to, points DESC
+                """)
+            rows = [dict(r) for r in cur.fetchall()]
+            return _ok({"items": rows})
+    except Exception as e:
+        current_app.logger.exception("gamification.public_point_rules failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
 @gamification_bp.get("/user-badges/<user_id>")
 def get_user_badges(user_id):
     """
