@@ -14,6 +14,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Helpers de cálculo (admin-configuráveis via platform_settings)
 from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
+from ..utils.helpers import get_user_id_from_token
+from src.extensions import limiter
 
 # Criação do Blueprint
 mp_payment_bp = Blueprint('mp_payment_bp', __name__)
@@ -86,15 +88,38 @@ def verify_mp_signature(req, secret):
         return False
 
 
+def _get_authenticated_client_profile_id():
+    """Valida o token e resolve o client_profiles.id de quem esta autenticado.
+    Retorna (client_profile_id, None) em caso de sucesso, ou (None, response_de_erro).
+    Nunca confia em client_id vindo do corpo da requisicao -- previne que qualquer
+    pessoa com a URL crie pedidos/cobrancas em nome de outro cliente.
+    """
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return None, error
+    if user_type != 'client':
+        return None, (jsonify({"erro": "Apenas clientes podem criar pedidos."}), 403)
+
+    profile_result = supabase_client.table('client_profiles').select('id').eq('user_id', user_id).execute()
+    if not profile_result.data:
+        return None, (jsonify({"erro": "Perfil de cliente não encontrado."}), 404)
+    return profile_result.data[0]['id'], None
+
+
 @mp_payment_bp.route('/pagamentos/criar_preferencia', methods=['POST'])
+@limiter.limit("20 per minute")
 def criar_preferencia_mercado_pago():
     logging.info("🎯 === INICIANDO CRIAÇÃO DE PREFERÊNCIA DE PAGAMENTO ===")
     try:
+        client_profile_id, auth_error = _get_authenticated_client_profile_id()
+        if auth_error:
+            return auth_error
+
         sdk = current_app.mp_sdk
         if sdk is None:
             logging.error("❌ SDK do Mercado Pago não inicializado!")
             return jsonify({"erro": "Serviço de pagamento indisponível. Credenciais do Mercado Pago ausentes."}), 503
-        
+
         dados_pedido = request.json
         logging.info(f"📦 Dados recebidos: {dados_pedido}")
 
@@ -138,7 +163,7 @@ def criar_preferencia_mercado_pago():
         # Preparar dados do pedido para o banco
         order_data = {
             'id': pedido_id,
-            'client_id': dados_pedido.get('client_id'),
+            'client_id': client_profile_id,
             'restaurant_id': dados_pedido.get('restaurant_id'),
             'delivery_id': None,
             'status': 'pending' if payment_method == 'cash' else 'awaiting_payment',
@@ -400,15 +425,21 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
 
 
 @mp_payment_bp.route('/pagamentos/processar_cartao', methods=['POST'])
+@limiter.limit("20 per minute")
 def processar_pagamento_cartao():
     """Processa pagamento com cartao via token do MP Bricks (sem redirecionar)."""
     logging.info("💳 === PROCESSANDO PAGAMENTO COM CARTÃO (transparente) ===")
     try:
+        if not supabase_client:
+            return jsonify({"erro": "Serviço de banco indisponível."}), 500
+
+        client_profile_id, auth_error = _get_authenticated_client_profile_id()
+        if auth_error:
+            return auth_error
+
         sdk = current_app.mp_sdk
         if sdk is None:
             return jsonify({"erro": "Serviço de pagamento indisponível."}), 503
-        if not supabase_client:
-            return jsonify({"erro": "Serviço de banco indisponível."}), 500
 
         d = request.json or {}
         token = d.get('token')
@@ -440,7 +471,7 @@ def processar_pagamento_cartao():
         pedido_id = d.get('pedido_id') or str(uuid.uuid4())
         order_data = {
             'id': pedido_id,
-            'client_id': d.get('client_id'),
+            'client_id': client_profile_id,
             'restaurant_id': d.get('restaurant_id'),
             'delivery_id': None,
             'status': 'awaiting_payment',
