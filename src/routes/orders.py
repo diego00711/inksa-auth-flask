@@ -1189,16 +1189,23 @@ def restaurant_accept_order(order_id):
             if order['status'] != 'pending':
                 return jsonify({"error": f"Pedido não está pendente (status atual: {order['status']})"}), 400
 
+            # UPDATE atomico: o "AND status = 'pending'" no WHERE e quem garante
+            # que dois cliques/requisicoes concorrentes nao processem o aceite
+            # duas vezes -- a checagem acima so evita o UPDATE desnecessario.
             cur.execute("""
                 UPDATE orders
                 SET status = 'accepted',
                     accepted_at = NOW(),
                     estimated_prep_time = %s,
                     updated_at = NOW()
-                WHERE id = %s
+                WHERE id = %s AND status = 'pending'
                 RETURNING *
             """, (estimated_prep_time, str(order_id)))
-            updated = dict(cur.fetchone())
+            updated_row = cur.fetchone()
+            if not updated_row:
+                conn.rollback()
+                return jsonify({"error": "Pedido não está mais pendente"}), 409
+            updated = dict(updated_row)
             conn.commit()
 
             updated.pop('pickup_code', None)
@@ -1228,6 +1235,127 @@ def restaurant_accept_order(order_id):
             return jsonify(updated), 200
     except Exception as e:
         logger.error(f"Erro em restaurant_accept_order: {e}", exc_info=True)
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+@orders_bp.route('/<uuid:order_id>/cancel-by-client', methods=['POST'])
+def cancel_order_by_client(order_id):
+    """Cliente cancela o proprio pedido enquanto o restaurante ainda nao aceitou.
+
+    So permitido em 'awaiting_payment' (pagamento nao concluido) ou 'pending'
+    (aguardando o restaurante aceitar). Depois que o restaurante aceita, o
+    cliente precisa falar com o suporte -- o restaurante ja pode ter comprado
+    insumos / comecado o preparo. Se o pedido ja estava pago online, dispara
+    estorno automatico via Mercado Pago (mesmo padrao do cancelamento pelo
+    restaurante e do incidente de entrega)."""
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'client':
+            return jsonify({"error": "Apenas o cliente pode cancelar o proprio pedido"}), 403
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
+
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                "SELECT id, status, client_id, restaurant_id, status_pagamento, "
+                "total_amount, id_transacao_mp FROM orders WHERE id = %s",
+                (str(order_id),),
+            )
+            order = cur.fetchone()
+            if not order:
+                return jsonify({"error": "Pedido não encontrado"}), 404
+
+            # Confere posse do pedido
+            cur.execute("SELECT id FROM client_profiles WHERE user_id = %s", (user_auth_id,))
+            prof = cur.fetchone()
+            if not prof or str(prof['id']) != str(order['client_id']):
+                return jsonify({"error": "Este pedido não pertence a você"}), 403
+
+            if order['status'] not in ('awaiting_payment', 'pending'):
+                return jsonify({
+                    "error": "Este pedido não pode mais ser cancelado por aqui. "
+                             "Fale com o suporte.",
+                    "status_atual": STATUS_DISPLAY_MAP.get(order['status'], order['status']),
+                }), 400
+
+            # UPDATE atomico: so cancela se ainda estiver num estado cancelavel
+            cur.execute("""
+                UPDATE orders
+                   SET status = 'cancelled',
+                       cancellation_reason = 'cancelled_by_client',
+                       updated_at = NOW()
+                 WHERE id = %s AND status IN ('awaiting_payment', 'pending')
+                RETURNING id
+            """, (str(order_id),))
+            if not cur.fetchone():
+                conn.rollback()
+                return jsonify({"error": "Pedido não pode mais ser cancelado"}), 409
+            conn.commit()
+
+            # Estorno automatico se ja estava pago online
+            if order['status_pagamento'] == 'approved':
+                refund_amount = float(order['total_amount'] or 0)
+                if refund_amount > 0:
+                    try:
+                        sdk = current_app.mp_sdk
+                        if sdk and order['id_transacao_mp']:
+                            res = sdk.refund().create(order['id_transacao_mp'])
+                            code = res.get('status', 200) if isinstance(res, dict) else 200
+                            if code < 400:
+                                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _rcur:
+                                    _rcur.execute(
+                                        "UPDATE orders SET status_pagamento = 'refunded', updated_at = NOW() WHERE id = %s",
+                                        (str(order_id),),
+                                    )
+                                conn.commit()
+                                logger.info(f"Reembolso automático OK (cancelamento pelo cliente): pedido {order_id} R${refund_amount}")
+                            else:
+                                logger.warning(f"MP recusou reembolso do pedido {order_id} (cancelamento cliente): {res.get('response')}")
+                                sentry_sdk.capture_message(
+                                    f"MP recusou reembolso automático do pedido {order_id} (cancelado pelo cliente) — requer ação manual do admin.",
+                                    level="warning",
+                                )
+                        else:
+                            logger.warning(f"Sem SDK MP/id_transacao_mp para reembolsar pedido {order_id} (cancelamento cliente)")
+                            sentry_sdk.capture_message(
+                                f"Pedido {order_id} cancelado pelo cliente estava pago mas sem id_transacao_mp/SDK disponível — requer ação manual do admin.",
+                                level="warning",
+                            )
+                    except Exception as _re:
+                        logger.warning(f"Reembolso automático falhou (cancelamento cliente, fica pendente p/ admin): {_re}")
+                        sentry_sdk.capture_exception(_re)
+
+            # FCM: avisa o restaurante que o cliente cancelou
+            try:
+                if order['restaurant_id']:
+                    _nc = get_db_connection()
+                    if _nc:
+                        try:
+                            with _nc.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
+                                rest_token = _get_fcm_token(_ncur, 'restaurant_profiles', str(order['restaurant_id']))
+                                _notify(rest_token, "Pedido cancelado",
+                                        "O cliente cancelou o pedido antes da confirmação.",
+                                        {"order_id": str(order_id), "status": "cancelled"})
+                        finally:
+                            _nc.close()
+            except Exception as _e:
+                logger.warning(f"FCM cancel_order_by_client: {_e}")
+
+            return jsonify({"status": "success", "message": "Pedido cancelado com sucesso.",
+                            "order_status": "cancelled"}), 200
+
+    except Exception as e:
+        logger.error(f"Erro em cancel_order_by_client: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return jsonify({"error": "Erro interno do servidor"}), 500
