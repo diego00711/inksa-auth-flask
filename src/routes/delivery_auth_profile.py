@@ -110,7 +110,7 @@ def handle_profile():
                     'address_street', 'address_number', 'address_complement', 'address_neighborhood',
                     'address_city', 'address_state', 'address_zipcode', 'is_available',
                     'bank_name', 'bank_agency', 'bank_account_number', 'bank_account_type',
-                    'pix_key', 'payout_frequency',
+                    'pix_key', 'payout_frequency', 'daily_goal',
                 ]
 
                 update_data = {
@@ -122,6 +122,15 @@ def handle_profile():
                 # com "invalid input syntax for type date" -- normaliza pra NULL.
                 if update_data.get('birth_date') == '':
                     update_data['birth_date'] = None
+
+                # daily_goal é INTEGER (meta de ganhos diária, em reais): valida
+                # e normaliza pra evitar valor negativo ou lixo vindo do app.
+                if 'daily_goal' in update_data:
+                    try:
+                        goal = int(float(update_data['daily_goal'] or 0))
+                        update_data['daily_goal'] = max(0, min(goal, 100000))
+                    except (ValueError, TypeError):
+                        return jsonify({"error": "Meta diária inválida"}), 400
 
                 # vehicle_type tem CHECK constraint (valores fixos): string vazia
                 # (campo nao selecionado) nao esta na lista permitida -- normaliza
