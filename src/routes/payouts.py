@@ -61,13 +61,18 @@ def allow_cors_preflight():
 # ---------------------------------------------------------------------------
 
 def _get_partner_pix_data(conn, *, partner_type: str, partner_id: str):
+    """Resolve chave PIX + nome do parceiro. As tabelas reais sao
+    restaurant_profiles / delivery_profiles -- nao existe tabela `restaurants`,
+    delivery_profiles nao tem `full_name` (tem first_name/last_name) e
+    restaurant_profiles nao tem `bank_pix_key`."""
     with conn.cursor(cursor_factory=DictCursor) as cur:
         if partner_type == "delivery":
             cur.execute(
                 """
-                SELECT dp.pix_key, dp.full_name
-                FROM delivery_profiles dp
-                WHERE dp.id = %s OR dp.user_id = %s
+                SELECT pix_key,
+                       NULLIF(TRIM(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')), '') AS full_name
+                FROM delivery_profiles
+                WHERE id = %s OR user_id = %s
                 LIMIT 1
                 """,
                 (partner_id, partner_id),
@@ -75,10 +80,10 @@ def _get_partner_pix_data(conn, *, partner_type: str, partner_id: str):
         else:
             cur.execute(
                 """
-                SELECT COALESCE(r.pix_key, r.bank_pix_key) AS pix_key,
-                       r.trade_name AS full_name
-                FROM restaurants r
-                WHERE r.id = %s OR r.user_id = %s
+                SELECT pix_key,
+                       COALESCE(trade_name, restaurant_name, business_name) AS full_name
+                FROM restaurant_profiles
+                WHERE id = %s OR user_id = %s
                 LIMIT 1
                 """,
                 (partner_id, partner_id),
@@ -177,37 +182,47 @@ def list_payouts():
         where, params = [], []
 
         if partner_type in ("restaurant", "delivery"):
-            where.append("partner_type = %s")
+            where.append("p.partner_type = %s")
             params.append(partner_type)
         if status in valid_statuses:
-            where.append("status = %s")
+            where.append("p.status = %s")
             params.append(status)
         if partner_id:
-            where.append("partner_id = %s")
+            where.append("p.partner_id = %s")
             params.append(partner_id)
         if start_date:
-            where.append("created_at >= %s")
+            where.append("p.created_at >= %s")
             params.append(start_date)
         if end_date:
-            where.append("created_at <= %s")
+            where.append("p.created_at <= %s")
             params.append(end_date)
 
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
         with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute(f"SELECT COUNT(*) AS total FROM payouts {where_sql}", tuple(params))
+            cur.execute(f"SELECT COUNT(*) AS total FROM payouts p {where_sql}", tuple(params))
             total = int(cur.fetchone()["total"])
 
+            # LEFT JOIN nas duas tabelas de perfil para trazer nome + chave PIX
+            # do parceiro junto -- o admin ve pra quem pagar e a chave sem ter
+            # que abrir outra tela (fluxo de repasse assistido).
             cur.execute(
                 f"""
-                SELECT id, partner_type, partner_id,
-                       period_start, period_end,
-                       total_gross, commission_fee, total_net,
-                       status, payment_method, payment_ref,
-                       created_at, updated_at
-                FROM payouts
+                SELECT p.id, p.partner_type, p.partner_id,
+                       p.period_start, p.period_end,
+                       p.total_gross, p.commission_fee, p.total_net,
+                       p.status, p.payment_method, p.payment_ref,
+                       p.created_at, p.updated_at,
+                       COALESCE(
+                           rp.trade_name, rp.restaurant_name, rp.business_name,
+                           NULLIF(TRIM(COALESCE(dp.first_name, '') || ' ' || COALESCE(dp.last_name, '')), '')
+                       ) AS partner_name,
+                       COALESCE(rp.pix_key, dp.pix_key) AS pix_key
+                FROM payouts p
+                LEFT JOIN restaurant_profiles rp ON p.partner_type = 'restaurant' AND rp.id = p.partner_id
+                LEFT JOIN delivery_profiles  dp ON p.partner_type = 'delivery'   AND dp.id = p.partner_id
                 {where_sql}
-                ORDER BY created_at DESC
+                ORDER BY p.created_at DESC
                 LIMIT %s OFFSET %s
                 """,
                 tuple(params + [limit, offset]),

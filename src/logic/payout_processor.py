@@ -60,8 +60,15 @@ def _period_bounds(cycle_type: str, reference_date: date = None):
 
 
 def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
-    """Returns list of partner IDs whose payout_cycle matches *cycle_type*."""
-    table = "restaurants" if partner_type == "restaurant" else "delivery_profiles"
+    """Returns list of partner IDs whose payout_cycle matches *cycle_type*.
+
+    Ambas as tabelas de perfil (restaurant_profiles / delivery_profiles) tem
+    as colunas `active` e `payout_cycle`. Antes isto apontava para uma tabela
+    `restaurants` inexistente e para uma coluna `is_active` que
+    restaurant_profiles nao tem -- entao repasse de restaurante nunca era
+    gerado (a query dava erro, caia no except e retornava lista vazia).
+    """
+    table = "restaurant_profiles" if partner_type == "restaurant" else "delivery_profiles"
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
@@ -69,7 +76,7 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
                 SELECT id AS partner_id
                 FROM {table}
                 WHERE COALESCE(payout_cycle, 'weekly') = %s
-                  AND is_active = true
+                  AND COALESCE(active, true) = true
                 """,
                 (cycle_type,),
             )
@@ -81,7 +88,7 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
             logger.warning("payout_cycle column missing on %s; treating all as 'weekly'", table)
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(
-                    f"SELECT id AS partner_id FROM {table} WHERE is_active = true"
+                    f"SELECT id AS partner_id FROM {table} WHERE COALESCE(active, true) = true"
                 )
                 return [str(row["partner_id"]) for row in cur.fetchall()]
         return []
