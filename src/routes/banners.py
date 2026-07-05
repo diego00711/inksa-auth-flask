@@ -42,7 +42,7 @@ def get_banners():
         
         if auth_header:
             user_auth_id, user_type, error = get_user_id_from_token(auth_header)
-            if not error and user_type in ['admin', 'restaurant']:
+            if not error and user_type == 'admin':
                 is_admin = True
         
         conn = get_db_connection()
@@ -96,7 +96,7 @@ def create_banner():
             logger.warning(f"Erro de autenticação: {error}")
             return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem criar banners"}), 403
         
         data = request.get_json()
@@ -163,7 +163,7 @@ def get_banner(banner_id):
         
         if auth_header:
             user_auth_id, user_type, error = get_user_id_from_token(auth_header)
-            if not error and user_type in ['admin', 'restaurant']:
+            if not error and user_type == 'admin':
                 is_admin = True
 
         conn = get_db_connection()
@@ -201,7 +201,7 @@ def update_banner(banner_id):
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem atualizar banners"}), 403
 
         data = request.get_json()
@@ -265,7 +265,7 @@ def delete_banner(banner_id):
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem deletar banners"}), 403
 
         conn = get_db_connection()
@@ -301,7 +301,7 @@ def toggle_banner_status(banner_id):
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem alterar status de banners"}), 403
 
         conn = get_db_connection()
@@ -351,7 +351,7 @@ def reorder_banners():
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem reordenar banners"}), 403
 
         data = request.get_json()
@@ -400,7 +400,7 @@ def get_banner_stats():
         user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
         if error: return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem ver estatísticas"}), 403
 
         conn = get_db_connection()

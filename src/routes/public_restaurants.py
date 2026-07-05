@@ -82,12 +82,15 @@ def list_restaurants():
 
             has_coords = bool(user_lat and user_lon)
             dist_expr = (
-                "ROUND((earth_distance(ll_to_earth(latitude, longitude),"
+                "ROUND((earth_distance(ll_to_earth(rp.latitude, rp.longitude),"
                 " ll_to_earth(%s, %s)) / 1000)::numeric, 2)"
                 if has_coords else "NULL"
             )
 
-            where = []
+            # Só restaurantes aprovados/ativos (e cujo usuário não foi
+            # desativado pelo admin) aparecem publicamente.
+            where = ["COALESCE(rp.approved, TRUE) = TRUE", "COALESCE(rp.active, TRUE) = TRUE",
+                     "COALESCE(u.is_active, TRUE) = TRUE"]
             params = []
 
             if has_coords:
@@ -95,15 +98,15 @@ def list_restaurants():
                 params += [user_lat, user_lon]
 
             if category:
-                where.append("(category ILIKE %s OR cuisine_type ILIKE %s)")
+                where.append("(rp.category ILIKE %s OR rp.cuisine_type ILIKE %s)")
                 params += [f"%{category}%", f"%{category}%"]
 
             if search:
-                where.append("restaurant_name ILIKE %s")
+                where.append("rp.restaurant_name ILIKE %s")
                 params.append(f"%{search}%")
 
-            where_sql  = ("WHERE " + " AND ".join(where)) if where else ""
-            order_sql  = "ORDER BY distance_km ASC NULLS LAST" if has_coords else "ORDER BY restaurant_name"
+            where_sql  = "WHERE " + " AND ".join(where)
+            order_sql  = "ORDER BY distance_km ASC NULLS LAST" if has_coords else "ORDER BY rp.restaurant_name"
 
             # Busca limit+1 para saber se há próxima página sem um COUNT extra
             params += [limit + 1, offset]
@@ -111,21 +114,22 @@ def list_restaurants():
             cur.execute(
                 f"""
                 SELECT
-                    id,
-                    restaurant_name,
-                    COALESCE(trade_name, business_name)  AS trade_name,
-                    logo_url,
+                    rp.id,
+                    rp.restaurant_name,
+                    COALESCE(rp.trade_name, rp.business_name)  AS trade_name,
+                    rp.logo_url,
                     NULL AS cover_url,
-                    COALESCE(cuisine_type, category)     AS cuisine_type,
-                    category,
-                    is_open,
-                    COALESCE(rating, 0)                  AS rating,
-                    COALESCE(delivery_fee, 0)            AS delivery_fee,
-                    COALESCE(minimum_order, 0)           AS minimum_order,
-                    delivery_time                        AS delivery_time,
-                    delivery_type,
-                    {dist_expr}                          AS distance_km
-                FROM restaurant_profiles
+                    COALESCE(rp.cuisine_type, rp.category)     AS cuisine_type,
+                    rp.category,
+                    rp.is_open,
+                    COALESCE(rp.rating, 0)                     AS rating,
+                    COALESCE(rp.delivery_fee, 0)                AS delivery_fee,
+                    COALESCE(rp.minimum_order, 0)                AS minimum_order,
+                    rp.delivery_time                            AS delivery_time,
+                    rp.delivery_type,
+                    {dist_expr}                                 AS distance_km
+                FROM restaurant_profiles rp
+                LEFT JOIN users u ON u.id = rp.user_id
                 {where_sql}
                 {order_sql}
                 LIMIT %s OFFSET %s
@@ -168,33 +172,37 @@ def get_restaurant(restaurant_id):
             cur.execute(
                 """
                 SELECT
-                    id,
-                    restaurant_name,
-                    COALESCE(trade_name, business_name)           AS trade_name,
-                    logo_url,
+                    rp.id,
+                    rp.restaurant_name,
+                    COALESCE(rp.trade_name, rp.business_name)     AS trade_name,
+                    rp.logo_url,
                     NULL AS cover_url,
-                    description,
-                    COALESCE(cuisine_type, category)              AS cuisine_type,
+                    rp.description,
+                    COALESCE(rp.cuisine_type, rp.category)        AS cuisine_type,
                     CONCAT_WS(', ',
-                        NULLIF(TRIM(COALESCE(address_street,       '')), ''),
-                        NULLIF(TRIM(COALESCE(address_number,       '')), ''),
-                        NULLIF(TRIM(COALESCE(address_neighborhood, '')), ''),
-                        NULLIF(TRIM(COALESCE(address_city,         '')), ''),
-                        NULLIF(TRIM(COALESCE(address_state,        '')), '')
+                        NULLIF(TRIM(COALESCE(rp.address_street,       '')), ''),
+                        NULLIF(TRIM(COALESCE(rp.address_number,       '')), ''),
+                        NULLIF(TRIM(COALESCE(rp.address_neighborhood, '')), ''),
+                        NULLIF(TRIM(COALESCE(rp.address_city,         '')), ''),
+                        NULLIF(TRIM(COALESCE(rp.address_state,        '')), '')
                     )                                             AS address,
-                    is_open,
-                    COALESCE(rating, 0)                           AS rating,
-                    COALESCE(delivery_fee, 0)                     AS delivery_fee,
-                    COALESCE(minimum_order, 0)                    AS minimum_order,
-                    delivery_time                                 AS delivery_time,
-                    phone,
-                    category,
-                    delivery_type,
-                    COALESCE(accepts_cash, TRUE) AS accepts_cash,
-                    latitude,
-                    longitude
-                FROM restaurant_profiles
-                WHERE id = %s
+                    rp.is_open,
+                    COALESCE(rp.rating, 0)                        AS rating,
+                    COALESCE(rp.delivery_fee, 0)                  AS delivery_fee,
+                    COALESCE(rp.minimum_order, 0)                 AS minimum_order,
+                    rp.delivery_time                              AS delivery_time,
+                    rp.phone,
+                    rp.category,
+                    rp.delivery_type,
+                    COALESCE(rp.accepts_cash, TRUE) AS accepts_cash,
+                    rp.latitude,
+                    rp.longitude
+                FROM restaurant_profiles rp
+                LEFT JOIN users u ON u.id = rp.user_id
+                WHERE rp.id = %s
+                  AND COALESCE(rp.approved, TRUE) = TRUE
+                  AND COALESCE(rp.active, TRUE) = TRUE
+                  AND COALESCE(u.is_active, TRUE) = TRUE
                 """,
                 (str(restaurant_id),),
             )
@@ -240,11 +248,16 @@ def get_restaurant_menu(restaurant_id):
         conn = _get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
 
-            # Validate restaurant exists and is accessible
+            # Validate restaurant exists and is accessible (aprovado/ativo)
             cur.execute(
                 """
-                SELECT id FROM restaurant_profiles
-                WHERE id = %s
+                SELECT rp.id
+                FROM restaurant_profiles rp
+                LEFT JOIN users u ON u.id = rp.user_id
+                WHERE rp.id = %s
+                  AND COALESCE(rp.approved, TRUE) = TRUE
+                  AND COALESCE(rp.active, TRUE) = TRUE
+                  AND COALESCE(u.is_active, TRUE) = TRUE
                 """,
                 (str(restaurant_id),),
             )

@@ -26,20 +26,52 @@ def _table_exists(cur) -> bool:
         return False
 
 
+def _caller_belongs_to_order(cur, order_id, user_auth_id, user_type):
+    """Confere se quem chama e o cliente ou entregador daquele pedido (ou admin).
+    Retorna True/False; None se o pedido nao existir."""
+    if user_type == 'admin':
+        return True
+    cur.execute("SELECT client_id, delivery_id FROM public.orders WHERE id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        return None
+    if user_type == 'client':
+        cur.execute("SELECT id FROM public.client_profiles WHERE user_id = %s", (user_auth_id,))
+        prof = cur.fetchone()
+        return bool(prof and order['client_id'] and str(prof['id']) == str(order['client_id']))
+    if user_type == 'delivery':
+        cur.execute("SELECT id FROM public.delivery_profiles WHERE user_id = %s", (user_auth_id,))
+        prof = cur.fetchone()
+        return bool(prof and order['delivery_id'] and str(prof['id']) == str(order['delivery_id']))
+    return False
+
+
 @chat_bp.route('/<order_id>/messages', methods=['GET'])
 def get_chat_messages(order_id):
     """
     GET /api/chat/<order_id>/messages
     Retorna lista de mensagens ordenadas por created_at ASC.
-    Sem autenticacao obrigatoria.
+    Exige que quem chama seja o cliente ou entregador daquele pedido (ou admin).
     """
     conn = None
     try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type not in ('client', 'delivery', 'admin'):
+            return jsonify({"error": "Acesso não autorizado"}), 403
+
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            belongs = _caller_belongs_to_order(cur, order_id, user_id, user_type)
+            if belongs is None:
+                return jsonify({"error": "Pedido não encontrado"}), 404
+            if not belongs:
+                return jsonify({"error": "Este pedido não pertence a você"}), 403
+
             if not _table_exists(cur):
                 logger.warning("Tabela chat_messages nao existe. Execute create_chat.sql")
                 return jsonify({
@@ -115,6 +147,12 @@ def send_chat_message(order_id):
             return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            belongs = _caller_belongs_to_order(cur, order_id, user_id, user_type)
+            if belongs is None:
+                return jsonify({"error": "Pedido não encontrado"}), 404
+            if not belongs:
+                return jsonify({"error": "Este pedido não pertence a você"}), 403
+
             if not _table_exists(cur):
                 logger.warning("Tabela chat_messages nao existe. Execute create_chat.sql")
                 return jsonify({"error": "Tabela de chat nao configurada. Execute create_chat.sql"}), 503

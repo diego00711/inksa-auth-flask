@@ -358,6 +358,7 @@ def register():
 
 # ✅ NOVO ENDPOINT: ESQUECI A SENHA
 @auth_bp.route('/forgot-password', methods=['POST'])
+@limiter.limit("5 per minute")
 def forgot_password():
     """
     Envia e-mail de reset de senha via Supabase Auth.
@@ -421,6 +422,7 @@ def forgot_password():
 
 
 @auth_bp.route('/reset-password', methods=['POST'])
+@limiter.limit("10 per minute")
 def reset_password():
     """Redefine a senha usando o token de recuperação (access_token vindo do link do e-mail).
     Campos: token (ou access_token) + new_password (ou password).

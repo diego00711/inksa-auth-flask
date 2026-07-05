@@ -8,6 +8,7 @@ from flask_cors import CORS
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from ..utils.audit import log_admin_action_auto
+from src.extensions import limiter
 
 # Create blueprint for admin users API endpoints
 admin_users_bp = Blueprint("admin_users_bp", __name__)
@@ -508,6 +509,7 @@ def get_users_signups_trend():
 @admin_users_bp.route("/<uuid:user_id>/", methods=["PATCH"])
 @admin_users_bp.route("/api/users/<uuid:user_id>", methods=["PATCH"])
 @admin_required
+@limiter.limit("30 per minute")
 def update_user(user_id):
     """
     Partial update for user status/role.
@@ -611,6 +613,7 @@ def update_user(user_id):
 @admin_users_bp.route("/<uuid:user_id>/reset-password", methods=["POST"])
 @admin_users_bp.route("/<uuid:user_id>/reset-password/", methods=["POST"])
 @admin_required
+@limiter.limit("10 per minute")
 def admin_reset_user_password(user_id):
     """
     Envia um e-mail de redefinição de senha para o usuário.
@@ -649,6 +652,7 @@ def admin_reset_user_password(user_id):
 @admin_users_bp.route("/<uuid:user_id>", methods=["DELETE"])
 @admin_users_bp.route("/<uuid:user_id>/", methods=["DELETE"])
 @admin_required
+@limiter.limit("10 per minute")
 def admin_delete_user(user_id):
     """
     Exclui permanentemente o usuário do Supabase Auth. Os perfis relacionados

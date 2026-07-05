@@ -34,7 +34,7 @@ def upload_banner_image():
         if error:
             return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem fazer upload de imagens"}), 403
         
         # Verificar se foi enviado um arquivo
@@ -153,7 +153,7 @@ def delete_banner_image(filename):
         if error:
             return error
         
-        if user_type not in ['admin', 'restaurant']:
+        if user_type != 'admin':
             return jsonify({"error": "Apenas administradores podem deletar imagens"}), 403
         
         # Verificar se o filename é seguro

@@ -12,6 +12,7 @@ from gotrue.errors import AuthApiError
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, _extract_bearer_token
 from ..utils.audit import log_admin_action, log_admin_action_auto
+from src.extensions import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,7 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
 
 # --------- Auth ---------
 @admin_bp.route("/login", methods=["POST"])
+@limiter.limit("10 per minute")
 def admin_login():
     data = request.get_json() or {}
     email = data.get("email")
