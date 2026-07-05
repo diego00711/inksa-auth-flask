@@ -64,6 +64,36 @@ def internal_required(fn):
         return fn(*a, **kw)
     return _wrap
 
+# ---------- autorização por dono do recurso ----------
+# Nas tabelas de gamificação, "user_id" é o id do PERFIL (client_profiles.id /
+# restaurant_profiles.id / delivery_profiles.id), não o auth uid bruto do token.
+_PROFILE_TABLE_BY_TYPE = {
+    "client": "client_profiles",
+    "restaurant": "restaurant_profiles",
+    "delivery": "delivery_profiles",
+}
+
+def _own_profile_id(cur, auth_uid, user_type):
+    table = _PROFILE_TABLE_BY_TYPE.get(user_type)
+    if not table:
+        return None
+    cur.execute(f"SELECT id FROM public.{table} WHERE user_id = %s", (auth_uid,))
+    row = cur.fetchone()
+    return str(row["id"]) if row else None
+
+def _require_self_or_admin(cur, path_user_id):
+    """Exige token valido; libera se for admin ou se o perfil do token bater
+    com o user_id do path. Retorna response de erro, ou None se autorizado."""
+    auth_uid, user_type, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if err:
+        return err
+    if user_type == "admin":
+        return None
+    own_id = _own_profile_id(cur, auth_uid, user_type)
+    if not own_id or own_id != str(path_user_id):
+        return _err("unauthorized", 403)
+    return None
+
 # ---------- core ----------
 def _add_points_event(*, user_id, points: int, event_type: str, description=None, order_id=None):
     if not points:
@@ -136,6 +166,9 @@ def get_user_points_and_level(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            auth_err = _require_self_or_admin(cur, user_id)
+            if auth_err:
+                return auth_err
             cur.execute("""
                 SELECT up.user_id, up.total_points, up.current_level, up.points_to_next_level, l.level_name
                   FROM public.user_points up
@@ -823,7 +856,13 @@ def award_points():
     POST /api/gamification/award-points
     Body: {user_id, user_type, action, points}
     Insere pontos no banco, verifica badges, retorna {success, total_points, badges_unlocked}
+    Ferramenta de concessão manual -- restrita a admin (nunca deve ser chamada
+    sem checagem, senao qualquer requisicao credita pontos pra qualquer conta).
     """
+    _, admin_err = _admin_required()
+    if admin_err:
+        return admin_err
+
     body = request.get_json(silent=True) or {}
     user_id = body.get("user_id")
     action = body.get("action", "manual")
@@ -869,6 +908,9 @@ def get_points_history(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            auth_err = _require_self_or_admin(cur, user_id)
+            if auth_err:
+                return auth_err
             cur.execute("""
                 SELECT id, points_earned, points_type, description, order_id, created_at
                   FROM public.points_history
@@ -901,6 +943,9 @@ def get_user_points(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            auth_err = _require_self_or_admin(cur, user_id)
+            if auth_err:
+                return auth_err
             cur.execute("""
                 SELECT up.total_points, up.current_level, up.points_to_next_level,
                        COALESCE(l.level_name, 'Bronze') AS level_name,
@@ -1041,6 +1086,9 @@ def get_user_badges(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            auth_err = _require_self_or_admin(cur, user_id)
+            if auth_err:
+                return auth_err
             cur.execute("""
                 SELECT EXISTS (
                     SELECT 1 FROM information_schema.tables
@@ -1544,18 +1592,26 @@ def list_reward_redemptions():
 
 @gamification_bp.post("/rewards/<reward_id>/redeem")
 def redeem_reward(reward_id):
-    """POST /api/gamification/rewards/<id>/redeem — resgatar recompensa."""
+    """POST /api/gamification/rewards/<id>/redeem — resgatar recompensa.
+    user_id/user_type sempre resolvidos a partir do token -- nunca confiar
+    no que vem no body, senao qualquer requisicao resgata recompensa em
+    nome (e com os pontos) de outra pessoa."""
     body = request.get_json(silent=True) or {}
-    user_id   = body.get("user_id")
-    user_type = body.get("user_type", "client")
     user_name = body.get("user_name", "")
 
-    if not user_id:
-        return _err("user_id é obrigatório", 422)
+    auth_uid, user_type, auth_err = get_user_id_from_token(request.headers.get("Authorization"))
+    if auth_err:
+        return auth_err
+    if user_type not in _PROFILE_TABLE_BY_TYPE:
+        return _err("Apenas clientes, restaurantes e entregadores podem resgatar recompensas.", 403)
 
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            user_id = _own_profile_id(cur, auth_uid, user_type)
+            if not user_id:
+                return _err("Perfil não encontrado.", 404)
+
             # 1. Verifica se recompensa existe, está ativa e dentro da validade
             cur.execute("""
                 SELECT id, name, points_required, stock, is_active

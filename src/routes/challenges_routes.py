@@ -56,6 +56,35 @@ def _tables_exist(cur, *table_names):
     return {t: (t in found) for t in table_names}
 
 
+# ---------- autorização por dono do recurso ----------
+# Assim como em user_points, "user_id" aqui é o id do PERFIL
+# (client_profiles.id / restaurant_profiles.id / delivery_profiles.id).
+_PROFILE_TABLE_BY_TYPE = {
+    "client": "client_profiles",
+    "restaurant": "restaurant_profiles",
+    "delivery": "delivery_profiles",
+}
+
+def _own_profile_id(cur, auth_uid, user_type):
+    table = _PROFILE_TABLE_BY_TYPE.get(user_type)
+    if not table:
+        return None
+    cur.execute(f"SELECT id FROM public.{table} WHERE user_id = %s", (auth_uid,))
+    row = cur.fetchone()
+    return str(row["id"]) if row else None
+
+def _require_self_or_admin(cur, path_user_id):
+    auth_uid, user_type, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if err:
+        return err
+    if user_type == "admin":
+        return None
+    own_id = _own_profile_id(cur, auth_uid, user_type)
+    if not own_id or own_id != str(path_user_id):
+        return _err("unauthorized", 403)
+    return None
+
+
 # ---------- rotas ----------
 
 @challenges_bp.get("/active")
@@ -125,17 +154,18 @@ def list_active_challenges():
 def update_challenge_progress():
     """
     POST /api/challenges/progress
-    Body: {user_id, challenge_id, increment}
-    Atualiza progresso do usuário num desafio.
+    Body: {challenge_id, increment}
+    Atualiza progresso do usuário autenticado num desafio (user_id sempre
+    resolvido pelo token -- nunca confiar em user_id vindo do body, senao
+    qualquer requisicao altera o progresso/pontos de outra pessoa).
     Se o desafio for concluído, concede pontos automaticamente.
     """
     body = request.get_json(silent=True) or {}
-    user_id = body.get("user_id")
     challenge_id = body.get("challenge_id")
     increment = body.get("increment", 1)
 
-    if not user_id or not challenge_id:
-        return _err("user_id e challenge_id são obrigatórios", 422)
+    if not challenge_id:
+        return _err("challenge_id é obrigatório", 422)
 
     try:
         increment = int(increment)
@@ -144,11 +174,21 @@ def update_challenge_progress():
     except (ValueError, TypeError):
         return _err("increment deve ser um número inteiro", 422)
 
+    auth_uid, user_type, auth_err = get_user_id_from_token(request.headers.get("Authorization"))
+    if auth_err:
+        return auth_err
+    if user_type not in _PROFILE_TABLE_BY_TYPE:
+        return _err("Apenas clientes, restaurantes e entregadores possuem desafios.", 403)
+
     conn = None
     try:
         conn = _db()
         with conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                user_id = _own_profile_id(cur, auth_uid, user_type)
+                if not user_id:
+                    return _err("Perfil não encontrado.", 404)
+
                 exists = _tables_exist(cur, "challenges", "user_challenges")
                 if not exists["challenges"] or not exists["user_challenges"]:
                     return _err("Sistema de desafios não configurado ainda", 503)
@@ -265,6 +305,10 @@ def get_user_challenges(user_id):
     try:
         conn = _db()
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            auth_err = _require_self_or_admin(cur, user_id)
+            if auth_err:
+                return auth_err
+
             exists = _tables_exist(cur, "challenges", "user_challenges")
             if not exists["challenges"]:
                 return _ok({"items": [], "total": 0})

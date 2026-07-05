@@ -293,7 +293,7 @@ def update_order_status(order_id):
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT o.status
+                SELECT o.status, o.status_pagamento, o.total_amount, o.id_transacao_mp
                 FROM orders o
                 JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE o.id = %s AND rp.user_id = %s
@@ -314,6 +314,41 @@ def update_order_status(order_id):
             )
             updated_order = dict(cur.fetchone())
             conn.commit()
+
+            # Cancelamento de pedido já pago (online) precisa estornar o cliente
+            # automaticamente -- sem isso o pedido fica "pago mas cancelado" e o
+            # dinheiro só volta se alguém no admin perceber manualmente.
+            if new_status_internal == 'cancelled' and order['status_pagamento'] == 'approved':
+                refund_amount = float(order['total_amount'] or 0)
+                if refund_amount > 0:
+                    try:
+                        sdk = current_app.mp_sdk
+                        if sdk and order['id_transacao_mp']:
+                            res = sdk.refund().create(order['id_transacao_mp'])
+                            code = res.get('status', 200) if isinstance(res, dict) else 200
+                            if code < 400:
+                                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _rcur:
+                                    _rcur.execute(
+                                        "UPDATE orders SET status_pagamento = 'refunded', updated_at = NOW() WHERE id = %s",
+                                        (str(order_id),),
+                                    )
+                                conn.commit()
+                                logger.info(f"Reembolso automático OK (cancelamento pelo restaurante): pedido {order_id} R${refund_amount}")
+                            else:
+                                logger.warning(f"MP recusou reembolso do pedido {order_id} (cancelamento restaurante): {res.get('response')}")
+                                sentry_sdk.capture_message(
+                                    f"MP recusou reembolso automático do pedido {order_id} (cancelado pelo restaurante) — requer ação manual do admin.",
+                                    level="warning",
+                                )
+                        else:
+                            logger.warning(f"Sem SDK MP/id_transacao_mp para reembolsar pedido {order_id} (cancelamento restaurante)")
+                            sentry_sdk.capture_message(
+                                f"Pedido {order_id} cancelado pelo restaurante estava pago mas sem id_transacao_mp/SDK disponível — requer ação manual do admin.",
+                                level="warning",
+                            )
+                    except Exception as _re:
+                        logger.warning(f"Reembolso automático falhou (cancelamento restaurante, fica pendente p/ admin): {_re}")
+                        sentry_sdk.capture_exception(_re)
 
             # FCM: notificacoes por mudanca de status
             try:
@@ -368,10 +403,23 @@ def pickup_order(order_id):
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT status, pickup_code FROM orders WHERE id = %s", (str(order_id),))
+            cur.execute("SELECT status, pickup_code, restaurant_id, delivery_id FROM orders WHERE id = %s", (str(order_id),))
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado"}), 404
+
+            # Confere posse do pedido alem do codigo -- o codigo de 4 chars
+            # sozinho e forca-bruta-vel e nao deveria ser a unica barreira.
+            if user_type == 'restaurant':
+                cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_auth_id,))
+                prof = cur.fetchone()
+                if not prof or str(prof['id']) != str(order['restaurant_id']):
+                    return jsonify({"error": "Este pedido não pertence ao seu restaurante"}), 403
+            else:
+                cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
+                prof = cur.fetchone()
+                if not prof or order['delivery_id'] is None or str(prof['id']) != str(order['delivery_id']):
+                    return jsonify({"error": "Este pedido não está atribuído a você"}), 403
 
             if order['status'] not in ['ready', 'accepted_by_delivery']:
                 return jsonify({
@@ -433,10 +481,23 @@ def complete_order(order_id):
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT status, delivery_code FROM orders WHERE id = %s", (str(order_id),))
+            cur.execute("SELECT status, delivery_code, restaurant_id, delivery_id FROM orders WHERE id = %s", (str(order_id),))
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado"}), 404
+
+            # Confere posse do pedido alem do codigo -- o codigo de 4 chars
+            # sozinho e forca-bruta-vel e nao deveria ser a unica barreira.
+            if user_type == 'restaurant':
+                cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_auth_id,))
+                prof = cur.fetchone()
+                if not prof or str(prof['id']) != str(order['restaurant_id']):
+                    return jsonify({"error": "Este pedido não pertence ao seu restaurante"}), 403
+            else:
+                cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
+                prof = cur.fetchone()
+                if not prof or order['delivery_id'] is None or str(prof['id']) != str(order['delivery_id']):
+                    return jsonify({"error": "Este pedido não está atribuído a você"}), 403
 
             if order['status'] != 'delivering':
                 return jsonify({
@@ -538,6 +599,11 @@ def report_delivery_incident(order_id):
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado"}), 404
+
+            cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
+            _prof = cur.fetchone()
+            if not _prof or order['delivery_id'] is None or str(_prof['id']) != str(order['delivery_id']):
+                return jsonify({"error": "Este pedido não está atribuído a você"}), 403
 
             # Só quem está com o pedido (em rota / aguardando retirada) pode reportar
             if order['status'] not in ('delivering', 'accepted_by_delivery', 'ready'):
@@ -701,6 +767,15 @@ def confirm_delivery_return(order_id):
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id, delivery_id FROM orders WHERE id = %s", (str(order_id),))
+            _order = cur.fetchone()
+            if not _order:
+                return jsonify({"error": "Pedido não encontrado"}), 404
+            cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
+            _prof = cur.fetchone()
+            if not _prof or _order['delivery_id'] is None or str(_prof['id']) != str(_order['delivery_id']):
+                return jsonify({"error": "Este pedido não está atribuído a você"}), 403
+
             cur.execute(
                 """UPDATE delivery_incidents
                       SET resolution = 'returned', resolved_at = NOW(),
@@ -1016,16 +1091,29 @@ def accept_order_by_delivery(order_id):
                 logger.warning(f"Pedido {order_id} já aceito por outro entregador")
                 return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
 
+            # UPDATE atomico: a condicao "delivery_id IS NULL" no proprio WHERE
+            # e quem garante a exclusividade, nao a checagem acima (que so evita
+            # uma query desnecessaria) -- se dois entregadores chegarem aqui ao
+            # mesmo tempo, so um UPDATE afeta uma linha; o outro recebe 0 linhas
+            # e 409, em vez de os dois sobrescreverem o delivery_id silenciosamente.
             cur.execute("""
                 UPDATE orders
                 SET delivery_id = %s,
                     status = 'accepted_by_delivery',
                     updated_at = NOW()
                 WHERE id = %s
+                  AND delivery_id IS NULL
+                  AND status IN ('ready', 'accepted_by_delivery')
                 RETURNING *
             """, (delivery_profile_id, str(order_id)))
 
-            updated_order = dict(cur.fetchone())
+            updated_row = cur.fetchone()
+            if not updated_row:
+                conn.rollback()
+                logger.warning(f"Pedido {order_id} perdeu a corrida de aceite (já atribuído a outro entregador)")
+                return jsonify({'error': 'Pedido já foi aceito por outro entregador'}), 409
+
+            updated_order = dict(updated_row)
             conn.commit()
 
             # Normaliza tipos para JSON

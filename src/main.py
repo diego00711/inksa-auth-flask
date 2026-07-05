@@ -67,7 +67,6 @@ try:
     from src.utils.helpers import supabase
     # >>> importa também o blueprint “admin” de gamificação
     from src.routes.gamification_routes import gamification_bp, admin_gamification_bp
-    from src.routes.rewards_routes import rewards_bp
     from src.routes.challenges_routes import challenges_bp
     from src.routes.categories import categories_bp
     from src.routes.analytics import analytics_bp
@@ -265,7 +264,6 @@ app.register_blueprint(analytics_admin_bp, url_prefix="/api/analytics")
 # Gamificação (apps) e Gamificação (Admin)
 app.register_blueprint(gamification_bp, url_prefix='/api/gamification')
 app.register_blueprint(admin_gamification_bp, url_prefix='/api/admin/gamification')
-app.register_blueprint(rewards_bp, url_prefix='/api/rewards')
 app.register_blueprint(challenges_bp, url_prefix='/api/challenges')
 
 # Pagamento

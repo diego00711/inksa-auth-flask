@@ -251,12 +251,40 @@ def criar_preferencia_mercado_pago():
             raw_total = float(dados_pedido.get('total_amount_items', 0)) + float(dados_pedido.get('delivery_fee', 0))
             corrected_total = max(0.0, raw_total - backend_discount)
             order_data['total_amount'] = round(corrected_total, 2)
+            supabase_client.table('orders').update({'total_amount': order_data['total_amount']}).eq('id', pedido_id).execute()
             logging.info(f"✅ total_amount corrigido para R${corrected_total:.2f} (desconto backend: R${backend_discount:.2f})")
         # --- Fim VUL-08 ---
 
-        # ✅ Pedido em dinheiro: não passa pelo MP
+        # ✅ Pedido em dinheiro: não passa pelo MP, mas o valor ainda precisa
+        # ser validado contra o cardápio real -- diferente do pagamento
+        # online (onde o MP so cobra o que estiver em items_mp, ja
+        # validado), aqui o total gravado é exatamente o que o entregador
+        # vai cobrar em espécie do cliente, entao nao pode confiar cru no
+        # que o app enviou.
         if payment_method == 'cash':
-            logging.info(f"💵 Pedido em dinheiro {pedido_id} — sem processamento MP.")
+            try:
+                total_seguro, subtotal_validado, _desconto_cash = _validar_itens_e_total(
+                    dados_pedido.get('itens', []),
+                    dados_pedido.get('delivery_fee', 0),
+                    coupon_code,
+                    dados_pedido.get('total_amount_items', 0),
+                )
+            except ValueError as ve:
+                logging.error(f"❌ Pedido em dinheiro {pedido_id} rejeitado: {ve}")
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                return jsonify({"erro": str(ve)}), 400
+
+            if total_seguro <= 0:
+                logging.error(f"❌ Pedido em dinheiro {pedido_id} com total inválido: {total_seguro}")
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                return jsonify({"erro": "Valor do pedido inválido."}), 400
+
+            supabase_client.table('orders').update({
+                'total_amount_items': subtotal_validado,
+                'total_amount': total_seguro,
+            }).eq('id', pedido_id).execute()
+
+            logging.info(f"💵 Pedido em dinheiro {pedido_id} — itens validados, total real R${total_seguro:.2f}.")
             return jsonify({
                 'mensagem': 'Pedido em dinheiro criado com sucesso!',
                 'pedido_id': pedido_id,
