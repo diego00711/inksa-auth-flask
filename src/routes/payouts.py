@@ -6,7 +6,7 @@ from psycopg2.extras import DictCursor
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 from ..utils.audit import log_admin_action
-from ..logic.payout_processor import process_automatic_payouts, process_payouts
+from ..logic.payout_processor import process_automatic_payouts
 from ..providers.mp_payouts import get_payout_provider
 
 logger = logging.getLogger(__name__)

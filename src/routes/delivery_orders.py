@@ -257,7 +257,7 @@ def confirm_cash_payment(order_id):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
                 SELECT o.id, o.status, o.payment_method, o.total_amount,
-                       o.delivery_fee, o.change_for, o.comissao_plataforma
+                       o.delivery_fee, o.change_for, o.comissao_plataforma, o.restaurant_id
                 FROM orders o
                 WHERE o.id = %s AND o.delivery_id = %s
             """, (order_id, profile_id))
@@ -288,11 +288,15 @@ def confirm_cash_payment(order_id):
             restaurant_share = round(total_amount - delivery_fee - commission, 2)
             cash_debt = round(total_amount - delivery_fee, 2)
 
+            # Colunas reais: restaurant_id (NOT NULL), platform_commission (nao
+            # `commission`). `cash_debt` nao existe nesta tabela -- o debito
+            # corrente do entregador fica em delivery_profiles.cash_debt (abaixo);
+            # aqui debt_status default 'pending' cobre o estado do registro.
             cur.execute("""
                 INSERT INTO cash_payment_records
-                    (order_id, delivery_id, total_amount, delivery_fee, commission, restaurant_share, cash_debt)
+                    (order_id, delivery_id, restaurant_id, total_amount, delivery_fee, platform_commission, restaurant_share)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (order_id, profile_id, total_amount, delivery_fee, commission, restaurant_share, cash_debt))
+            """, (order_id, profile_id, order['restaurant_id'], total_amount, delivery_fee, commission, restaurant_share))
 
             cur.execute("""
                 UPDATE delivery_profiles

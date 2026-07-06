@@ -52,13 +52,13 @@ def update_delivery_location(order_id):
 
             try:
                 cur.execute("""
-                    INSERT INTO public.delivery_tracking (order_id, latitude, longitude, updated_at)
+                    INSERT INTO public.delivery_tracking (order_id, latitude, longitude, recorded_at)
                     VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (order_id) DO UPDATE
                         SET latitude = EXCLUDED.latitude,
                             longitude = EXCLUDED.longitude,
-                            updated_at = NOW()
-                    RETURNING order_id, latitude, longitude, updated_at
+                            recorded_at = NOW()
+                    RETURNING order_id, latitude, longitude, recorded_at
                 """, (order_id, latitude, longitude))
                 row = dict(cur.fetchone())
                 conn.commit()
@@ -70,8 +70,8 @@ def update_delivery_location(order_id):
         row['order_id'] = str(row['order_id'])
         row['latitude'] = float(row['latitude'])
         row['longitude'] = float(row['longitude'])
-        if row.get('updated_at'):
-            row['updated_at'] = row['updated_at'].isoformat()
+        if row.get('recorded_at'):
+            row['recorded_at'] = row['recorded_at'].isoformat()
 
         return jsonify({"success": True, "location": row}), 200
 
@@ -130,7 +130,7 @@ def get_delivery_location(order_id):
 
             try:
                 cur.execute("""
-                    SELECT order_id, latitude, longitude, updated_at
+                    SELECT order_id, latitude, longitude, recorded_at
                     FROM public.delivery_tracking
                     WHERE order_id = %s
                 """, (order_id,))
@@ -146,7 +146,7 @@ def get_delivery_location(order_id):
             "order_id": str(row['order_id']),
             "latitude": float(row['latitude']),
             "longitude": float(row['longitude']),
-            "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None,
+            "recorded_at": row['recorded_at'].isoformat() if row['recorded_at'] else None,
         }
         return jsonify(result), 200
 

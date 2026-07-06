@@ -207,33 +207,37 @@ def _insert_payout(conn, partner_type, partner_id, period_start, period_end,
 
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         # 1. Insert payout
+        # `amount` é NOT NULL sem default no schema (coluna legada) -- precisa
+        # ser preenchida senao o INSERT falha e nenhum repasse e criado.
+        # Usamos o valor liquido (o que efetivamente sera pago).
         cur.execute(
             """
             INSERT INTO payouts (
                 id, partner_id, partner_type,
-                total_gross, commission_fee, total_net,
+                amount, total_gross, commission_fee, total_net,
                 period_start, period_end,
                 status, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending_transfer', NOW(), NOW())
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending_transfer', NOW(), NOW())
             """,
             (payout_id, partner_id, partner_type,
-             total_gross, commission_fee, total_net,
+             total_net, total_gross, commission_fee, total_net,
              period_start, period_end),
         )
 
         # 2. Insert payout_items
+        # Colunas reais: partner_type/partner_id (NOT NULL), gross_amount, fee,
+        # net_amount. Antes inseria em order_total/delivery_fee/commission_applied
+        # que NAO existem -- o INSERT quebrava e derrubava a geracao inteira.
         for item in per_order:
             cur.execute(
                 """
                 INSERT INTO payout_items (
-                    id, payout_id, order_id,
-                    order_total, delivery_fee, commission_applied, net_amount,
-                    created_at
-                ) VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s, NOW())
+                    id, payout_id, order_id, partner_type, partner_id,
+                    gross_amount, fee, net_amount, created_at
+                ) VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s, NOW())
                 """,
-                (payout_id, item["order_id"],
-                 item["order_total"], item["delivery_fee"],
-                 item["commission_applied"], item["net_amount"]),
+                (payout_id, item["order_id"], partner_type, partner_id,
+                 item["order_total"], item["commission_applied"], item["net_amount"]),
             )
 
         # 3. Mark orders as processed
@@ -379,99 +383,3 @@ def process_automatic_payouts(
         "today": today.isoformat(),
         "dry_run": dry_run,
     }
-
-
-# ---------------------------------------------------------------------------
-# Legacy function — kept for backward compatibility
-# ---------------------------------------------------------------------------
-
-def process_payouts(conn, partner_type: str, cycle_type: str) -> list:
-    """Legacy manual payout function (no commission breakdown, no payout_items).
-
-    Prefer process_automatic_payouts() for new code.
-    """
-    period_start, period_end = _period_bounds(cycle_type)
-
-    if partner_type == "delivery":
-        amount_col  = "valor_repassado_entregador"
-        payout_col  = "delivery_payout_id"
-        partner_col = "delivery_id"
-    else:
-        amount_col  = "valor_repassado_restaurante"
-        payout_col  = "restaurant_payout_id"
-        partner_col = "restaurant_id"
-
-    created = []
-
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute(
-            f"""
-            SELECT DISTINCT o.{partner_col} AS partner_id
-            FROM orders o
-            WHERE o.{partner_col} IS NOT NULL
-              AND o.status IN ('delivered', 'delivery_failed')
-              AND (o.status_pagamento = 'approved' OR o.status = 'delivery_failed')
-              AND COALESCE(o.{amount_col}, 0) > 0
-              AND o.{payout_col} IS NULL
-              AND o.updated_at >= %s AND o.updated_at <= %s
-            FOR UPDATE SKIP LOCKED
-            """,
-            (period_start, period_end),
-        )
-        partners = [row["partner_id"] for row in cur.fetchall()]
-        logger.info("process_payouts (legacy): %d partners", len(partners))
-
-        for partner_id in partners:
-            cur.execute(
-                f"""
-                SELECT id, {amount_col} AS repasse
-                FROM orders
-                WHERE {partner_col} = %s
-                  AND status IN ('delivered', 'delivery_failed')
-                  AND (status_pagamento = 'approved' OR status = 'delivery_failed')
-                  AND COALESCE({amount_col}, 0) > 0
-                  AND {payout_col} IS NULL
-                  AND updated_at >= %s AND updated_at <= %s
-                ORDER BY updated_at ASC
-                """,
-                (partner_id, period_start, period_end),
-            )
-            rows = cur.fetchall()
-            if not rows:
-                continue
-
-            total_net = sum(float(r["repasse"] or 0) for r in rows)
-            order_ids = [r["id"] for r in rows]
-            payout_id = str(uuidlib.uuid4())
-
-            cur.execute(
-                """
-                INSERT INTO payouts (
-                    id, partner_id, partner_type,
-                    total_net, period_start, period_end,
-                    status, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, 'pending', NOW(), NOW())
-                RETURNING id, partner_id, partner_type, total_net, period_start, period_end, status
-                """,
-                (payout_id, str(partner_id), partner_type, total_net, period_start, period_end),
-            )
-            row = dict(cur.fetchone())
-
-            cur.execute(
-                f"UPDATE orders SET {payout_col} = %s WHERE id = ANY(%s)",
-                (payout_id, order_ids),
-            )
-
-            created.append({
-                "payout_id": str(row["id"]),
-                "partner_type": row["partner_type"],
-                "partner_id": str(row["partner_id"]),
-                "amount": float(row["total_net"]),
-                "period_start": row["period_start"].isoformat(),
-                "period_end": row["period_end"].isoformat(),
-                "status": row["status"],
-                "orders_count": len(order_ids),
-            })
-
-    logger.info("process_payouts (legacy): %d created", len(created))
-    return created
