@@ -214,21 +214,22 @@ def get_order_details(order_id):
             """, (order_id, profile_id))
             
             order = cur.fetchone()
-            
+
             if not order:
                 return jsonify({"status": "error", "message": "Pedido não encontrado"}), 404
-            
-            cur.execute("""
-                SELECT oi.*, mi.name as item_name
-                FROM order_items oi
-                LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
-                WHERE oi.order_id = %s
-            """, (order_id,))
-            
-            items = cur.fetchall()
+
             order_dict = dict(order)
-            order_dict['items'] = [dict(item) for item in items]
-            
+            # Os itens do pedido ficam em orders.items (jsonb) -- a tabela
+            # order_items nunca e populada. Antes esta rota lia de order_items
+            # e o entregador via o pedido SEM lista de itens.
+            raw_items = order_dict.get('items')
+            if isinstance(raw_items, str):
+                try:
+                    raw_items = json.loads(raw_items)
+                except Exception:
+                    raw_items = []
+            order_dict['items'] = raw_items or []
+
             return jsonify({
                 "status": "success",
                 "data": serialize_data_with_encoder(order_dict)
