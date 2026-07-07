@@ -6,7 +6,7 @@ import psycopg2.extras
 from flask import Blueprint, request, jsonify
 from flask_cors import CORS
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from ..utils.audit import log_admin_action_auto
 from src.extensions import limiter
 
@@ -675,12 +675,14 @@ def admin_delete_user(user_id):
             return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
         email = row["email"]
 
-        if not supabase:
+        if not supabase_admin:
             return jsonify({"status": "error", "message": "Serviço de autenticação indisponível"}), 503
 
         # Remove do Supabase Auth (dispara cascade nas tabelas de perfil via FK)
+        # Usa o cliente admin dedicado (service_role puro) — NÃO o `supabase`
+        # global, cuja sessão pode estar poluída pelo sign_in de algum usuário.
         try:
-            supabase.auth.admin.delete_user(str(user_id))
+            supabase_admin.auth.admin.delete_user(str(user_id))
         except Exception as auth_err:
             # Pedidos/repasses vinculados (orders, cash_payment_records) bloqueiam
             # a exclusão de propósito — são registros financeiros/históricos.

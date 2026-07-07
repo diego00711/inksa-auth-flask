@@ -17,17 +17,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Supabase ---
+# ATENÇÃO: existem DOIS clientes propositalmente separados.
+#   `supabase`       -> uso geral (dados via PostgREST). Também é usado para
+#                       sign_in_with_password / sign_up de usuários, o que
+#                       SOBRESCREVE a sessão interna do cliente pela do usuário
+#                       logado. Por isso ele NÃO pode ser usado para operações
+#                       de admin (auth.admin.*), senão herda o token do último
+#                       usuário logado -> erro "not_admin" / "session_not_found".
+#   `supabase_admin` -> instância dedicada, service_role, que NUNCA faz
+#                       sign_in/sign_up. Use SEMPRE este para auth.admin.*
+#                       (delete_user, update_user_by_id, invite_user_by_email…).
 supabase: Optional[Client] = None
+supabase_admin: Optional[Client] = None
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL")
     SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         raise ValueError("SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórias.")
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    logger.info("✅ Supabase client inicializado.")
+    supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    logger.info("✅ Supabase client inicializado (geral + admin dedicado).")
 except Exception as e:
     logger.error(f"❌ Falha ao inicializar Supabase: {e}")
     supabase = None
+    supabase_admin = None
 
 
 # --- DB ---

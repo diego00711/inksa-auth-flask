@@ -3,7 +3,7 @@
 import logging
 import re
 from flask import Blueprint, request, jsonify
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from src.extensions import limiter
 
 auth_bp = Blueprint('auth_bp', __name__)
@@ -449,8 +449,9 @@ def reset_password():
         if not user:
             return jsonify({"status": "error", "error": "Link expirado ou inválido. Solicite um novo."}), 401
 
-        # Atualiza a senha via admin API (service_role)
-        supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
+        # Atualiza a senha via admin API (service_role) — cliente dedicado, para
+        # não herdar sessão poluída por sign_in de usuário no cliente global.
+        supabase_admin.auth.admin.update_user_by_id(user.id, {"password": new_password})
         logger.info(f"Senha redefinida com sucesso para o usuário {user.id}")
         return jsonify({
             "status": "success",

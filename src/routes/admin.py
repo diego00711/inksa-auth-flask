@@ -10,7 +10,7 @@ import psycopg2.extras
 
 from gotrue.errors import AuthApiError
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, _extract_bearer_token
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, _extract_bearer_token
 from ..utils.audit import log_admin_action, log_admin_action_auto
 from src.extensions import limiter
 
@@ -667,7 +667,7 @@ def change_admin_password():
         if not user:
             return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
 
-        supabase.auth.admin.update_user_by_id(str(user.id), {"password": new_password})
+        supabase_admin.auth.admin.update_user_by_id(str(user.id), {"password": new_password})
         log_admin_action_auto("ChangePassword", "Admin alterou sua senha")
         return jsonify({"status": "success", "message": "Senha alterada com sucesso"}), 200
     except Exception as e:
@@ -727,7 +727,7 @@ def create_admin():
         if existing:
             return jsonify({"status": "error", "message": "Já existe um usuário com esse email"}), 409
 
-        result = supabase.auth.admin.invite_user_by_email(email)
+        result = supabase_admin.auth.admin.invite_user_by_email(email)
         invited_user = getattr(result, "user", None)
         if not invited_user:
             return jsonify({"status": "error", "message": "Falha ao enviar convite"}), 500
