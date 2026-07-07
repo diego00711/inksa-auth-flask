@@ -10,7 +10,7 @@ import psycopg2
 import psycopg2.extras
 from datetime import date, timedelta, datetime, time
 from decimal import Decimal
-from ..utils.platform_settings import calculate_platform_commission
+from ..utils.platform_settings import calculate_platform_commission, calculate_courier_payout
 from functools import wraps
 from flask_cors import cross_origin
 
@@ -286,8 +286,14 @@ def confirm_cash_payment(order_id):
                 # pagamento.
                 commission = float(calculate_platform_commission(total_amount - delivery_fee))
 
+            # Repasse do frete ao entregador = frete integral menos a taxa de
+            # administracao da plataforma (mesmo modelo do online). No dinheiro
+            # o entregador recolhe tudo em especie, entao a administracao do
+            # frete (freight_admin) entra na divida dele com a plataforma.
+            courier_freight = float(calculate_courier_payout(None, delivery_fee=delivery_fee))
+            freight_admin = round(delivery_fee - courier_freight, 2)  # = frete * taxa admin
             restaurant_share = round(total_amount - delivery_fee - commission, 2)
-            cash_debt = round(total_amount - delivery_fee, 2)
+            cash_debt = round(total_amount - courier_freight, 2)
 
             # Colunas reais: restaurant_id (NOT NULL), platform_commission (nao
             # `commission`). `cash_debt` nao existe nesta tabela -- o debito
@@ -308,18 +314,18 @@ def confirm_cash_payment(order_id):
             """, (cash_debt, total_amount, profile_id))
 
             # Grava a segregação financeira no proprio pedido para os relatorios
-            # (que leem de orders). No dinheiro o entregador fica com o frete
-            # inteiro -> valor_repassado_entregador = delivery_fee e a margem de
-            # frete da plataforma e 0 (o entregador retem a taxa em especie).
+            # (que leem de orders). Mesmo modelo do online: entregador recebe o
+            # frete menos a taxa de administracao; a margem_frete da plataforma
+            # e essa taxa (freight_admin).
             cur.execute("""
                 UPDATE orders
                    SET comissao_plataforma = %s,
                        valor_repassado_restaurante = %s,
                        valor_repassado_entregador = %s,
-                       margem_frete = 0,
+                       margem_frete = %s,
                        updated_at = NOW()
                  WHERE id = %s
-            """, (commission, restaurant_share, delivery_fee, order_id))
+            """, (commission, restaurant_share, courier_freight, freight_admin, order_id))
 
             conn.commit()
 
@@ -328,7 +334,7 @@ def confirm_cash_payment(order_id):
             "message": "Recebimento em dinheiro confirmado!",
             "data": {
                 "voce_recebeu": total_amount,
-                "sua_taxa": delivery_fee,
+                "sua_taxa": courier_freight,
                 "deve_a_plataforma": cash_debt,
                 "comissao": commission,
                 "repasse_restaurante": restaurant_share,

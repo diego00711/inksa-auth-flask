@@ -33,8 +33,12 @@ _DEFAULTS: dict[str, Decimal] = {
     "per_km_delivery_fee":        Decimal("1.50"),
     "free_delivery_threshold_km": Decimal("2.00"),
     "commission_rate":            Decimal("0.10"),  # 0..1, não 10
-    "delivery_base_fee":          Decimal("5.00"),
-    "delivery_per_km_fee":        Decimal("1.00"),
+    "delivery_base_fee":          Decimal("5.00"),  # legado (modelo antigo de repasse)
+    "delivery_per_km_fee":        Decimal("1.00"),  # legado (modelo antigo de repasse)
+    # Taxa de administração retida pela plataforma sobre o frete (0..1).
+    # O entregador recebe o frete integral MENOS esta taxa. Editável no admin
+    # (campo "Taxa de administração sobre o frete", key financial_delivery_commission).
+    "financial_delivery_commission": Decimal("0.15"),
 }
 
 
@@ -65,6 +69,22 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
             v = Decimal(str(raw_comm))
             # Heurística: valor > 1 significa que está em "percent humano" (ex: 10 = 10%).
             out["commission_rate"] = (v / Decimal("100")) if v > Decimal("1") else v
+        except (InvalidOperation, TypeError):
+            pass
+
+    # financial_delivery_commission = taxa de administração sobre o frete.
+    # Guardada SEMPRE como percentual humano (15 = 15%); converte p/ fração 0..1
+    # e limita ao intervalo válido. Campo rotulado "(%)" no admin, sem heurística
+    # ambígua (0,5 = 0,5%, não 50%).
+    raw_adm = raw.get("financial_delivery_commission")
+    if raw_adm is not None and raw_adm != "":
+        try:
+            v = Decimal(str(raw_adm)) / Decimal("100")
+            if v < 0:
+                v = Decimal("0")
+            elif v > 1:
+                v = Decimal("1")
+            out["financial_delivery_commission"] = v
         except (InvalidOperation, TypeError):
             pass
 
@@ -130,41 +150,35 @@ def calculate_courier_payout(delivery_distance_km, delivery_fee=None) -> Decimal
     """
     Calcula quanto o entregador recebe por uma entrega.
 
-    Modelo (admin-configurável), com a MESMA franquia do frete cobrado do
-    cliente (free_delivery_threshold_km) para não gerar margem negativa em
-    entregas curtas:
-        - até free_delivery_threshold_km:  delivery_base_fee (fixo)
-        - acima disso:                     delivery_base_fee
-                                           + delivery_per_km_fee * (km - threshold)
+    Modelo atual: o entregador recebe o FRETE INTEGRAL menos a taxa de
+    administração retida pela plataforma (financial_delivery_commission,
+    editável no admin):
 
-    Antes o repasse aplicava delivery_per_km_fee desde o km zero (sem franquia),
-    enquanto o frete cobrado do cliente só cobra por km ACIMA do threshold — o
-    descasamento fazia o entregador receber mais do que o cliente pagava em
-    entregas curtas (margem negativa / subsídio). Agora ambas as fórmulas usam
-    a mesma franquia, reaproveitando a chave free_delivery_threshold_km.
+        repasse = delivery_fee * (1 - taxa_administracao)
 
-    Se `delivery_distance_km` não estiver disponível (None ou negativo), cai no
-    fallback de pagar 100% do `delivery_fee` para não quebrar pedidos antigos.
+    Assim a margem da plataforma sobre o frete é sempre uma fração POSITIVA do
+    frete (delivery_fee * taxa), nunca negativa, em qualquer distância. Isto
+    substituiu o modelo antigo (delivery_base_fee + delivery_per_km_fee * km),
+    que descasava do frete cobrado do cliente e gerava subsídio em entregas
+    curtas.
+
+    `delivery_distance_km` é mantido na assinatura por compatibilidade com os
+    chamadores, mas não é mais usado aqui (o frete cobrado, passado em
+    `delivery_fee`, já embute a distância).
     """
     s = get_settings()
     try:
-        km = Decimal(str(delivery_distance_km)) if delivery_distance_km is not None else None
+        fee = Decimal(str(delivery_fee)) if delivery_fee is not None else None
     except (InvalidOperation, TypeError):
-        km = None
+        fee = None
 
-    if km is None or km < 0:
-        if delivery_fee is None:
-            return Decimal("0.00")
-        try:
-            return Decimal(str(delivery_fee))
-        except (InvalidOperation, TypeError):
-            return Decimal("0.00")
+    if fee is None or fee < 0:
+        return Decimal("0.00")
 
-    threshold = s["free_delivery_threshold_km"]
-    if km > threshold:
-        payout = s["delivery_base_fee"] + (s["delivery_per_km_fee"] * (km - threshold))
-    else:
-        payout = s["delivery_base_fee"]
+    admin_rate = s["financial_delivery_commission"]  # fração 0..1
+    payout = fee * (Decimal("1") - admin_rate)
+    if payout < 0:
+        payout = Decimal("0")
     return payout.quantize(Decimal("0.01"))
 
 
