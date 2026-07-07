@@ -120,6 +120,10 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
             "ordersCanceled": 0,
             "restaurantsPending": 0,
             "activeDeliverymen": 0,
+            # Receita REAL da plataforma = comissão + margem de frete
+            "platformCommission": 0.0,
+            "deliveryMargin": 0.0,
+            "platformRevenue": 0.0,
         },
         "chartData": [],
         "recentOrders": [],
@@ -150,6 +154,21 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
         conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} WHERE (approved IS FALSE) OR (status='pending')", default=0))
     payload["kpis"]["activeDeliverymen"] = _safe_int(_fetchval(
         conn, f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} WHERE active IS TRUE", default=0))
+
+    # Receita REAL da plataforma (comissão + margem de frete) sobre pedidos
+    # concluídos. Mesma janela dos demais KPIs (all-time), pra ficar coerente
+    # com "Receita Total" exibida ao lado. margem_frete pode ser negativa.
+    rev_row = _fetchrow(conn, f"""
+        SELECT COALESCE(SUM(comissao_plataforma),0) AS commission,
+               COALESCE(SUM(margem_frete),0)        AS margin
+          FROM {ORDERS_TABLE}
+         WHERE status IN ('delivered','completed')
+    """) or {}
+    _commission = _safe_float(rev_row.get("commission"))
+    _margin = _safe_float(rev_row.get("margin"))
+    payload["kpis"]["platformCommission"] = _commission
+    payload["kpis"]["deliveryMargin"] = _margin
+    payload["kpis"]["platformRevenue"] = round(_commission + _margin, 2)
 
     # Série receita
     if date_from and date_to:
@@ -187,7 +206,8 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
         where.append("created_at::date <= %s"); params.append(date_to)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     recent_rows = _fetchall(conn, f"""
-        SELECT id, client_name, restaurant_name, total_amount, status, created_at
+        SELECT id, client_name, restaurant_name, total_amount, status, created_at,
+               comissao_plataforma, margem_frete
           FROM {ORDERS_TABLE}
         {where_sql}
       ORDER BY created_at DESC
@@ -198,6 +218,8 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
         "client_name": r.get("client_name") or "Cliente",
         "restaurant_name": r.get("restaurant_name") or "Restaurante",
         "total_amount": _safe_float(r.get("total_amount")),
+        "platform_commission": _safe_float(r.get("comissao_plataforma")),
+        "delivery_margin": _safe_float(r.get("margem_frete")),
         "status": r.get("status") or "desconhecido",
         "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
     } for r in recent_rows]

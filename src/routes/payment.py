@@ -554,16 +554,21 @@ def processar_pagamento_cartao():
         if status == 'approved':
             # Comissão e repasse vêm de platform_settings (editáveis no admin)
             comissao = float(calculate_platform_commission(subtotal_validado))
+            delivery_fee_charged = float(d.get('delivery_fee', 0) or 0)
             courier_payout = float(calculate_courier_payout(
                 d.get('delivery_distance_km'),
-                delivery_fee=d.get('delivery_fee', 0),
+                delivery_fee=delivery_fee_charged,
             ))
+            # Margem de frete = o que a plataforma retém do frete cobrado.
+            # Pode ser negativa (subsídio) em entregas curtas — é o valor real.
+            margem_frete = round(delivery_fee_charged - courier_payout, 2)
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',
                 'comissao_plataforma': comissao,
                 'valor_repassado_restaurante': round(subtotal_validado - comissao, 2),
                 'valor_repassado_entregador': courier_payout,
+                'margem_frete': margem_frete,
                 'id_transacao_mp': str(payment_id),
             }).eq('id', pedido_id).execute()
             return jsonify({"status": "approved", "pedido_id": pedido_id, "payment_id": payment_id}), 200
@@ -694,11 +699,16 @@ def mercadopago_webhook():
                     comissao_plataforma = float(calculate_platform_commission(valor_total_itens))
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
 
+                    delivery_fee_charged = float(pedido_do_bd.get('delivery_fee', 0.0) or 0.0)
                     valor_para_entregador = float(calculate_courier_payout(
                         pedido_do_bd.get('delivery_distance_km'),
-                        delivery_fee=pedido_do_bd.get('delivery_fee', 0.0),
+                        delivery_fee=delivery_fee_charged,
                     ))
-                    
+                    # Margem de frete = frete cobrado − repasse ao entregador.
+                    # Pode ser negativa (subsídio). Persistida para congelar o
+                    # valor histórico da época do pedido.
+                    margem_frete = round(delivery_fee_charged - valor_para_entregador, 2)
+
                     # ✅ DADOS QUE SERÃO ATUALIZADOS
                     update_data = {
                         'status': 'pending',  # ✅ ISSO ATIVA O PEDIDO PARA O RESTAURANTE!
@@ -706,6 +716,7 @@ def mercadopago_webhook():
                         'comissao_plataforma': round(comissao_plataforma, 2),
                         'valor_repassado_restaurante': round(valor_para_restaurante, 2),
                         'valor_repassado_entregador': round(valor_para_entregador, 2),
+                        'margem_frete': margem_frete,
                         'id_transacao_mp': resource_id
                     }
                     

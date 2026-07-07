@@ -307,6 +307,20 @@ def confirm_cash_payment(order_id):
                 WHERE id = %s
             """, (cash_debt, total_amount, profile_id))
 
+            # Grava a segregação financeira no proprio pedido para os relatorios
+            # (que leem de orders). No dinheiro o entregador fica com o frete
+            # inteiro -> valor_repassado_entregador = delivery_fee e a margem de
+            # frete da plataforma e 0 (o entregador retem a taxa em especie).
+            cur.execute("""
+                UPDATE orders
+                   SET comissao_plataforma = %s,
+                       valor_repassado_restaurante = %s,
+                       valor_repassado_entregador = %s,
+                       margem_frete = 0,
+                       updated_at = NOW()
+                 WHERE id = %s
+            """, (commission, restaurant_share, delivery_fee, order_id))
+
             conn.commit()
 
         return jsonify({
