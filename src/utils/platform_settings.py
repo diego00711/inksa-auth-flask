@@ -130,12 +130,21 @@ def calculate_courier_payout(delivery_distance_km, delivery_fee=None) -> Decimal
     """
     Calcula quanto o entregador recebe por uma entrega.
 
-    Modelo novo (admin-configurável):
-        delivery_base_fee + delivery_per_km_fee * distance_km
+    Modelo (admin-configurável), com a MESMA franquia do frete cobrado do
+    cliente (free_delivery_threshold_km) para não gerar margem negativa em
+    entregas curtas:
+        - até free_delivery_threshold_km:  delivery_base_fee (fixo)
+        - acima disso:                     delivery_base_fee
+                                           + delivery_per_km_fee * (km - threshold)
 
-    Se `delivery_distance_km` não estiver disponível (None ou 0 e nenhuma flag
-    de retirada local), cai no fallback de pagar 100% do `delivery_fee`
-    para não quebrar pedidos antigos.
+    Antes o repasse aplicava delivery_per_km_fee desde o km zero (sem franquia),
+    enquanto o frete cobrado do cliente só cobra por km ACIMA do threshold — o
+    descasamento fazia o entregador receber mais do que o cliente pagava em
+    entregas curtas (margem negativa / subsídio). Agora ambas as fórmulas usam
+    a mesma franquia, reaproveitando a chave free_delivery_threshold_km.
+
+    Se `delivery_distance_km` não estiver disponível (None ou negativo), cai no
+    fallback de pagar 100% do `delivery_fee` para não quebrar pedidos antigos.
     """
     s = get_settings()
     try:
@@ -151,7 +160,11 @@ def calculate_courier_payout(delivery_distance_km, delivery_fee=None) -> Decimal
         except (InvalidOperation, TypeError):
             return Decimal("0.00")
 
-    payout = s["delivery_base_fee"] + (s["delivery_per_km_fee"] * km)
+    threshold = s["free_delivery_threshold_km"]
+    if km > threshold:
+        payout = s["delivery_base_fee"] + (s["delivery_per_km_fee"] * (km - threshold))
+    else:
+        payout = s["delivery_base_fee"]
     return payout.quantize(Decimal("0.01"))
 
 
