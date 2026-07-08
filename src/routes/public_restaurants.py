@@ -93,9 +93,21 @@ def list_restaurants():
                      "COALESCE(u.is_active, TRUE) = TRUE"]
             params = []
 
+            # Clube: destaque = restaurantes cujo volume do mês alcança um nível
+            # com featured_listing. threshold = menor min_activity desses níveis.
+            cur.execute("""
+                SELECT MIN(min_activity) AS t FROM public.club_levels
+                 WHERE audience = 'restaurant' AND is_active
+                   AND COALESCE((benefits->>'featured_listing')::boolean, false) = true
+            """)
+            _ft = cur.fetchone()
+            featured_threshold = _ft['t'] if _ft and _ft['t'] is not None else None
+
             if has_coords:
                 # params for dist_expr come first in SELECT
                 params += [user_lat, user_lon]
+            # params do CASE de destaque (logo após o dist_expr, ainda no SELECT)
+            params += [featured_threshold, featured_threshold]
 
             if category:
                 where.append("(rp.category ILIKE %s OR rp.cuisine_type ILIKE %s)")
@@ -106,7 +118,8 @@ def list_restaurants():
                 params.append(f"%{search}%")
 
             where_sql  = "WHERE " + " AND ".join(where)
-            order_sql  = "ORDER BY distance_km ASC NULLS LAST" if has_coords else "ORDER BY rp.restaurant_name"
+            _base_order = "distance_km ASC NULLS LAST" if has_coords else "rp.restaurant_name"
+            order_sql  = f"ORDER BY is_featured DESC, {_base_order}"
 
             # Busca limit+1 para saber se há próxima página sem um COUNT extra
             params += [limit + 1, offset]
@@ -127,7 +140,12 @@ def list_restaurants():
                     COALESCE(rp.minimum_order, 0)                AS minimum_order,
                     rp.delivery_time                            AS delivery_time,
                     rp.delivery_type,
-                    {dist_expr}                                 AS distance_km
+                    {dist_expr}                                 AS distance_km,
+                    CASE WHEN %s::int IS NOT NULL AND (
+                            SELECT COUNT(*) FROM orders o
+                             WHERE o.restaurant_id = rp.id AND o.status = 'delivered'
+                               AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())
+                         ) >= %s::int THEN 1 ELSE 0 END           AS is_featured
                 FROM restaurant_profiles rp
                 LEFT JOIN users u ON u.id = rp.user_id
                 {where_sql}

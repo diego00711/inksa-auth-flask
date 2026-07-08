@@ -517,6 +517,32 @@ def complete_order(order_id):
                 (str(order_id),)
             )
             completed_order = cur.fetchone()
+
+            # Clube Inksa (entregador): aplica o benefício do nível do entregador
+            # ao repasse DESTE pedido (bônus por entrega + % a mais do frete). Só
+            # agora, que a entrega tem dono. Seed é 0 -> inerte até o admin configurar.
+            try:
+                if completed_order and completed_order['delivery_id']:
+                    from ..utils.club import delivery_level_benefits
+                    _cb = delivery_level_benefits(str(completed_order['delivery_id']))
+                    _bonus = float(_cb.get('per_delivery_bonus') or 0)
+                    _keep = float(_cb.get('freight_keep_extra_pct') or 0)
+                    if _bonus > 0 or _keep > 0:
+                        cur.execute(
+                            "SELECT COALESCE(delivery_fee,0) AS fee, COALESCE(valor_repassado_entregador,0) AS pay "
+                            "FROM orders WHERE id = %s", (str(order_id),))
+                        _r = cur.fetchone()
+                        _fee = float(_r['fee']); _base = float(_r['pay'])
+                        _freight_part = min(_fee, round(_base + _fee * _keep / 100.0, 2))
+                        _new_pay = round(_freight_part + _bonus, 2)
+                        _new_margem = round(_fee - _freight_part, 2)
+                        cur.execute(
+                            "UPDATE orders SET valor_repassado_entregador = %s, margem_frete = %s WHERE id = %s",
+                            (_new_pay, _new_margem, str(order_id)))
+                        logger.info(f"🏅 Clube entregador no pedido {order_id}: repasse {_base}->{_new_pay}")
+            except Exception as _club_e:
+                logger.warning(f"Falha ao aplicar clube do entregador: {_club_e}")
+
             conn.commit()
             logger.info(f"✅ Pedido {order_id} marcado como entregue!")
 

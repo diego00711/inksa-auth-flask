@@ -244,16 +244,40 @@ def criar_preferencia_mercado_pago():
             except Exception as _coupon_err:
                 logging.warning(f"⚠️ Falha ao validar cupom no backend: {_coupon_err} — desconto ignorado")
 
-        # Corrigir total_amount com desconto validado pelo backend
-        if backend_discount > 0:
+        # --- Clube Inksa: benefícios do nível do cliente (frete grátis / % desconto) ---
+        # Só no pagamento online (cartão/PIX). A plataforma absorve, como um cupom.
+        # No dinheiro não aplica (o entregador recolhe em espécie).
+        club_discount = 0.0
+        club_level_name = None
+        if payment_method != 'cash':
+            try:
+                from ..utils.club import client_checkout_benefits
+                _cb = client_checkout_benefits(client_profile_id)
+                _sub = float(dados_pedido.get('total_amount_items', 0) or 0)
+                _fee = float(dados_pedido.get('delivery_fee', 0) or 0)
+                if _cb.get('free_delivery'):
+                    club_discount += _fee
+                _pct = float(_cb.get('subtotal_discount_pct') or 0)
+                if _pct > 0:
+                    club_discount += round(_sub * _pct / 100.0, 2)
+                club_discount = round(club_discount, 2)
+                club_level_name = _cb.get('level_name')
+                if club_discount > 0:
+                    logging.info(f"🏅 Clube {club_level_name}: desconto R${club_discount:.2f}")
+            except Exception as _club_err:
+                logging.warning(f"⚠️ Falha ao aplicar benefício do clube: {_club_err}")
+
+        # Corrigir total_amount com desconto (cupom + clube)
+        total_discount = round(backend_discount + club_discount, 2)
+        if total_discount > 0:
             raw_total = float(dados_pedido.get('total_amount_items', 0)) + float(dados_pedido.get('delivery_fee', 0))
-            corrected_total = max(0.0, raw_total - backend_discount)
+            corrected_total = max(0.0, raw_total - total_discount)
             order_data['total_amount'] = round(corrected_total, 2)
             supabase_client.table('orders').update({'total_amount': order_data['total_amount']}).eq('id', pedido_id).execute()
             if applied_coupon_id:
                 consume_coupon(applied_coupon_id)
-            logging.info(f"✅ total_amount corrigido para R${corrected_total:.2f} (desconto backend: R${backend_discount:.2f})")
-        # --- Fim VUL-08 ---
+            logging.info(f"✅ total_amount corrigido para R${corrected_total:.2f} (cupom R${backend_discount:.2f} + clube R${club_discount:.2f})")
+        # --- Fim VUL-08 / Clube ---
 
         # ✅ Pedido em dinheiro: não passa pelo MP, mas o valor ainda precisa
         # ser validado contra o cardápio real -- diferente do pagamento
@@ -343,6 +367,11 @@ def criar_preferencia_mercado_pago():
         if backend_discount > 0:
             items_mp.append({'title': f'Desconto Cupom {coupon_code}', 'quantity': 1, 'unit_price': -backend_discount})
             logging.info(f"✅ Desconto de cupom R${backend_discount:.2f} adicionado aos itens MP")
+
+        # Aplicar benefício do Clube nos itens do MP (item negativo separado)
+        if club_discount > 0:
+            items_mp.append({'title': f'Clube {club_level_name or "Inksa"}', 'quantity': 1, 'unit_price': -club_discount})
+            logging.info(f"✅ Benefício do clube R${club_discount:.2f} adicionado aos itens MP")
 
         if not items_mp or all(i['unit_price'] <= 0 for i in items_mp if i.get('title') != f'Desconto Cupom {coupon_code}'):
             logging.error("❌ Nenhum item válido para processar!")
@@ -497,6 +526,26 @@ def processar_pagamento_cartao():
 
         if total_seguro <= 0:
             return jsonify({"erro": "Valor do pedido inválido."}), 400
+
+        # Clube Inksa: benefício do nível do cliente (frete grátis / % desconto)
+        try:
+            from ..utils.club import client_checkout_benefits
+            _cb = client_checkout_benefits(client_profile_id)
+            _club_card = 0.0
+            if _cb.get('free_delivery'):
+                _club_card += float(d.get('delivery_fee', 0) or 0)
+            _pct = float(_cb.get('subtotal_discount_pct') or 0)
+            if _pct > 0:
+                _club_card += round(float(subtotal_validado or 0) * _pct / 100.0, 2)
+            _club_card = round(_club_card, 2)
+            if _club_card > 0:
+                total_seguro = round(max(0.0, total_seguro - _club_card), 2)
+                logging.info(f"🏅 Clube {_cb.get('level_name')}: desconto R${_club_card:.2f} (cartão)")
+        except Exception as _club_err:
+            logging.warning(f"⚠️ Falha ao aplicar clube (cartão): {_club_err}")
+
+        if total_seguro <= 0:
+            return jsonify({"erro": "Valor do pedido inválido após benefícios."}), 400
 
         # 1) Cria o pedido (aguardando pagamento)
         import uuid
