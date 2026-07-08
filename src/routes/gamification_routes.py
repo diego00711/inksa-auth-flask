@@ -1690,7 +1690,8 @@ def redeem_reward(reward_id):
 
 @gamification_bp.patch("/rewards/redemptions/<redemption_id>/deliver")
 def mark_redemption_delivered(redemption_id):
-    """PATCH /api/gamification/rewards/redemptions/<id>/deliver — marcar como entregue (admin)."""
+    """PATCH /api/gamification/rewards/redemptions/<id>/deliver — marcar como entregue (admin).
+    Só vale para resgates pendentes (não reabre um já recusado/entregue)."""
     _, err_resp = _admin_required()
     if err_resp:
         return err_resp
@@ -1700,13 +1701,94 @@ def mark_redemption_delivered(redemption_id):
             cur.execute("""
                 UPDATE public.reward_redemptions
                 SET status = 'delivered', delivered_at = NOW()
-                WHERE id = %s RETURNING id
+                WHERE id = %s AND status = 'pending' RETURNING id
             """, (redemption_id,))
             if not cur.fetchone():
-                return _err("Resgate não encontrado", 404)
+                # Não existe OU não está mais pendente
+                cur.execute("SELECT status FROM public.reward_redemptions WHERE id = %s", (redemption_id,))
+                row = cur.fetchone()
+                if not row:
+                    return _err("Resgate não encontrado", 404)
+                return _err(f"Só é possível entregar resgates pendentes (status atual: {row['status']}).", 409)
             return _ok({"message": "Marcado como entregue"})
     except Exception as e:
         current_app.logger.exception("gamification.mark_redemption_delivered failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.patch("/rewards/redemptions/<redemption_id>/reject")
+def reject_redemption(redemption_id):
+    """PATCH /api/gamification/rewards/redemptions/<id>/reject — recusa um resgate
+    PENDENTE, DEVOLVE os pontos ao usuário e restaura o estoque (admin).
+    Body opcional: {"reason": str}. Tudo numa transação."""
+    _, err_resp = _admin_required()
+    if err_resp:
+        return err_resp
+    body = request.get_json(silent=True) or {}
+    reason = (body.get("reason") or "").strip()
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # 1. Trava o resgate e valida o estado (não pode recusar 2x)
+            cur.execute("""
+                SELECT rr.id, rr.user_id, rr.reward_id, rr.points_used, rr.status,
+                       r.name AS reward_name
+                  FROM public.reward_redemptions rr
+             LEFT JOIN public.rewards r ON r.id = rr.reward_id
+                 WHERE rr.id = %s
+                 FOR UPDATE OF rr
+            """, (redemption_id,))
+            red = cur.fetchone()
+            if not red:
+                return _err("Resgate não encontrado", 404)
+            if red["status"] != "pending":
+                return _err(f"Só é possível recusar resgates pendentes (status atual: {red['status']}).", 409)
+
+            points = int(red["points_used"] or 0)
+            user_id = red["user_id"]
+
+            # 2. Devolve os pontos e recalcula o nível
+            cur.execute("""
+                UPDATE public.user_points
+                   SET total_points = total_points + %s, last_updated = NOW()
+                 WHERE user_id = %s
+                RETURNING total_points
+            """, (points, user_id))
+            up = cur.fetchone()
+            if up:
+                lvl, to_next = _compute_level(cur, int(up["total_points"]))
+                cur.execute("""
+                    UPDATE public.user_points SET current_level=%s, points_to_next_level=%s
+                     WHERE user_id=%s
+                """, (lvl, to_next, user_id))
+
+            # 3. Restaura o estoque (se a recompensa controla estoque)
+            if red["reward_id"]:
+                cur.execute("""
+                    UPDATE public.rewards
+                       SET stock = stock + 1, updated_at = NOW()
+                     WHERE id = %s AND stock IS NOT NULL
+                """, (red["reward_id"],))
+
+            # 4. Registra o estorno no histórico de pontos
+            desc = f"Estorno do resgate: {red['reward_name'] or 'recompensa'}"
+            if reason:
+                desc += f" ({reason})"
+            cur.execute("""
+                INSERT INTO public.points_history
+                    (id, user_id, points_earned, points_type, description)
+                VALUES (gen_random_uuid(), %s, %s, 'reward_refund', %s)
+            """, (user_id, points, desc))
+
+            # 5. Marca como recusado
+            cur.execute("UPDATE public.reward_redemptions SET status = 'rejected' WHERE id = %s", (redemption_id,))
+
+            return _ok({"message": "Resgate recusado e pontos devolvidos.", "points_refunded": points})
+    except Exception as e:
+        current_app.logger.exception("gamification.reject_redemption failed")
         return _err("db_error", 500, detail=str(e))
     finally:
         try: conn.close()
