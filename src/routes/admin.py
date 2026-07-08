@@ -376,6 +376,10 @@ def set_restaurant_approval(restaurant_id):
     — default true. Reprovar (approved=false) some o restaurante do app do cliente."""
     data = request.get_json(silent=True) or {}
     approved = bool(data.get("approved", True))
+    # Mantém o `status` coerente com o flag: aprovar sai de 'pending' (senão o
+    # card "Restaurantes Pendentes" continua contando, pois ele olha
+    # approved IS FALSE OR status='pending'). Reprovar volta pra 'pending'.
+    new_status = "approved" if approved else "pending"
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
@@ -383,10 +387,10 @@ def set_restaurant_approval(restaurant_id):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
                 """UPDATE restaurant_profiles
-                      SET approved = %s, updated_at = NOW()
+                      SET approved = %s, status = %s, updated_at = NOW()
                     WHERE id = %s
-                RETURNING id, restaurant_name, approved""",
-                (approved, str(restaurant_id)),
+                RETURNING id, restaurant_name, approved, status""",
+                (approved, new_status, str(restaurant_id)),
             )
             row = cur.fetchone()
         if not row:
