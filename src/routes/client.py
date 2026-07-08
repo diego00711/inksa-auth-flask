@@ -11,6 +11,39 @@ import uuid
 client_bp = Blueprint('client_bp', __name__)
 logging.basicConfig(level=logging.INFO)
 
+
+def _geocode_client_address(street, neighborhood, city, state):
+    """Geocodifica um endereço (Nominatim) com fallback rua+bairro -> bairro+cidade
+    -> cidade. Retorna (lat, lng) ou (None, None). Best-effort — nunca lança."""
+    import requests
+    if not city or not state:
+        return None, None
+    variants = [
+        [street, neighborhood, city, state],
+        [neighborhood, city, state],
+        [city, state],
+    ]
+    seen = set()
+    for parts in variants:
+        query = ", ".join([str(p).strip() for p in parts if p] + ["Brasil"])
+        if query in seen:
+            continue
+        seen.add(query)
+        try:
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": query, "format": "json", "limit": 1, "countrycodes": "br"},
+                headers={"User-Agent": "InksaDelivery/1.0 (suporte@inksadelivery.com.br)",
+                         "Accept-Language": "pt-BR"},
+                timeout=8,
+            )
+            arr = r.json()
+            if isinstance(arr, list) and arr:
+                return float(arr[0]["lat"]), float(arr[0]["lon"])
+        except Exception:
+            continue
+    return None, None
+
 def handle_db_errors(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -118,6 +151,37 @@ def handle_client_profile(conn):
             conn.commit()
             if not updated:
                 return jsonify({"status": "error", "error": "Client profile not found"}), 404
+
+            # Se o cliente ainda não tem endereço na agenda, cria um padrão a
+            # partir do endereço do perfil (geocodificado). Assim o endereço do
+            # perfil JÁ vira endereço de entrega, sem precisar recadastrar — antes
+            # o checkout ficava sem coords porque a agenda estava vazia.
+            try:
+                prof = dict(updated)
+                street = (prof.get('address_street') or '').strip()
+                city = (prof.get('address_city') or '').strip()
+                state = (prof.get('address_state') or '').strip()
+                if street and city and state:
+                    cur.execute("SELECT COUNT(*) AS c FROM client_addresses WHERE user_id = %s", (user_id,))
+                    if cur.fetchone()['c'] == 0:
+                        lat, lng = _geocode_client_address(
+                            street, prof.get('address_neighborhood'), city, state)
+                        cur.execute(
+                            """INSERT INTO client_addresses
+                                 (user_id, label, street, number, complement, neighborhood,
+                                  city, state, zipcode, latitude, longitude, is_default)
+                               VALUES (%s, 'Casa', %s, %s, %s, %s, %s, %s, %s, %s, %s, true)""",
+                            (user_id, street, prof.get('address_number'), prof.get('address_complement'),
+                             prof.get('address_neighborhood'), city, state, prof.get('address_zipcode'), lat, lng))
+                        conn.commit()
+                        logging.info(f"Endereço padrão criado do perfil p/ user_id={user_id} (coords={lat},{lng})")
+            except Exception as _addr_err:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logging.warning(f"Falha ao sincronizar endereço do perfil para a agenda: {_addr_err}")
+
             return jsonify({"status": "success", "data": dict(updated)})
 
 
