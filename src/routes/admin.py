@@ -367,6 +367,50 @@ def get_all_restaurants():
     finally:
         conn.close()
 
+
+@admin_bp.route("/restaurants/<uuid:restaurant_id>/approve", methods=["POST"])
+@admin_required
+def set_restaurant_approval(restaurant_id):
+    """Aprova ou reprova um restaurante. Controla a visibilidade pública
+    (o cardápio público filtra por approved). Body opcional: {"approved": bool}
+    — default true. Reprovar (approved=false) some o restaurante do app do cliente."""
+    data = request.get_json(silent=True) or {}
+    approved = bool(data.get("approved", True))
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """UPDATE restaurant_profiles
+                      SET approved = %s, updated_at = NOW()
+                    WHERE id = %s
+                RETURNING id, restaurant_name, approved""",
+                (approved, str(restaurant_id)),
+            )
+            row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return jsonify({"status": "error", "message": "Restaurante não encontrado"}), 404
+        conn.commit()
+        try:
+            log_admin_action_auto(
+                "ApproveRestaurant" if approved else "UnapproveRestaurant",
+                f"{'Aprovou' if approved else 'Reprovou'} o restaurante {row['restaurant_name']} ({restaurant_id})",
+            )
+        except Exception:
+            pass
+        return jsonify({"status": "success", "data": dict(row)}), 200
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao aprovar/reprovar restaurante")
+        return jsonify({"status": "error", "message": "Erro interno ao atualizar aprovação."}), 500
+    finally:
+        conn.close()
+
 # --------- Dashboard + rotas de compat ---------
 def _is_admin(user_type: str) -> bool:
     return user_type == "admin"
