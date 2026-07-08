@@ -7,6 +7,7 @@ from flask import Blueprint, request, jsonify
 import psycopg2
 import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
+from ..utils.coupons import evaluate_coupon
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,10 @@ def validate_coupon():
             order_total = float(data.get('order_total', 0))
         except (ValueError, TypeError):
             order_total = 0.0
+        try:
+            delivery_fee = float(data.get('delivery_fee', 0))
+        except (ValueError, TypeError):
+            delivery_fee = 0.0
 
         if not code:
             return jsonify({"valid": False, "message": "Codigo do cupom e obrigatorio"}), 400
@@ -61,43 +66,18 @@ def validate_coupon():
             """, (code,))
             coupon = cur.fetchone()
 
-        if not coupon:
-            return jsonify({"valid": False, "message": "Cupom nao encontrado"}), 200
-
-        if not coupon['is_active']:
-            return jsonify({"valid": False, "message": "Este cupom nao esta ativo"}), 200
-
-        if coupon['valid_until'] and coupon['valid_until'] < datetime.now(timezone.utc):
-            return jsonify({"valid": False, "message": "Este cupom expirou"}), 200
-
-        if coupon['max_uses'] is not None and coupon['uses_count'] >= coupon['max_uses']:
-            return jsonify({"valid": False, "message": "Este cupom atingiu o limite de usos"}), 200
-
-        min_val = float(coupon['min_order_value'] or 0)
-        if order_total < min_val:
-            return jsonify({
-                "valid": False,
-                "message": f"Pedido minimo para este cupom e R$ {min_val:.2f}"
-            }), 200
-
-        disc_type = coupon['discount_type']
-        disc_value = float(coupon['discount_value'])
-        discount_amount = 0.0
-
-        if disc_type == 'percentage':
-            discount_amount = round(order_total * disc_value / 100, 2)
-        elif disc_type == 'fixed':
-            discount_amount = min(disc_value, order_total)
-        elif disc_type == 'free_delivery':
-            discount_amount = 0.0  # Frontend aplica isenção da taxa de entrega
+        # Validação/cálculo centralizado (mesma lógica do fechamento do pedido)
+        result = evaluate_coupon(dict(coupon) if coupon else None, order_total, delivery_fee)
+        if not result["valid"]:
+            return jsonify({"valid": False, "message": result["message"]}), 200
 
         return jsonify({
             "valid": True,
             "coupon_id": str(coupon['id']),
             "code": coupon['code'],
-            "discount_type": disc_type,
-            "discount_value": disc_value,
-            "discount_amount": discount_amount,
+            "discount_type": result["discount_type"],
+            "discount_value": float(coupon['discount_value']),
+            "discount_amount": result["discount_amount"],
             "message": "Cupom valido!"
         }), 200
 

@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Helpers de cálculo (admin-configuráveis via platform_settings)
 from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
 from ..utils.helpers import get_user_id_from_token
+from ..utils.coupons import evaluate_coupon, consume_coupon
 from src.extensions import limiter
 
 # Criação do Blueprint
@@ -221,28 +222,25 @@ def criar_preferencia_mercado_pago():
                 
             return jsonify({"erro": "Erro ao criar pedido no banco de dados."}), 500
         
-        # --- VUL-08: Revalidação de cupom no backend ---
+        # --- VUL-08: Revalidação de cupom no backend (lógica única em utils/coupons) ---
+        # Aqui só para pagamento ONLINE. No dinheiro, _validar_itens_e_total (mais
+        # abaixo) cuida do cupom com a MESMA lógica — evita aplicar/consumir 2x.
         coupon_code = dados_pedido.get('coupon_code', '').strip()
         backend_discount = 0.0
-        if coupon_code:
+        applied_coupon_id = None
+        if coupon_code and payment_method != 'cash':
             try:
-                coupon_result = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).eq('is_active', True).execute()
-                if coupon_result.data:
-                    coupon = coupon_result.data[0]
-                    order_subtotal = float(dados_pedido.get('total_amount_items', 0))
-                    min_order = float(coupon.get('min_order_amount') or 0)
-                    if order_subtotal >= min_order:
-                        if coupon.get('discount_type') == 'percentage':
-                            backend_discount = round(order_subtotal * float(coupon.get('discount_value', 0)) / 100, 2)
-                        else:
-                            backend_discount = round(float(coupon.get('discount_value', 0)), 2)
-                        # Cap discount to subtotal
-                        backend_discount = min(backend_discount, order_subtotal)
-                        logging.info(f"✅ Cupom '{coupon_code}' validado no backend — desconto: R${backend_discount:.2f}")
-                    else:
-                        logging.warning(f"⚠️ Cupom '{coupon_code}' inválido: pedido mínimo não atingido")
+                order_subtotal = float(dados_pedido.get('total_amount_items', 0))
+                delivery_fee_c = float(dados_pedido.get('delivery_fee', 0) or 0)
+                cr = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).execute()
+                coupon = cr.data[0] if cr.data else None
+                evalr = evaluate_coupon(coupon, order_subtotal, delivery_fee_c)
+                if evalr['valid'] and evalr['discount_amount'] > 0:
+                    backend_discount = evalr['discount_amount']
+                    applied_coupon_id = coupon.get('id')
+                    logging.info(f"✅ Cupom '{coupon_code}' válido — desconto: R${backend_discount:.2f}")
                 else:
-                    logging.warning(f"⚠️ Cupom '{coupon_code}' não encontrado ou inativo — desconto ignorado")
+                    logging.warning(f"⚠️ Cupom '{coupon_code}' não aplicado: {evalr['message']}")
             except Exception as _coupon_err:
                 logging.warning(f"⚠️ Falha ao validar cupom no backend: {_coupon_err} — desconto ignorado")
 
@@ -252,6 +250,8 @@ def criar_preferencia_mercado_pago():
             corrected_total = max(0.0, raw_total - backend_discount)
             order_data['total_amount'] = round(corrected_total, 2)
             supabase_client.table('orders').update({'total_amount': order_data['total_amount']}).eq('id', pedido_id).execute()
+            if applied_coupon_id:
+                consume_coupon(applied_coupon_id)
             logging.info(f"✅ total_amount corrigido para R${corrected_total:.2f} (desconto backend: R${backend_discount:.2f})")
         # --- Fim VUL-08 ---
 
@@ -263,7 +263,7 @@ def criar_preferencia_mercado_pago():
         # que o app enviou.
         if payment_method == 'cash':
             try:
-                total_seguro, subtotal_validado, _desconto_cash = _validar_itens_e_total(
+                total_seguro, subtotal_validado, _desconto_cash, _coupon_id_cash = _validar_itens_e_total(
                     dados_pedido.get('itens', []),
                     dados_pedido.get('delivery_fee', 0),
                     coupon_code,
@@ -283,6 +283,9 @@ def criar_preferencia_mercado_pago():
                 'total_amount_items': subtotal_validado,
                 'total_amount': total_seguro,
             }).eq('id', pedido_id).execute()
+
+            if _coupon_id_cash:
+                consume_coupon(_coupon_id_cash)
 
             logging.info(f"💵 Pedido em dinheiro {pedido_id} — itens validados, total real R${total_seguro:.2f}.")
             return jsonify({
@@ -420,7 +423,9 @@ def criar_preferencia_mercado_pago():
 # ─── PAGAMENTO TRANSPARENTE COM CARTÃO (in-app, sem redirecionar) ────────────
 def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items):
     """Revalida precos no banco e calcula o total no servidor (nao confia no front).
-    Retorna (total_seguro, subtotal_validado, desconto). Lanca ValueError se invalido.
+    Retorna (total_seguro, subtotal_validado, desconto, coupon_id). O coupon_id
+    (quando != None) deve ser 'consumido' pelo chamador apos criar o pedido.
+    Lanca ValueError se invalido.
     """
     subtotal = 0.0
     for item in items_from_request:
@@ -437,21 +442,19 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
         preco_real = float(db.data[0]['price'])
         subtotal += preco_real * quantidade
 
-    # Desconto de cupom validado no backend
+    # Desconto de cupom — mesma lógica única do preview e do fluxo online
     desconto = 0.0
+    coupon_id = None
     if coupon_code:
-        cr = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).eq('is_active', True).execute()
-        if cr.data:
-            c = cr.data[0]
-            if subtotal >= float(c.get('min_order_amount') or 0):
-                if c.get('discount_type') == 'percentage':
-                    desconto = round(subtotal * float(c.get('discount_value', 0)) / 100, 2)
-                else:
-                    desconto = round(float(c.get('discount_value', 0)), 2)
-                desconto = min(desconto, subtotal)
+        cr = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).execute()
+        coupon = cr.data[0] if cr.data else None
+        evalr = evaluate_coupon(coupon, subtotal, delivery_fee)
+        if evalr['valid'] and evalr['discount_amount'] > 0:
+            desconto = evalr['discount_amount']
+            coupon_id = coupon.get('id')
 
     total = max(0.0, round(subtotal + float(delivery_fee or 0) - desconto, 2))
-    return total, round(subtotal, 2), desconto
+    return total, round(subtotal, 2), desconto, coupon_id
 
 
 @mp_payment_bp.route('/pagamentos/processar_cartao', methods=['POST'])
@@ -486,7 +489,7 @@ def processar_pagamento_cartao():
 
         items_req = d.get('itens', [])
         try:
-            total_seguro, subtotal_validado, desconto = _validar_itens_e_total(
+            total_seguro, subtotal_validado, desconto, coupon_id_card = _validar_itens_e_total(
                 items_req, d.get('delivery_fee', 0), (d.get('coupon_code') or '').strip(), d.get('total_amount_items', 0)
             )
         except ValueError as ve:
@@ -521,6 +524,9 @@ def processar_pagamento_cartao():
         ins = supabase_client.table('orders').insert(order_data).execute()
         if not ins.data:
             return jsonify({"erro": "Erro ao criar pedido."}), 500
+
+        if coupon_id_card:
+            consume_coupon(coupon_id_card)
 
         # 2) Cria o pagamento no MP com o token do cartao
         base = os.environ.get("MERCADO_PAGO_WEBHOOK_URL")
