@@ -85,6 +85,22 @@ def _require_self_or_admin(cur, path_user_id):
     return None
 
 
+def _resolve_scope_user_id(cur, path_user_id):
+    """(effective_user_id, err). Admin usa o id do path; usuário comum usa
+    SEMPRE o próprio perfil resolvido do token — os apps mandam o auth uid do
+    Supabase, que não é o profile id usado nos desafios; comparar os dois dava
+    403 ("unauthorized" na tela de Desafios)."""
+    auth_uid, user_type, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if err:
+        return None, err
+    if user_type == "admin":
+        return str(path_user_id), None
+    own_id = _own_profile_id(cur, auth_uid, user_type)
+    if not own_id:
+        return None, _err("unauthorized", 403)
+    return own_id, None
+
+
 # ---------- rotas ----------
 
 @challenges_bp.get("/active")
@@ -305,7 +321,7 @@ def get_user_challenges(user_id):
     try:
         conn = _db()
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            auth_err = _require_self_or_admin(cur, user_id)
+            user_id, auth_err = _resolve_scope_user_id(cur, user_id)
             if auth_err:
                 return auth_err
 
