@@ -94,6 +94,26 @@ def _require_self_or_admin(cur, path_user_id):
         return _err("unauthorized", 403)
     return None
 
+
+def _resolve_scope_user_id(cur, path_user_id):
+    """Retorna (effective_user_id, err_response) para endpoints "self".
+
+    Admin: usa o id do path (pode consultar qualquer usuário).
+    Usuário comum: usa SEMPRE o id do PRÓPRIO perfil resolvido do token — os
+    apps mandam o auth uid do Supabase no path, que NÃO é o profile id usado nas
+    tabelas de gamificação; comparar os dois dava 403 indevido (e o app deslogava
+    ao entrar em "Minha pontuação"). Assim o usuário sempre vê os próprios dados,
+    não importa qual id o app mande."""
+    auth_uid, user_type, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if err:
+        return None, err
+    if user_type == "admin":
+        return str(path_user_id), None
+    own_id = _own_profile_id(cur, auth_uid, user_type)
+    if not own_id:
+        return None, _err("unauthorized", 403)
+    return own_id, None
+
 # ---------- core ----------
 def _add_points_event(*, user_id, points: int, event_type: str, description=None, order_id=None):
     if not points:
@@ -166,7 +186,7 @@ def get_user_points_and_level(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            auth_err = _require_self_or_admin(cur, user_id)
+            user_id, auth_err = _resolve_scope_user_id(cur, user_id)
             if auth_err:
                 return auth_err
             cur.execute("""
@@ -908,7 +928,7 @@ def get_points_history(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            auth_err = _require_self_or_admin(cur, user_id)
+            user_id, auth_err = _resolve_scope_user_id(cur, user_id)
             if auth_err:
                 return auth_err
             cur.execute("""
@@ -943,7 +963,7 @@ def get_user_points(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            auth_err = _require_self_or_admin(cur, user_id)
+            user_id, auth_err = _resolve_scope_user_id(cur, user_id)
             if auth_err:
                 return auth_err
             cur.execute("""
@@ -1086,7 +1106,7 @@ def get_user_badges(user_id):
     conn = _db()
     try:
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            auth_err = _require_self_or_admin(cur, user_id)
+            user_id, auth_err = _resolve_scope_user_id(cur, user_id)
             if auth_err:
                 return auth_err
             cur.execute("""
