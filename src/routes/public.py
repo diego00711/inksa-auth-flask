@@ -163,3 +163,42 @@ def public_social_day():
         return jsonify({"configured": False, "visible": False}), 200
     finally:
         conn.close()
+
+
+@public_bp.get("/social-day/history")
+def public_social_day_history():
+    """
+    Historico publico dos Dias I ja realizados (prestacao de contas).
+    Alimentado pelo admin em Inksa Social -> Prestacao de contas.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"events": [], "total_raised": 0}), 200
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, event_date, start_time, end_time, raised, orders_count,
+                       destination, proof_url
+                  FROM social_day_events
+                 ORDER BY event_date DESC, created_at DESC
+                """
+            )
+            rows = cur.fetchall()
+        events = [{
+            "id": str(r["id"]),
+            "date": r["event_date"].isoformat() if r["event_date"] else None,
+            "start_time": r["start_time"],
+            "end_time": r["end_time"],
+            "raised": float(r["raised"] or 0),
+            "orders_count": int(r["orders_count"] or 0),
+            "destination": r["destination"] or "",
+            "proof_url": r["proof_url"] or "",
+        } for r in rows]
+        total = round(sum(e["raised"] for e in events), 2)
+        return jsonify({"events": events, "total_raised": total}), 200
+    except Exception:
+        logger.exception("Erro em public_social_day_history")
+        return jsonify({"events": [], "total_raised": 0}), 200
+    finally:
+        conn.close()
