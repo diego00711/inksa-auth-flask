@@ -18,6 +18,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
 from ..utils.helpers import get_user_id_from_token
 from ..utils.coupons import evaluate_coupon, consume_coupon
+from ..utils import asaas
+from ..utils.gateway import payment_provider
 from src.extensions import limiter
 
 # Criação do Blueprint
@@ -379,7 +381,55 @@ def criar_preferencia_mercado_pago():
             return jsonify({"erro": "A lista de itens está vazia ou todos os itens têm valor zero."}), 400
 
         logging.info(f"✅ Total de itens válidos: {len(items_mp)}")
-        
+
+        # ✅ PASSO 3-ASAAS: provider alternativo (PAYMENT_PROVIDER=asaas)
+        # Mesma validação de itens/cupom/clube acima; muda só quem cobra.
+        # A invoiceUrl do Asaas é uma página hospedada com PIX + cartão —
+        # equivalente direto do init_point do MP (o app só redireciona).
+        if payment_provider() == 'asaas':
+            if not asaas.is_configured():
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                return jsonify({"erro": "Serviço de pagamento indisponível (Asaas não configurado)."}), 503
+
+            # Valor autoritativo = soma dos itens validados (inclui descontos negativos)
+            valor_online = round(sum(float(i['unit_price']) * int(i['quantity']) for i in items_mp), 2)
+            if valor_online <= 0:
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                return jsonify({"erro": "Valor do pedido inválido."}), 400
+
+            # Dados do cliente (nome + CPF obrigatório no Asaas)
+            prof = supabase_client.table('client_profiles').select('first_name, last_name, cpf').eq('id', client_profile_id).execute()
+            pdata = prof.data[0] if prof.data else {}
+            nome_cliente = f"{pdata.get('first_name') or ''} {pdata.get('last_name') or ''}".strip() or 'Cliente Inksa'
+
+            ok_c, customer_or_msg = asaas.get_or_create_customer(
+                nome_cliente, pdata.get('cpf') or '', email=cliente_email,
+                external_reference=client_profile_id,
+            )
+            if not ok_c:
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                return jsonify({"erro": customer_or_msg}), 400
+
+            ok_p, pay_or_msg = asaas.create_checkout_payment(customer_or_msg, valor_online, pedido_id)
+            if not ok_p:
+                logging.error(f"❌ Asaas recusou a criação da cobrança: {pay_or_msg}")
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                return jsonify({"erro": "O provedor de pagamento recusou a cobrança.", "detalhes": pay_or_msg}), 400
+
+            supabase_client.table('orders').update({
+                'payment_provider': 'asaas',
+                'id_transacao_mp': str(pay_or_msg['payment_id']),
+            }).eq('id', pedido_id).execute()
+
+            logging.info(f"✅ Cobrança Asaas criada: {pay_or_msg['payment_id']} — pedido {pedido_id}")
+            return jsonify({
+                "mensagem": "Cobrança criada com sucesso!",
+                "checkout_link": pay_or_msg['invoice_url'],
+                "preference_id": pay_or_msg['payment_id'],
+                "pedido_id": pedido_id,
+                "provider": "asaas",
+            }), 200
+
         # ✅ PASSO 3: Criar preferência no Mercado Pago
         urls_retorno = dados_pedido.get('urls_retorno', {})
         FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
@@ -449,6 +499,14 @@ def criar_preferencia_mercado_pago():
         return jsonify({"erro": "Erro interno ao processar pagamento."}), 500
 
 
+@mp_payment_bp.route('/pagamentos/config', methods=['GET'])
+def payment_config():
+    """Config pública do checkout: qual provider está ativo.
+    O app cliente usa isso pra decidir se oferece cartão in-app (MP Bricks)
+    ou manda tudo pelo checkout hospedado (Asaas invoiceUrl)."""
+    return jsonify({"provider": payment_provider()}), 200
+
+
 # ─── PAGAMENTO TRANSPARENTE COM CARTÃO (in-app, sem redirecionar) ────────────
 def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items):
     """Revalida precos no banco e calcula o total no servidor (nao confia no front).
@@ -492,6 +550,11 @@ def processar_pagamento_cartao():
     """Processa pagamento com cartao via token do MP Bricks (sem redirecionar)."""
     logging.info("💳 === PROCESSANDO PAGAMENTO COM CARTÃO (transparente) ===")
     try:
+        # Cartão in-app usa o MP Bricks; com outro provider o cartão é pago
+        # no checkout hospedado (o app nem deveria chamar esta rota).
+        if payment_provider() != 'mercadopago':
+            return jsonify({"erro": "Pagamento com cartão dentro do app indisponível — use o pagamento online."}), 400
+
         if not supabase_client:
             return jsonify({"erro": "Serviço de banco indisponível."}), 500
 
@@ -877,4 +940,87 @@ def mercadopago_webhook():
     logging.info("=" * 80)
     logging.info("✅ Webhook processado - retornando 200 OK")
     logging.info("=" * 80)
+    return jsonify({"status": "ok"}), 200
+
+
+# ─── WEBHOOK DO ASAAS ────────────────────────────────────────────────────────
+@mp_payment_bp.route('/pagamentos/webhook_asaas', methods=['POST'])
+def asaas_webhook():
+    """Notificações de cobrança do Asaas.
+
+    Autenticação fail-closed pelo header 'asaas-access-token' (token definido
+    por nós no cadastro do webhook, em ASAAS_WEBHOOK_TOKEN). Retorna 200 para
+    eventos irrelevantes (senão o Asaas fica reenviando e pausa a fila).
+    """
+    if not asaas.verify_webhook_token(request):
+        logging.warning("⚠️ Webhook Asaas rejeitado: token inválido/ausente")
+        return jsonify({'error': 'Token inválido'}), 401
+
+    data = request.get_json(silent=True) or {}
+    event = data.get('event')
+    payment = data.get('payment') or {}
+    payment_id = payment.get('id')
+    pedido_id = payment.get('externalReference')
+
+    logging.info(f"📬 Webhook Asaas: event={event} payment={payment_id} pedido={pedido_id}")
+
+    if not pedido_id or supabase_client is None:
+        return jsonify({"status": "ignored"}), 200
+
+    try:
+        # PIX cai como RECEIVED; cartão confirmado cai como CONFIRMED
+        if event in ('PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED'):
+            resp = supabase_client.table('orders').select('*').eq('id', pedido_id).execute()
+            if not resp.data:
+                gevent.sleep(3)  # race: webhook pode chegar antes do commit do pedido
+                resp = supabase_client.table('orders').select('*').eq('id', pedido_id).execute()
+            if not resp.data:
+                logging.error(f"❌ Webhook Asaas: pedido {pedido_id} não encontrado")
+                return jsonify({"status": "order_not_found"}), 200
+
+            pedido = resp.data[0]
+            if pedido.get('status_pagamento') == 'approved':
+                logging.info(f"⚠️ Pedido {pedido_id} já aprovado — webhook duplicado ignorado")
+                return jsonify({"status": "already_processed"}), 200
+
+            valor_itens = float(pedido.get('total_amount_items') or 0)
+            comissao = float(calculate_platform_commission(valor_itens))
+            fee = float(pedido.get('delivery_fee') or 0)
+            courier = float(calculate_courier_payout(pedido.get('delivery_distance_km'), delivery_fee=fee))
+            supabase_client.table('orders').update({
+                'status': 'pending',  # ativa o pedido para o restaurante
+                'status_pagamento': 'approved',
+                'comissao_plataforma': round(comissao, 2),
+                'valor_repassado_restaurante': round(valor_itens - comissao, 2),
+                'valor_repassado_entregador': round(courier, 2),
+                'margem_frete': round(fee - courier, 2),
+                'id_transacao_mp': str(payment_id),
+                'payment_provider': 'asaas',
+            }).eq('id', pedido_id).execute()
+            logging.info(f"🎉 Pedido {pedido_id} APROVADO via Asaas ({event})")
+
+        elif event == 'PAYMENT_REFUNDED':
+            supabase_client.table('orders').update({
+                'status_pagamento': 'refunded',
+            }).eq('id', pedido_id).execute()
+            logging.info(f"↩️ Pedido {pedido_id} marcado como reembolsado (Asaas)")
+
+        elif event in ('PAYMENT_OVERDUE', 'PAYMENT_DELETED'):
+            # Cobrança venceu/foi excluída sem pagamento: cancela só se o
+            # pedido ainda estava aguardando pagamento.
+            resp = supabase_client.table('orders').select('status').eq('id', pedido_id).execute()
+            if resp.data and resp.data[0].get('status') == 'awaiting_payment':
+                supabase_client.table('orders').update({
+                    'status': 'cancelled',
+                    'status_pagamento': 'expired',
+                    'cancellation_reason': f'asaas_{event.lower()}',
+                }).eq('id', pedido_id).execute()
+                logging.info(f"🚫 Pedido {pedido_id} cancelado ({event})")
+
+    except Exception as e:
+        logging.error(f"❌ Erro no webhook Asaas: {e}", exc_info=True)
+        sentry_sdk.capture_exception(e)
+        # 500 faz o Asaas reenviar depois — comportamento desejado em erro nosso
+        return jsonify({"status": "error"}), 500
+
     return jsonify({"status": "ok"}), 200

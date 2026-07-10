@@ -938,7 +938,7 @@ def refund_delivery_incident(incident_id):
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT di.refund_status, di.order_id, o.id_transacao_mp
+                SELECT di.refund_status, di.order_id, o.id_transacao_mp, o.payment_provider
                   FROM delivery_incidents di
                   LEFT JOIN orders o ON o.id = di.order_id
                  WHERE di.id = %s
@@ -952,18 +952,13 @@ def refund_delivery_incident(incident_id):
                 return jsonify({"status": "error", "message": "Sem reembolso pendente para esta ocorrência"}), 400
             payment_id = row["id_transacao_mp"]
             if not payment_id:
-                return jsonify({"status": "error", "message": "Pedido sem transação do Mercado Pago"}), 400
+                return jsonify({"status": "error", "message": "Pedido sem transação no gateway de pagamento"}), 400
 
-            sdk = current_app.mp_sdk
-            if sdk is None:
-                return jsonify({"status": "error", "message": "Mercado Pago indisponível"}), 503
-
-            result = sdk.refund().create(payment_id)
-            resp = result.get("response", {}) if isinstance(result, dict) else {}
-            code = result.get("status", 200) if isinstance(result, dict) else 200
-            if code >= 400:
-                logger.error("MP recusou reembolso: %s", resp)
-                return jsonify({"status": "error", "message": "Mercado Pago recusou o reembolso"}), 400
+            from ..utils.gateway import refund_order_payment
+            ok_refund, refund_detail = refund_order_payment(dict(row), current_app.mp_sdk)
+            if not ok_refund:
+                logger.error("Gateway recusou reembolso: %s", refund_detail)
+                return jsonify({"status": "error", "message": "O gateway de pagamento recusou o reembolso"}), 400
 
             cur.execute(
                 "UPDATE delivery_incidents SET refund_status = 'done', "

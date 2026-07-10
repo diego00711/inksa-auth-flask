@@ -293,7 +293,7 @@ def update_order_status(order_id):
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT o.status, o.status_pagamento, o.total_amount, o.id_transacao_mp
+                SELECT o.status, o.status_pagamento, o.total_amount, o.id_transacao_mp, o.payment_provider
                 FROM orders o
                 JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE o.id = %s AND rp.user_id = %s
@@ -322,11 +322,10 @@ def update_order_status(order_id):
                 refund_amount = float(order['total_amount'] or 0)
                 if refund_amount > 0:
                     try:
-                        sdk = current_app.mp_sdk
-                        if sdk and order['id_transacao_mp']:
-                            res = sdk.refund().create(order['id_transacao_mp'])
-                            code = res.get('status', 200) if isinstance(res, dict) else 200
-                            if code < 400:
+                        from ..utils.gateway import refund_order_payment
+                        if order['id_transacao_mp']:
+                            ok_refund, refund_detail = refund_order_payment(dict(order), current_app.mp_sdk)
+                            if ok_refund:
                                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _rcur:
                                     _rcur.execute(
                                         "UPDATE orders SET status_pagamento = 'refunded', updated_at = NOW() WHERE id = %s",
@@ -335,7 +334,7 @@ def update_order_status(order_id):
                                 conn.commit()
                                 logger.info(f"Reembolso automático OK (cancelamento pelo restaurante): pedido {order_id} R${refund_amount}")
                             else:
-                                logger.warning(f"MP recusou reembolso do pedido {order_id} (cancelamento restaurante): {res.get('response')}")
+                                logger.warning(f"Gateway recusou reembolso do pedido {order_id} (cancelamento restaurante): {refund_detail}")
                                 sentry_sdk.capture_message(
                                     f"MP recusou reembolso automático do pedido {order_id} (cancelado pelo restaurante) — requer ação manual do admin.",
                                     level="warning",
@@ -618,7 +617,7 @@ def report_delivery_incident(order_id):
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
-                "SELECT status, delivery_id, client_id, total_amount, status_pagamento, id_transacao_mp "
+                "SELECT status, delivery_id, client_id, total_amount, status_pagamento, id_transacao_mp, payment_provider "
                 "FROM orders WHERE id = %s",
                 (str(order_id),),
             )
@@ -688,11 +687,10 @@ def report_delivery_incident(order_id):
             # fica 'pending' para o admin processar pelo botão (fallback seguro).
             if refund_status == 'pending':
                 try:
-                    sdk = current_app.mp_sdk
-                    if sdk and order['id_transacao_mp']:
-                        res = sdk.refund().create(order['id_transacao_mp'])
-                        code = res.get('status', 200) if isinstance(res, dict) else 200
-                        if code < 400:
+                    from ..utils.gateway import refund_order_payment
+                    if order['id_transacao_mp']:
+                        ok_refund, refund_detail = refund_order_payment(dict(order), current_app.mp_sdk)
+                        if ok_refund:
                             cur.execute(
                                 "UPDATE delivery_incidents SET refund_status = 'done', "
                                 "resolution = CASE WHEN resolution = 'pending' THEN 'refunded' ELSE resolution END, "
@@ -706,7 +704,7 @@ def report_delivery_incident(order_id):
                             conn.commit()
                             logger.info(f"Reembolso automático OK: pedido {order_id} R${refund_amount}")
                         else:
-                            logger.warning(f"MP recusou reembolso automático do pedido {order_id}: {res.get('response')}")
+                            logger.warning(f"Gateway recusou reembolso automático do pedido {order_id}: {refund_detail}")
                             sentry_sdk.capture_message(
                                 f"MP recusou reembolso automático do pedido {order_id} — fica pendente para o admin.",
                                 level="warning",
@@ -1294,7 +1292,7 @@ def cancel_order_by_client(order_id):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
                 "SELECT id, status, client_id, restaurant_id, status_pagamento, "
-                "total_amount, id_transacao_mp FROM orders WHERE id = %s",
+                "total_amount, id_transacao_mp, payment_provider FROM orders WHERE id = %s",
                 (str(order_id),),
             )
             order = cur.fetchone()
@@ -1333,11 +1331,10 @@ def cancel_order_by_client(order_id):
                 refund_amount = float(order['total_amount'] or 0)
                 if refund_amount > 0:
                     try:
-                        sdk = current_app.mp_sdk
-                        if sdk and order['id_transacao_mp']:
-                            res = sdk.refund().create(order['id_transacao_mp'])
-                            code = res.get('status', 200) if isinstance(res, dict) else 200
-                            if code < 400:
+                        from ..utils.gateway import refund_order_payment
+                        if order['id_transacao_mp']:
+                            ok_refund, refund_detail = refund_order_payment(dict(order), current_app.mp_sdk)
+                            if ok_refund:
                                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _rcur:
                                     _rcur.execute(
                                         "UPDATE orders SET status_pagamento = 'refunded', updated_at = NOW() WHERE id = %s",
@@ -1346,7 +1343,7 @@ def cancel_order_by_client(order_id):
                                 conn.commit()
                                 logger.info(f"Reembolso automático OK (cancelamento pelo cliente): pedido {order_id} R${refund_amount}")
                             else:
-                                logger.warning(f"MP recusou reembolso do pedido {order_id} (cancelamento cliente): {res.get('response')}")
+                                logger.warning(f"Gateway recusou reembolso do pedido {order_id} (cancelamento cliente): {refund_detail}")
                                 sentry_sdk.capture_message(
                                     f"MP recusou reembolso automático do pedido {order_id} (cancelado pelo cliente) — requer ação manual do admin.",
                                     level="warning",
