@@ -49,13 +49,38 @@ def get_db_connection():
     if not url:
         logger.error("❌ DATABASE_URL não encontrada.")
         return None
+    # Timeouts defensivos. SEM eles, uma conexão/consulta travada (TCP
+    # meio-aberto na latência cross-continente Oregon<->São Paulo, ou o SELECT
+    # do keep-alive) segura o worker gevent único e o Render mata por
+    # WORKER TIMEOUT/OOM — derrubando TODA a API (incidente 2026-07-11).
+    #   keepalives*      -> detectam socket morto e abortam em ~1min
+    #   connect_timeout  -> evita connect pendurado
+    #   statement_timeout-> aborta query longa no servidor (30s)
+    tcp_kwargs = dict(
+        connect_timeout=10,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+    conn = None
     try:
-        conn = psycopg2.connect(url)
+        conn = psycopg2.connect(url, options="-c statement_timeout=30000", **tcp_kwargs)
+    except Exception as e_opt:
+        # Alguns poolers (pgbouncer transaction mode) rejeitam 'options' no
+        # startup — cai pra conexão sem statement_timeout, mas ainda com os
+        # timeouts de TCP (que são o essencial contra o socket travado).
+        logger.warning(f"⚠️ DB connect com statement_timeout falhou ({e_opt}); tentando sem.")
+        try:
+            conn = psycopg2.connect(url, **tcp_kwargs)
+        except Exception as e:
+            logger.error(f"❌ Conexão DB falhou: {e}", exc_info=True)
+            return None
+    try:
         register_uuid(None, conn)  # garante suporte a UUID no cursor
-        return conn
     except Exception as e:
-        logger.error(f"❌ Conexão DB falhou: {e}", exc_info=True)
-        return None
+        logger.warning(f"⚠️ register_uuid falhou: {e}")
+    return conn
 
 
 # --- Auth helper ---
