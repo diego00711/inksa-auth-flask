@@ -102,18 +102,39 @@ def get_or_create_customer(name: str, cpf: str, email: str | None = None,
 
 
 def create_checkout_payment(customer_id: str, value: float, external_reference: str,
-                            description: str = "Pedido Inksa Delivery"):
-    """Cria cobranca 'UNDEFINED' (cliente escolhe PIX/cartao na pagina hospedada).
-    (ok, {payment_id, invoice_url, status} | msg_de_erro)."""
+                            description: str = "Pedido Inksa Delivery",
+                            billing_type: str = "UNDEFINED",
+                            success_url: str | None = None):
+    """Cria cobranca com pagina hospedada (invoiceUrl).
+
+    billing_type: 'PIX' (fatura mostra so o QR), 'CREDIT_CARD' (so cartao) ou
+    'UNDEFINED' (cliente escolhe — inclui boleto). Se o tipo especifico for
+    recusado (ex.: PIX antes da conta aprovada/chave criada), cai de volta
+    pro UNDEFINED em vez de quebrar o checkout.
+
+    success_url: pra onde a pagina do Asaas redireciona o cliente apos pagar
+    (autoRedirect) — devolve o usuario pro app, como as back_urls do MP.
+    (ok, {payment_id, invoice_url, status} | msg_de_erro).
+    """
     body = {
         "customer": customer_id,
-        "billingType": "UNDEFINED",
+        "billingType": (billing_type or "UNDEFINED").upper(),
         "value": round(float(value), 2),
         "dueDate": date.today().isoformat(),
         "description": description[:200],
         "externalReference": str(external_reference),
     }
+    if success_url:
+        body["callback"] = {"successUrl": success_url, "autoRedirect": True}
+
     ok, data = _request("POST", "/payments", json_body=body)
+
+    if not ok and body["billingType"] != "UNDEFINED":
+        logger.warning("Asaas recusou billingType=%s (%s) — tentando UNDEFINED",
+                       body["billingType"], _error_message(data))
+        body["billingType"] = "UNDEFINED"
+        ok, data = _request("POST", "/payments", json_body=body)
+
     if not ok:
         return False, _error_message(data)
     return True, {

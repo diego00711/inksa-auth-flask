@@ -398,7 +398,7 @@ def criar_preferencia_mercado_pago():
                 return jsonify({"erro": "Valor do pedido inválido."}), 400
 
             # Dados do cliente (nome + CPF obrigatório no Asaas)
-            prof = supabase_client.table('client_profiles').select('first_name, last_name, cpf').eq('id', client_profile_id).execute()
+            prof = supabase_client.table('client_profiles').select('first_name,last_name,cpf').eq('id', client_profile_id).execute()
             pdata = prof.data[0] if prof.data else {}
             nome_cliente = f"{pdata.get('first_name') or ''} {pdata.get('last_name') or ''}".strip() or 'Cliente Inksa'
 
@@ -410,7 +410,17 @@ def criar_preferencia_mercado_pago():
                 supabase_client.table('orders').delete().eq('id', pedido_id).execute()
                 return jsonify({"erro": customer_or_msg}), 400
 
-            ok_p, pay_or_msg = asaas.create_checkout_payment(customer_or_msg, valor_online, pedido_id)
+            # O método escolhido no app comanda a fatura: pix → só QR PIX;
+            # crédito → só cartão; débito/outros → aberta (única com boleto).
+            billing_type = {'pix': 'PIX', 'credit': 'CREDIT_CARD'}.get(payment_method, 'UNDEFINED')
+            # Depois de pagar, a página do Asaas redireciona de volta pro app
+            success_url = (dados_pedido.get('urls_retorno') or {}).get('sucesso') \
+                or f"{os.environ.get('FRONTEND_URL', 'https://clientes.inksadelivery.com.br')}/pagamento/sucesso"
+
+            ok_p, pay_or_msg = asaas.create_checkout_payment(
+                customer_or_msg, valor_online, pedido_id,
+                billing_type=billing_type, success_url=success_url,
+            )
             if not ok_p:
                 logging.error(f"❌ Asaas recusou a criação da cobrança: {pay_or_msg}")
                 supabase_client.table('orders').delete().eq('id', pedido_id).execute()
