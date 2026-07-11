@@ -483,21 +483,25 @@ def admin_user_metrics():
         return jsonify({"status": "error", "message": "DB connection error"}), 500
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Tipo de usuário vem de public.users (fonte autoritativa usada no
+            # resto do app); auth.users.raw_user_meta_data->>'user_type' é NULL
+            # para alguns cadastros (ex.: admins), o que zerava o card.
             cur.execute("""
                 SELECT
                   COUNT(*) AS total,
-                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'client') AS clientes,
-                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'restaurant') AS restaurantes,
-                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'delivery') AS entregadores,
-                  COUNT(*) FILTER (WHERE raw_user_meta_data->>'user_type' = 'admin') AS admins,
-                  COUNT(*) FILTER (WHERE last_sign_in_at > NOW() - INTERVAL '15 minutes') AS online_agora,
-                  COUNT(*) FILTER (WHERE last_sign_in_at > NOW() - INTERVAL '24 hours') AS ativos_24h,
-                  COUNT(*) FILTER (WHERE last_sign_in_at > NOW() - INTERVAL '7 days') AS ativos_7d,
-                  COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS novos_24h,
-                  COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') AS novos_7d,
-                  COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') AS novos_30d
-                FROM auth.users
-                WHERE deleted_at IS NULL;
+                  COUNT(*) FILTER (WHERE COALESCE(pu.user_type, au.raw_user_meta_data->>'user_type') = 'client') AS clientes,
+                  COUNT(*) FILTER (WHERE COALESCE(pu.user_type, au.raw_user_meta_data->>'user_type') = 'restaurant') AS restaurantes,
+                  COUNT(*) FILTER (WHERE COALESCE(pu.user_type, au.raw_user_meta_data->>'user_type') = 'delivery') AS entregadores,
+                  COUNT(*) FILTER (WHERE COALESCE(pu.user_type, au.raw_user_meta_data->>'user_type') = 'admin') AS admins,
+                  COUNT(*) FILTER (WHERE au.last_sign_in_at > NOW() - INTERVAL '15 minutes') AS online_agora,
+                  COUNT(*) FILTER (WHERE au.last_sign_in_at > NOW() - INTERVAL '24 hours') AS ativos_24h,
+                  COUNT(*) FILTER (WHERE au.last_sign_in_at > NOW() - INTERVAL '7 days') AS ativos_7d,
+                  COUNT(*) FILTER (WHERE au.created_at > NOW() - INTERVAL '24 hours') AS novos_24h,
+                  COUNT(*) FILTER (WHERE au.created_at > NOW() - INTERVAL '7 days') AS novos_7d,
+                  COUNT(*) FILTER (WHERE au.created_at > NOW() - INTERVAL '30 days') AS novos_30d
+                FROM auth.users au
+                LEFT JOIN public.users pu ON pu.id = au.id
+                WHERE au.deleted_at IS NULL;
             """)
             totals = dict(cur.fetchone())
 
@@ -516,13 +520,14 @@ def admin_user_metrics():
 
             cur.execute("""
                 SELECT
-                  email,
-                  raw_user_meta_data->>'user_type' AS tipo,
-                  TO_CHAR(created_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SS') AS criado_em,
-                  TO_CHAR(last_sign_in_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SS') AS ultimo_login
-                FROM auth.users
-                WHERE deleted_at IS NULL
-                ORDER BY created_at DESC
+                  au.email,
+                  COALESCE(pu.user_type, au.raw_user_meta_data->>'user_type') AS tipo,
+                  TO_CHAR(au.created_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SS') AS criado_em,
+                  TO_CHAR(au.last_sign_in_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SS') AS ultimo_login
+                FROM auth.users au
+                LEFT JOIN public.users pu ON pu.id = au.id
+                WHERE au.deleted_at IS NULL
+                ORDER BY au.created_at DESC
                 LIMIT 10;
             """)
             recentes = [dict(r) for r in cur.fetchall()]
