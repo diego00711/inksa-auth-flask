@@ -212,6 +212,17 @@ def handle_orders():
                 if not client_profile:
                     return jsonify({"error": "Perfil do cliente não encontrado"}), 404
 
+                # 🔒 Trava: restaurante fechado não recebe pedido (a tela do
+                # cliente só mostra o selo; ele pode ter fechado depois que o
+                # carrinho foi montado). Fail-open se não achar a linha.
+                cur.execute("SELECT is_open FROM restaurant_profiles WHERE id = %s", (data.get('restaurant_id'),))
+                _rest = cur.fetchone()
+                if _rest is not None and _rest.get('is_open') is False:
+                    return jsonify({
+                        "error": "O restaurante fechou e não está aceitando pedidos no momento.",
+                        "error_code": "RESTAURANT_CLOSED",
+                    }), 409
+
                 total_items = sum(item.get('price', 0) * item.get('quantity', 1) for item in data['items'])
                 delivery_fee = data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
 

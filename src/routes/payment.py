@@ -111,6 +111,38 @@ def _get_authenticated_client_profile_id():
     return profile_result.data[0]['id'], None
 
 
+def _restaurant_is_closed(restaurant_id) -> bool:
+    """True se o restaurante existe e está FECHADO (bloquear o pedido).
+
+    A tela do cliente só mostra o selo aberto/fechado na listagem — ela não
+    impede o checkout, e o restaurante pode ter fechado (manual, por horário
+    ou por falta de heartbeat) DEPOIS que o carrinho foi montado. Esta é a
+    trava autoritativa no servidor.
+
+    Fail-open: se não der pra checar (erro transitório) devolve False e deixa o
+    pedido passar — melhor o restaurante recusar um pedido do que quebrar o
+    checkout de todo mundo por um hiccup de banco."""
+    if not restaurant_id:
+        return False
+    try:
+        r = (supabase_client.table('restaurant_profiles')
+             .select('is_open').eq('id', str(restaurant_id)).single().execute())
+        return (r.data or {}).get('is_open') is False
+    except Exception as e:
+        logging.warning(f"⚠️ Não foi possível checar is_open do restaurante {restaurant_id}: {e}")
+        return False
+
+
+_RESTAURANT_CLOSED_RESPONSE = (
+    # "erro" (padrão do payment.py) + "error" (o que o processResponse do app
+    # cliente lê) — assim a mensagem amigável aparece de fato no toast.
+    {"erro": "O restaurante fechou e não está aceitando pedidos no momento.",
+     "error": "O restaurante fechou e não está aceitando pedidos no momento.",
+     "error_code": "RESTAURANT_CLOSED"},
+    409,
+)
+
+
 @mp_payment_bp.route('/pagamentos/criar_preferencia', methods=['POST'])
 @limiter.limit("20 per minute")
 def criar_preferencia_mercado_pago():
@@ -152,10 +184,16 @@ def criar_preferencia_mercado_pago():
                 }), 400
             logging.info(f"✅ Email validado: {cliente_email}")
         
+        # 🔒 Trava: não aceita pedido se o restaurante estiver fechado.
+        if _restaurant_is_closed(dados_pedido.get('restaurant_id')):
+            logging.info(f"⛔ Pedido barrado: restaurante {dados_pedido.get('restaurant_id')} está fechado.")
+            _body, _code = _RESTAURANT_CLOSED_RESPONSE
+            return jsonify(_body), _code
+
         # 🆕 PASSO 1: CRIAR O PEDIDO NO BANCO PRIMEIRO!
         import uuid
         from datetime import datetime
-        
+
         pedido_id = dados_pedido.get('pedido_id')
         
         # Se não tem ID, cria um novo
@@ -619,6 +657,12 @@ def processar_pagamento_cartao():
 
         if total_seguro <= 0:
             return jsonify({"erro": "Valor do pedido inválido após benefícios."}), 400
+
+        # 🔒 Trava: não aceita pedido se o restaurante estiver fechado.
+        if _restaurant_is_closed(d.get('restaurant_id')):
+            logging.info(f"⛔ Pedido (cartão) barrado: restaurante {d.get('restaurant_id')} está fechado.")
+            _body, _code = _RESTAURANT_CLOSED_RESPONSE
+            return jsonify(_body), _code
 
         # 1) Cria o pedido (aguardando pagamento)
         import uuid
