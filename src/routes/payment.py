@@ -411,8 +411,8 @@ def criar_preferencia_mercado_pago():
                 return jsonify({"erro": customer_or_msg}), 400
 
             # O método escolhido no app comanda a fatura: pix → só QR PIX;
-            # crédito → só cartão; débito/outros → aberta (única com boleto).
-            billing_type = {'pix': 'PIX', 'credit': 'CREDIT_CARD'}.get(payment_method, 'UNDEFINED')
+            # crédito/débito/outros → só cartão. Nunca UNDEFINED (mostraria boleto).
+            billing_type = 'PIX' if payment_method == 'pix' else 'CREDIT_CARD'
             # Depois de pagar, a página do Asaas redireciona de volta pro app
             success_url = (dados_pedido.get('urls_retorno') or {}).get('sucesso') \
                 or f"{os.environ.get('FRONTEND_URL', 'https://clientes.inksadelivery.com.br')}/pagamento/sucesso"

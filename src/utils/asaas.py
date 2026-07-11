@@ -129,10 +129,13 @@ def create_checkout_payment(customer_id: str, value: float, external_reference: 
 
     ok, data = _request("POST", "/payments", json_body=body)
 
-    if not ok and body["billingType"] != "UNDEFINED":
-        logger.warning("Asaas recusou billingType=%s (%s) — tentando UNDEFINED",
+    # Se o tipo pedido for recusado (ex.: PIX antes da conta aprovada/chave criada),
+    # cai pro CARTÃO — NUNCA pro UNDEFINED, que mostraria boleto (sem sentido em
+    # delivery). Cartão é o único método online que funciona durante a análise.
+    if not ok and body["billingType"] != "CREDIT_CARD":
+        logger.warning("Asaas recusou billingType=%s (%s) — caindo pra CREDIT_CARD",
                        body["billingType"], _error_message(data))
-        body["billingType"] = "UNDEFINED"
+        body["billingType"] = "CREDIT_CARD"
         ok, data = _request("POST", "/payments", json_body=body)
 
     if not ok:
