@@ -154,7 +154,11 @@ def _secure_secret(env_name, weak_default):
     return val
 
 # --- Configuração do Banco para Gamificação ---
-app.config["DB_CONN_FACTORY"] = lambda: psycopg2.connect(os.environ["DATABASE_URL"])
+# Usa a MESMA conexão blindada (timeouts TCP + statement_timeout) do resto do
+# app — senão uma query de gamificação travada derrubaria o worker igual ao
+# incidente 2026-07-11 (ver helpers.connect_hardened).
+from src.utils.helpers import connect_hardened as _connect_hardened
+app.config["DB_CONN_FACTORY"] = lambda: _connect_hardened(os.environ["DATABASE_URL"])
 app.config["GAMIFICATION_INTERNAL_TOKEN"] = _secure_secret(
     "GAMIFICATION_INTERNAL_TOKEN", "token-secreto-trocar"
 )

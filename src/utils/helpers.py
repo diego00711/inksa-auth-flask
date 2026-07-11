@@ -44,43 +44,54 @@ except Exception as e:
 
 
 # --- DB ---
-def get_db_connection():
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        logger.error("❌ DATABASE_URL não encontrada.")
-        return None
-    # Timeouts defensivos. SEM eles, uma conexão/consulta travada (TCP
-    # meio-aberto na latência cross-continente Oregon<->São Paulo, ou o SELECT
-    # do keep-alive) segura o worker gevent único e o Render mata por
-    # WORKER TIMEOUT/OOM — derrubando TODA a API (incidente 2026-07-11).
-    #   keepalives*      -> detectam socket morto e abortam em ~1min
-    #   connect_timeout  -> evita connect pendurado
-    #   statement_timeout-> aborta query longa no servidor (30s)
-    tcp_kwargs = dict(
-        connect_timeout=10,
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=5,
-    )
-    conn = None
+# Timeouts defensivos de conexão. SEM eles, uma conexão/consulta travada (TCP
+# meio-aberto na latência cross-continente Oregon<->São Paulo, ou o SELECT do
+# keep-alive) segura o worker gevent único e o Render mata por WORKER
+# TIMEOUT/OOM — derrubando TODA a API (incidente 2026-07-11).
+#   keepalives*      -> detectam socket morto e abortam em ~1min
+#   connect_timeout  -> evita connect pendurado
+#   statement_timeout-> aborta query longa no servidor (30s)
+_DB_TCP_KWARGS = dict(
+    connect_timeout=10,
+    keepalives=1,
+    keepalives_idle=30,
+    keepalives_interval=10,
+    keepalives_count=5,
+)
+
+
+def connect_hardened(url):
+    """Abre uma conexão psycopg2 com os timeouts defensivos acima.
+
+    LEVANTA em falha total (igual ao psycopg2.connect puro) — use onde o
+    chamador espera uma conexão de verdade e trata a exceção (ex.: o
+    DB_CONN_FACTORY da gamificação). Para o caminho que devolve None em vez
+    de levantar, use get_db_connection()."""
     try:
-        conn = psycopg2.connect(url, options="-c statement_timeout=30000", **tcp_kwargs)
+        conn = psycopg2.connect(url, options="-c statement_timeout=30000", **_DB_TCP_KWARGS)
     except Exception as e_opt:
         # Alguns poolers (pgbouncer transaction mode) rejeitam 'options' no
         # startup — cai pra conexão sem statement_timeout, mas ainda com os
         # timeouts de TCP (que são o essencial contra o socket travado).
         logger.warning(f"⚠️ DB connect com statement_timeout falhou ({e_opt}); tentando sem.")
-        try:
-            conn = psycopg2.connect(url, **tcp_kwargs)
-        except Exception as e:
-            logger.error(f"❌ Conexão DB falhou: {e}", exc_info=True)
-            return None
+        conn = psycopg2.connect(url, **_DB_TCP_KWARGS)
     try:
         register_uuid(None, conn)  # garante suporte a UUID no cursor
     except Exception as e:
         logger.warning(f"⚠️ register_uuid falhou: {e}")
     return conn
+
+
+def get_db_connection():
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        logger.error("❌ DATABASE_URL não encontrada.")
+        return None
+    try:
+        return connect_hardened(url)
+    except Exception as e:
+        logger.error(f"❌ Conexão DB falhou: {e}", exc_info=True)
+        return None
 
 
 # --- Auth helper ---
