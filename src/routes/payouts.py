@@ -7,7 +7,7 @@ from psycopg2.extras import DictCursor
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 from ..utils.audit import log_admin_action
 from ..logic.payout_processor import process_automatic_payouts
-from ..providers.mp_payouts import get_payout_provider
+from ..providers.mp_payouts import get_payout_provider, payout_provider_mode, auto_pay_enabled
 
 logger = logging.getLogger(__name__)
 payouts_bp = Blueprint("payouts", __name__)
@@ -92,6 +92,25 @@ def _get_partner_pix_data(conn, *, partner_type: str, partner_id: str):
     if not row:
         return None, None
     return row.get("pix_key"), row.get("full_name")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/payouts/provider — modo do provedor de repasse
+# O front usa pra decidir se mostra o botão "Pagar via PIX (automático)".
+# ---------------------------------------------------------------------------
+
+@payouts_bp.route("/provider", methods=["GET", "OPTIONS"])
+def payout_provider_status():
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+    return jsonify({
+        "status": "success",
+        "mode": payout_provider_mode(),
+        "auto_pay_enabled": auto_pay_enabled(),
+    }), 200
 
 
 # ---------------------------------------------------------------------------
@@ -546,8 +565,18 @@ def auto_pay_payout(payout_id):
         if not _is_admin(user_type):
             return jsonify({"error": "Acesso negado"}), 403
 
+        # Trava de segurança: com o provider em modo teste (mock) o transfer_pix
+        # só simula sucesso. Deixar o auto-pay rodar nesse modo marcaria o
+        # repasse como 'pago' SEM o dinheiro sair. Só libera com provider real.
+        if not auto_pay_enabled():
+            return jsonify({
+                "error": "Pagamento automático não está ativo (provedor de repasse em modo teste). "
+                         "Use o pagamento manual assistido."
+            }), 409
+
         body = request.get_json(silent=True) or {}
         description = (body.get("description") or "Repasse Inksa").strip()
+        pix_key_type = (body.get("pix_key_type") or "").strip() or None
 
         conn = get_db_connection()
         if not conn:
@@ -584,6 +613,7 @@ def auto_pay_payout(payout_id):
                 amount_cents=amount_cents,
                 pix_key=pix_key,
                 description=f"{description} - {full_name or row['partner_id']}",
+                pix_key_type=pix_key_type,
             )
 
             if not result["ok"]:

@@ -9,14 +9,19 @@ class PayoutResult(TypedDict):
 
 class PayoutProvider(ABC):
     @abstractmethod
-    def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str) -> PayoutResult:
-        """Envia um PIX e retorna txid do provedor."""
+    def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str,
+                     pix_key_type: Optional[str] = None) -> PayoutResult:
+        """Envia um PIX e retorna txid do provedor.
+
+        pix_key_type: tipo da chave (CPF/CNPJ/EMAIL/PHONE/EVP). Se None, o
+        provider infere pelo formato da chave."""
         raise NotImplementedError()
 
 
 class MockPayoutProvider(PayoutProvider):
     """Provider de testes: não envia dinheiro, só simula sucesso."""
-    def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str) -> PayoutResult:
+    def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str,
+                     pix_key_type: Optional[str] = None) -> PayoutResult:
         # gera um TXID fake estável
         fake_txid = f"MOCK-{abs(hash((amount_cents, pix_key, description)))%10_000_000}"
         return {"ok": True, "txid": fake_txid, "raw": {"mode": "mock"}}

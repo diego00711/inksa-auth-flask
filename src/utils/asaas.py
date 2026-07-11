@@ -147,6 +147,33 @@ def create_checkout_payment(customer_id: str, value: float, external_reference: 
     }
 
 
+def create_transfer(value: float, pix_key: str, pix_key_type: str,
+                    description: str = "Repasse Inksa Delivery"):
+    """Transferência PIX de SAÍDA (repasse pro parceiro).
+
+    ⚠️ Só funciona com a conta Asaas APROVADA (saque/transferência fica
+    bloqueado durante a análise) e com SALDO disponível na conta.
+
+    pix_key_type: 'CPF' | 'CNPJ' | 'EMAIL' | 'PHONE' | 'EVP' (chave aleatória).
+    (ok, {transfer_id, status} | msg_de_erro).
+    """
+    body = {
+        "value": round(float(value), 2),
+        "operationType": "PIX",
+        "pixAddressKey": (pix_key or "").strip(),
+        "pixAddressKeyType": (pix_key_type or "").strip().upper(),
+        "description": (description or "Repasse Inksa Delivery")[:200],
+    }
+    ok, data = _request("POST", "/transfers", json_body=body)
+    if not ok:
+        return False, _error_message(data)
+    status = (data.get("status") or "").upper()
+    # FAILED/CANCELLED = o Asaas aceitou a chamada mas recusou a transferência
+    if status in ("FAILED", "CANCELLED"):
+        return False, _error_message(data) or f"transferência {status.lower()}"
+    return True, {"transfer_id": data.get("id"), "status": status}
+
+
 def get_payment(payment_id: str):
     return _request("GET", f"/payments/{payment_id}")
 

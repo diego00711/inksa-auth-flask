@@ -8,8 +8,21 @@ from .payout_provider import PayoutProvider, PayoutResult, MockPayoutProvider
 
 logger = logging.getLogger(__name__)
 
-MODE = os.environ.get("PAYOUT_PROVIDER", "mock").lower()   # mock | mercadopago
+MODE = os.environ.get("PAYOUT_PROVIDER", "mock").lower()   # mock | mercadopago | asaas
 MP_ACCESS_TOKEN = os.environ.get("MERCADO_PAGO_ACCESS_TOKEN", "")
+
+# Provedores que MOVEM dinheiro de verdade. O 'mock' apenas simula sucesso, por
+# isso o pagamento automático (auto-pay) fica bloqueado nele — senão daria pra
+# marcar um repasse como "pago" sem o PIX ter saído.
+REAL_PAYOUT_MODES = {"asaas", "mercadopago"}
+
+
+def payout_provider_mode() -> str:
+    return MODE
+
+
+def auto_pay_enabled() -> bool:
+    return MODE in REAL_PAYOUT_MODES
 
 class MercadoPagoPayoutProvider(PayoutProvider):
     """
@@ -23,7 +36,8 @@ class MercadoPagoPayoutProvider(PayoutProvider):
             raise RuntimeError("MERCADO_PAGO_ACCESS_TOKEN ausente para provider Mercado Pago.")
         self.sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
-    def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str) -> PayoutResult:
+    def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str,
+                     pix_key_type=None) -> PayoutResult:
         # IMPORTANTE: este trecho depende dos endpoints habilitados na sua conta.
         # Há contas que usam 'transfers/payouts' privados. Se não tiver, ficará indisponível.
         #
@@ -48,6 +62,10 @@ class MercadoPagoPayoutProvider(PayoutProvider):
 
 
 def get_payout_provider() -> PayoutProvider:
+    if MODE == "asaas":
+        from .asaas_payouts import AsaasPayoutProvider
+        logger.info("Usando provider Asaas para repasses.")
+        return AsaasPayoutProvider()
     if MODE == "mercadopago":
         logger.info("Usando provider Mercado Pago para repasses.")
         return MercadoPagoPayoutProvider()
