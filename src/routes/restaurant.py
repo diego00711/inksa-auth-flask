@@ -186,12 +186,19 @@ def handle_profile():
                 'address_state', 'address_zipcode', 'latitude', 'longitude', 'category',
                 'delivery_time', 'cuisine_type', 'description', 'is_open', 'delivery_fee',
                 'minimum_order', 'payout_frequency', 'bank_name', 'bank_agency',
-                'bank_account_number', 'bank_account_type', 'pix_key', 'mp_account_id', 'delivery_type',
+                'bank_account_number', 'bank_account_type', 'pix_key', 'pix_key_type',
+                'mp_account_id', 'delivery_type',
                 'opening_hours', 'hours_auto'
             ]
             updates = {k: v for k, v in data.items() if k in allowed_fields}
             if not updates:
                 return jsonify({"status": "error", "error": "No valid fields to update"}), 400
+
+            # Tipo da chave PIX: normaliza pro conjunto aceito pelo Asaas (a coluna
+            # tem CHECK). Valor inválido/vazio vira NULL (auto-pay cai na inferência).
+            if 'pix_key_type' in updates:
+                _kt = (updates['pix_key_type'] or '').strip().upper()
+                updates['pix_key_type'] = _kt if _kt in ('CPF', 'CNPJ', 'EMAIL', 'PHONE', 'EVP') else None
 
             # opening_hours é jsonb: adapta o dict para evitar erro de tipo
             if 'opening_hours' in updates and updates['opening_hours'] is not None:

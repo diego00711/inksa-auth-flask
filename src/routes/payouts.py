@@ -61,15 +61,15 @@ def allow_cors_preflight():
 # ---------------------------------------------------------------------------
 
 def _get_partner_pix_data(conn, *, partner_type: str, partner_id: str):
-    """Resolve chave PIX + nome do parceiro. As tabelas reais sao
-    restaurant_profiles / delivery_profiles -- nao existe tabela `restaurants`,
-    delivery_profiles nao tem `full_name` (tem first_name/last_name) e
-    restaurant_profiles nao tem `bank_pix_key`."""
+    """Resolve chave PIX + nome + tipo da chave do parceiro. As tabelas reais
+    sao restaurant_profiles / delivery_profiles -- nao existe tabela
+    `restaurants`, delivery_profiles nao tem `full_name` (tem
+    first_name/last_name) e restaurant_profiles nao tem `bank_pix_key`."""
     with conn.cursor(cursor_factory=DictCursor) as cur:
         if partner_type == "delivery":
             cur.execute(
                 """
-                SELECT pix_key,
+                SELECT pix_key, pix_key_type,
                        NULLIF(TRIM(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')), '') AS full_name
                 FROM delivery_profiles
                 WHERE id = %s OR user_id = %s
@@ -80,7 +80,7 @@ def _get_partner_pix_data(conn, *, partner_type: str, partner_id: str):
         else:
             cur.execute(
                 """
-                SELECT pix_key,
+                SELECT pix_key, pix_key_type,
                        COALESCE(trade_name, restaurant_name, business_name) AS full_name
                 FROM restaurant_profiles
                 WHERE id = %s OR user_id = %s
@@ -90,8 +90,8 @@ def _get_partner_pix_data(conn, *, partner_type: str, partner_id: str):
             )
         row = cur.fetchone()
     if not row:
-        return None, None
-    return row.get("pix_key"), row.get("full_name")
+        return None, None, None
+    return row.get("pix_key"), row.get("full_name"), row.get("pix_key_type")
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,8 @@ def list_payouts():
                            rp.trade_name, rp.restaurant_name, rp.business_name,
                            NULLIF(TRIM(COALESCE(dp.first_name, '') || ' ' || COALESCE(dp.last_name, '')), '')
                        ) AS partner_name,
-                       COALESCE(rp.pix_key, dp.pix_key) AS pix_key
+                       COALESCE(rp.pix_key, dp.pix_key) AS pix_key,
+                       COALESCE(rp.pix_key_type, dp.pix_key_type) AS pix_key_type
                 FROM payouts p
                 LEFT JOIN restaurant_profiles rp ON p.partner_type = 'restaurant' AND rp.id = p.partner_id
                 LEFT JOIN delivery_profiles  dp ON p.partner_type = 'delivery'   AND dp.id = p.partner_id
@@ -601,11 +602,15 @@ def auto_pay_payout(payout_id):
                     "error": f"Somente payouts 'pending' ou 'pending_transfer' podem ser pagos (atual: {row['status']})"
                 }), 400
 
-            pix_key, full_name = _get_partner_pix_data(
+            pix_key, full_name, stored_key_type = _get_partner_pix_data(
                 conn, partner_type=row["partner_type"], partner_id=row["partner_id"]
             )
             if not pix_key:
                 return jsonify({"error": "Parceiro sem PIX cadastrado"}), 400
+
+            # Precedência do tipo da chave: escolha manual no modal > tipo que o
+            # parceiro cadastrou > inferência pelo formato (dentro do provider).
+            effective_key_type = pix_key_type or stored_key_type
 
             amount_cents = int(round(float(row["total_net"]) * 100))
             provider = get_payout_provider()
@@ -613,7 +618,7 @@ def auto_pay_payout(payout_id):
                 amount_cents=amount_cents,
                 pix_key=pix_key,
                 description=f"{description} - {full_name or row['partner_id']}",
-                pix_key_type=pix_key_type,
+                pix_key_type=effective_key_type,
             )
 
             if not result["ok"]:

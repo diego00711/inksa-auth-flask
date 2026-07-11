@@ -111,13 +111,19 @@ def handle_profile():
                     'address_street', 'address_number', 'address_complement', 'address_neighborhood',
                     'address_city', 'address_state', 'address_zipcode', 'is_available',
                     'bank_name', 'bank_agency', 'bank_account_number', 'bank_account_type',
-                    'pix_key', 'payout_frequency', 'daily_goal',
+                    'pix_key', 'pix_key_type', 'payout_frequency', 'daily_goal',
                 ]
 
                 update_data = {
                     field: sanitize_text(data[field]) if isinstance(data.get(field), str) else data.get(field)
                     for field in allowed_fields if field in data
                 }
+
+                # Tipo da chave PIX: normaliza pro conjunto aceito pelo Asaas (a
+                # coluna tem CHECK); inválido/vazio vira NULL (auto-pay infere).
+                if 'pix_key_type' in update_data:
+                    _kt = (update_data['pix_key_type'] or '').strip().upper()
+                    update_data['pix_key_type'] = _kt if _kt in ('CPF', 'CNPJ', 'EMAIL', 'PHONE', 'EVP') else None
 
                 # Coluna birth_date é DATE no Postgres: string vazia ('') quebra
                 # com "invalid input syntax for type date" -- normaliza pra NULL.
