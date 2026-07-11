@@ -18,6 +18,32 @@ USER_TYPE_LABELS = {
 }
 
 
+def _resolve_user_type(user) -> str:
+    """Tipo de conta autoritativo.
+
+    Prioriza o user_metadata do Auth; se estiver ausente (ex.: admins criados
+    sem 'user_type' no metadata), cai pra public.users — a mesma fonte que o
+    resto do app usa. Evita devolver 'unknown' pro front (que aparecia embaixo
+    do nome na sidebar do admin)."""
+    meta = getattr(user, 'user_metadata', None) or {}
+    ut = (meta.get('user_type') or '').strip()
+    if ut:
+        return ut
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_type FROM public.users WHERE id = %s", (str(user.id),))
+                row = cur.fetchone()
+                if row and row[0]:
+                    return row[0]
+        except Exception:
+            logger.warning("Falha ao resolver user_type via public.users", exc_info=True)
+        finally:
+            conn.close()
+    return 'unknown'
+
+
 def _traduzir_erro_supabase(err_msg: str) -> str:
     """Converte mensagens de erro do Supabase (em inglês) para PT-BR amigável."""
     m = (err_msg or '').lower()
@@ -56,8 +82,7 @@ def login():
         if not user or not session:
             return jsonify({"status": "error", "error": "E-mail ou senha incorretos."}), 401
 
-        user_metadata = user.user_metadata or {}
-        user_type = user_metadata.get('user_type', 'unknown')
+        user_type = _resolve_user_type(user)
 
         # --- Bloqueia login cruzado entre apps ---
         if expected_user_type and user_type != expected_user_type:
@@ -115,8 +140,8 @@ def get_current_user():
         
         user = user_response.user
         user_metadata = user.user_metadata or {}
-        user_type = user_metadata.get('user_type', 'unknown')
-        
+        user_type = _resolve_user_type(user)
+
         logger.info(f"✅ Dados do usuário retornados: {user.id}")
         
         return jsonify({
@@ -162,9 +187,8 @@ def logout():
             
             if user:
                 user_id = user.id
-                user_metadata = user.user_metadata or {}
-                user_type = user_metadata.get('user_type', 'unknown')
-                
+                user_type = _resolve_user_type(user)
+
                 logger.info(f"🔓 Logout iniciado para user_id: {user_id}, tipo: {user_type}")
                 
                 # ✅ SE FOR RESTAURANTE, FECHA AUTOMATICAMENTE
