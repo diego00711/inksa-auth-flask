@@ -123,6 +123,10 @@ def create_checkout_payment(customer_id: str, value: float, external_reference: 
         "dueDate": date.today().isoformat(),
         "description": description[:200],
         "externalReference": str(external_reference),
+        # Desliga as notificações do Asaas (SMS/WhatsApp custam a "taxa de
+        # mensageria") — o PRÓPRIO app já avisa o cliente (push + tela de
+        # acompanhamento), então essas mensagens só gerariam custo.
+        "notificationDisabled": True,
     }
     if success_url:
         body["callback"] = {"successUrl": success_url, "autoRedirect": True}
