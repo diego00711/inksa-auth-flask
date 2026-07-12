@@ -84,25 +84,37 @@ def _run_payouts_job() -> None:
 # Expire pending payments job
 # ---------------------------------------------------------------------------
 
+# Só o backend: o /api/health faz um SELECT real, então este ping mantém o
+# Render acordado E o Supabase ativo de uma vez. Os fronts na Vercel NÃO
+# hibernam — pingar eles era inútil e virava ponto de trava do job.
 _KEEP_ALIVE_SERVICES = [
     "https://inksa-auth-flask-dev.onrender.com/api/health",
-    "https://clientes.inksadelivery.com.br",
-    "https://entregadores.inksadelivery.com.br",
-    "https://restaurante.inksadelivery.com.br",
-    "https://admin.inksadelivery.com.br",
 ]
 
 
 def _keep_alive_job() -> None:
-    """Pings all Inksa services every 10 min to prevent free-tier cold starts."""
+    """Ping do backend a cada 10 min pra evitar cold start (Render) + Supabase pausar.
+
+    Blindado contra travamento: o timeout do requests NÃO cobre resolução de DNS,
+    então uma trava de DNS pendurava o job (era a causa do "skipped: maximum
+    number of running instances reached"). O gevent.Timeout aborta o greenlet
+    inteiro em N segundos, aconteça o que acontecer."""
     import requests as _requests
+    try:
+        from gevent import Timeout as _GeventTimeout
+    except Exception:
+        _GeventTimeout = None
 
     extra = [u.strip() for u in os.environ.get("KEEP_ALIVE_EXTRA_URLS", "").split(",") if u.strip()]
     services = _KEEP_ALIVE_SERVICES + extra
 
     for url in services:
         try:
-            resp = _requests.get(url, timeout=8)
+            if _GeventTimeout is not None:
+                with _GeventTimeout(15):  # teto duro por URL — cobre até DNS travado
+                    resp = _requests.get(url, timeout=(5, 6))
+            else:
+                resp = _requests.get(url, timeout=(5, 6))
             logger.info("[KEEP-ALIVE] %s → %d", url, resp.status_code)
         except Exception as exc:
             logger.warning("[KEEP-ALIVE] %s → FAILED: %s", url, exc)
