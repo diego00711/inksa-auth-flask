@@ -668,3 +668,130 @@ def auto_pay_payout(payout_id):
     finally:
         if conn:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/payouts/cash-debts — entregadores devendo em dinheiro
+# ---------------------------------------------------------------------------
+
+@payouts_bp.route("/cash-debts", methods=["GET", "OPTIONS"])
+def list_cash_debts():
+    """Lista entregadores com dívida em dinheiro em aberto (cash_debt > 0).
+
+    Complementa o abatimento automático (que só resolve quem tem repasse online):
+    aqui o admin vê quem só faz dinheiro e precisa acertar na mão."""
+    conn = None
+    try:
+        _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+        if error:
+            return error
+        if not _is_admin(user_type):
+            return jsonify({"error": "Acesso negado"}), 403
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
+
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id,
+                       NULLIF(TRIM(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')), '') AS name,
+                       pix_key, pix_key_type,
+                       COALESCE(cash_debt, 0)          AS cash_debt,
+                       COALESCE(total_cash_received, 0) AS total_cash_received
+                FROM delivery_profiles
+                WHERE COALESCE(cash_debt, 0) > 0
+                ORDER BY cash_debt DESC
+                """
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        return jsonify({"status": "success", "items": rows, "total": len(rows)}), 200
+
+    except Exception:
+        logger.exception("Erro ao listar dívidas em dinheiro")
+        return jsonify({"error": "Erro interno ao listar dívidas"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/payouts/cash-debts/<delivery_id>/settle — registrar acerto
+# ---------------------------------------------------------------------------
+
+@payouts_bp.route("/cash-debts/<uuid:delivery_id>/settle", methods=["POST", "OPTIONS"])
+def settle_cash_debt(delivery_id):
+    """Registra que o entregador quitou (total ou parcial) a dívida em dinheiro:
+    reduz delivery_profiles.cash_debt (nunca abaixo de zero) e grava o histórico."""
+    conn = None
+    try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+        if error:
+            return error
+        if not _is_admin(user_type):
+            return jsonify({"error": "Acesso negado"}), 403
+
+        body = request.get_json(silent=True) or {}
+        note = ((body.get("note") or "").strip()[:500]) or None
+        try:
+            amount = round(float(body.get("amount")), 2)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Valor inválido"}), 400
+        if amount <= 0:
+            return jsonify({"error": "O valor do acerto deve ser maior que zero"}), 400
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
+
+        admin_ident = _get_admin_identifier(user_id, conn)
+
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                "SELECT COALESCE(cash_debt, 0) AS cash_debt FROM delivery_profiles WHERE id = %s FOR UPDATE",
+                (str(delivery_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Entregador não encontrado"}), 404
+            debt_before = float(row["cash_debt"] or 0)
+            if debt_before <= 0:
+                return jsonify({"error": "Este entregador não tem dívida em aberto"}), 400
+
+            applied = min(amount, debt_before)            # nunca deixa a dívida negativa
+            debt_after = round(debt_before - applied, 2)
+
+            cur.execute(
+                "UPDATE delivery_profiles SET cash_debt = %s, updated_at = NOW() WHERE id = %s",
+                (debt_after, str(delivery_id)),
+            )
+            cur.execute(
+                """
+                INSERT INTO cash_debt_settlements
+                    (delivery_id, amount, debt_before, debt_after, note, admin)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (str(delivery_id), applied, debt_before, debt_after, note, admin_ident),
+            )
+            conn.commit()
+
+        log_admin_action(
+            admin_ident,
+            "SettleCashDebt",
+            f"delivery={delivery_id} pago={applied:.2f} divida {debt_before:.2f}->{debt_after:.2f}",
+            request,
+        )
+        return jsonify({
+            "status": "success",
+            "data": {"applied": applied, "debt_before": debt_before, "debt_after": debt_after},
+        }), 200
+
+    except Exception:
+        logger.exception("Erro ao registrar acerto de dívida")
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno ao registrar acerto"}), 500
+    finally:
+        if conn:
+            conn.close()
