@@ -230,6 +230,7 @@ def list_payouts():
                 SELECT p.id, p.partner_type, p.partner_id,
                        p.period_start, p.period_end,
                        p.total_gross, p.commission_fee, p.total_net,
+                       COALESCE(p.cash_debt_deducted, 0) AS cash_debt_deducted,
                        p.status, p.payment_method, p.payment_ref,
                        p.created_at, p.updated_at,
                        COALESCE(

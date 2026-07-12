@@ -198,9 +198,48 @@ def _calculate_amounts(orders, partner_type: str, commission_rate: Decimal):
     return float(total_gross), float(commission_fee), float(total_net), per_order
 
 
+def _apply_cash_debt_netting(conn, partner_id, net_gross: float):
+    """Abate a dívida em dinheiro do entregador do valor a repassar.
+
+    O entregador recolhe os pedidos pagos em dinheiro EM ESPÉCIE e fica devendo
+    à plataforma a parte dela (delivery_profiles.cash_debt = comida do
+    restaurante + comissão + margem do frete). Aqui a gente desconta essa
+    dívida do repasse dos pedidos ONLINE dele: paga por PIX só a diferença. Se a
+    dívida for MAIOR que o repasse, zera o repasse e o resto da dívida continua
+    em cash_debt pra ser abatido no próximo ciclo.
+
+    Retorna (net_a_pagar, abatido). Reduz cash_debt no banco (mesma transação —
+    respeita o dry_run/commit do process_automatic_payouts)."""
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            "SELECT COALESCE(cash_debt, 0) AS cash_debt FROM delivery_profiles WHERE id = %s FOR UPDATE",
+            (partner_id,),
+        )
+        row = cur.fetchone()
+        debt = Decimal(str((row or {}).get("cash_debt") or 0))
+        if debt <= 0:
+            return float(net_gross), 0.0
+
+        net_dec = Decimal(str(net_gross))
+        deducted = min(net_dec, debt)
+        remaining = (debt - deducted).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        cur.execute(
+            "UPDATE delivery_profiles SET cash_debt = %s, updated_at = NOW() WHERE id = %s",
+            (float(remaining), partner_id),
+        )
+        net_after = float((net_dec - deducted).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        return net_after, float(deducted.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 def _insert_payout(conn, partner_type, partner_id, period_start, period_end,
-                   total_gross, commission_fee, total_net, per_order):
-    """Inserts payouts + payout_items rows, updates orders. Returns payout summary dict."""
+                   total_gross, commission_fee, total_net, per_order,
+                   cash_debt_deducted: float = 0.0):
+    """Inserts payouts + payout_items rows, updates orders. Returns payout summary dict.
+
+    total_net = valor a PAGAR por PIX (já líquido do abatimento da dívida em
+    dinheiro, quando houver). cash_debt_deducted = quanto da dívida foi abatido
+    neste repasse. Se o abatimento zerou o repasse, o payout nasce já 'paid'
+    (nada a transferir), senão 'pending_transfer' como sempre."""
     payout_id = str(uuidlib.uuid4())
     payout_col = "restaurant_payout_id" if partner_type == "restaurant" else "delivery_payout_id"
     order_ids = [item["order_id"] for item in per_order]
@@ -210,18 +249,26 @@ def _insert_payout(conn, partner_type, partner_id, period_start, period_end,
         # `amount` é NOT NULL sem default no schema (coluna legada) -- precisa
         # ser preenchida senao o INSERT falha e nenhum repasse e criado.
         # Usamos o valor liquido (o que efetivamente sera pago).
+        # Se o abatimento da dívida em dinheiro zerou o valor a pagar, o repasse
+        # nasce já quitado (nada a transferir por PIX). Senão segue pro fluxo
+        # normal de transferência.
+        fully_offset = total_net <= 0 and cash_debt_deducted > 0
+        status = 'paid' if fully_offset else 'pending_transfer'
+        pay_method = 'abatimento_dinheiro' if fully_offset else None
+        pay_ref = 'Abatido integralmente da dívida em dinheiro' if fully_offset else None
         cur.execute(
             """
             INSERT INTO payouts (
                 id, partner_id, partner_type,
-                amount, total_gross, commission_fee, total_net,
+                amount, total_gross, commission_fee, total_net, cash_debt_deducted,
                 period_start, period_end,
-                status, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending_transfer', NOW(), NOW())
+                status, payment_method, payment_ref, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             """,
             (payout_id, partner_id, partner_type,
-             total_net, total_gross, commission_fee, total_net,
-             period_start, period_end),
+             total_net, total_gross, commission_fee, total_net, cash_debt_deducted,
+             period_start, period_end,
+             status, pay_method, pay_ref),
         )
 
         # 2. Insert payout_items
@@ -272,10 +319,11 @@ def _insert_payout(conn, partner_type, partner_id, period_start, period_end,
         "total_gross": total_gross,
         "commission_fee": commission_fee,
         "total_net": total_net,
+        "cash_debt_deducted": cash_debt_deducted,
         "orders_count": len(order_ids),
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
-        "status": "pending_transfer",
+        "status": status,
     }
 
 
@@ -358,14 +406,23 @@ def process_automatic_payouts(
                 if net <= 0:
                     continue
 
+                # Entregador: abate a dívida em dinheiro (pedidos que ele
+                # recolheu em espécie) do repasse online — paga por PIX só a
+                # diferença. Restaurante não tem esse abatimento.
+                deducted = 0.0
+                net_to_pay = net
+                if ptype == "delivery":
+                    net_to_pay, deducted = _apply_cash_debt_netting(conn, pid, net)
+
                 record = _insert_payout(
                     conn, ptype, pid, period_start, period_end,
-                    gross, comm, net, per_order,
+                    gross, comm, net_to_pay, per_order,
+                    cash_debt_deducted=deducted,
                 )
                 created.append(record)
                 logger.info(
-                    "    payout %s: %s %s | net=%.2f orders=%d",
-                    record["payout_id"], ptype, pid, net, len(per_order),
+                    "    payout %s: %s %s | bruto=%.2f abatido=%.2f a_pagar=%.2f orders=%d",
+                    record["payout_id"], ptype, pid, net, deducted, net_to_pay, len(per_order),
                 )
 
     if dry_run:
