@@ -1,7 +1,9 @@
+import os
 import traceback
 from datetime import datetime, timedelta
 from functools import wraps
 
+import requests
 import psycopg2.extras
 from flask import Blueprint, request, jsonify
 from flask_cors import CORS
@@ -675,18 +677,46 @@ def admin_delete_user(user_id):
             return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
         email = row["email"]
 
-        if not supabase_admin:
+        # Remove do Supabase Auth via HTTP DIRETO, mandando a service_role key
+        # EXPLICITAMENTE no header. NÃO usa supabase_admin.auth.admin.delete_user:
+        # o cliente supabase-py reaproveita a sessão interna e acabava enviando o
+        # token do último usuário logado (expirado/sem privilégio), então o GoTrue
+        # respondia "not_admin" / "bad_jwt" e a exclusão falhava (incidente
+        # 2026-07-14). Com a service_role no header, nunca há poluição de sessão.
+        service_key = (
+            os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+            or os.environ.get("SUPABASE_SERVICE_KEY")
+        )
+        base_url = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+        if not service_key or not base_url:
             return jsonify({"status": "error", "message": "Serviço de autenticação indisponível"}), 503
 
-        # Remove do Supabase Auth (dispara cascade nas tabelas de perfil via FK)
-        # Usa o cliente admin dedicado (service_role puro) — NÃO o `supabase`
-        # global, cuja sessão pode estar poluída pelo sign_in de algum usuário.
+        # Dispara cascade nas tabelas de perfil via FK (client/restaurant/delivery).
         try:
-            supabase_admin.auth.admin.delete_user(str(user_id))
-        except Exception as auth_err:
-            # Pedidos/repasses vinculados (orders, cash_payment_records) bloqueiam
-            # a exclusão de propósito — são registros financeiros/históricos.
-            if "foreign key constraint" in str(auth_err).lower():
+            resp = requests.delete(
+                f"{base_url}/auth/v1/admin/users/{user_id}",
+                headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+                timeout=10,
+            )
+        except requests.RequestException as auth_err:
+            traceback.print_exc()
+            return jsonify({
+                "status": "error",
+                "message": "Erro ao contatar o serviço de autenticação.",
+                "detail": str(auth_err),
+            }), 502
+
+        if resp.status_code not in (200, 204):
+            body = resp.text or ""
+            low = body.lower()
+            # Pedidos/registros financeiros vinculados (ex.: cash_payment_records
+            # com ON DELETE NO ACTION) bloqueiam de propósito. O GoTrue devolve
+            # 500 "Database error deleting user" nesses casos.
+            if (
+                "foreign key" in low
+                or "constraint" in low
+                or "database error deleting user" in low
+            ):
                 return jsonify({
                     "status": "error",
                     "message": (
@@ -695,7 +725,11 @@ def admin_delete_user(user_id):
                         "de excluir para preservar o histórico."
                     ),
                 }), 409
-            raise
+            return jsonify({
+                "status": "error",
+                "message": "Erro ao excluir usuário no serviço de autenticação.",
+                "detail": f"HTTP {resp.status_code}: {body[:300]}",
+            }), 502
 
         # Garante limpeza da linha em public.users caso não haja cascade nela
         try:
