@@ -1,7 +1,9 @@
 # src/routes/auth.py - VERSÃO COM LOGOUT, ME, FECHAMENTO AUTOMÁTICO, REGISTER E FORGOT-PASSWORD
 
+import os
 import logging
 import re
+import requests
 from flask import Blueprint, request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from src.extensions import limiter
@@ -99,6 +101,10 @@ def login():
             "data": {
                 "message": "Login realizado com sucesso",
                 "token": session.access_token,
+                # Sem o refresh_token o front não tem como renovar a sessão e o
+                # usuário caía no login quando o access_token expirava (~1h).
+                # Usado por POST /api/auth/refresh.
+                "refresh_token": session.refresh_token,
                 "user": {
                     "id": user.id,
                     "email": user.email,
@@ -109,6 +115,53 @@ def login():
     except Exception as e:
         logger.error(f"Erro no login: {str(e)}", exc_info=True)
         return jsonify({"status": "error", "error": "Erro interno ao entrar. Tente novamente em instantes."}), 500
+
+
+@auth_bp.route('/refresh', methods=['POST', 'OPTIONS'])
+@limiter.limit("60 per minute")
+def refresh():
+    """Renova a sessão a partir do refresh_token (usado pelos 4 apps).
+
+    Fala com o GoTrue por HTTP direto em vez de usar o cliente supabase-py: ele
+    reaproveita a sessão interna e acaba mandando o token do último usuário
+    logado (mesmo problema que quebrava o delete_user do admin).
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    data = request.get_json(silent=True) or {}
+    refresh_token = data.get('refresh_token')
+    if not refresh_token:
+        return jsonify({"status": "error", "error": "refresh_token é obrigatório"}), 400
+
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+    base = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+    if not key or not base:
+        return jsonify({"status": "error", "error": "Serviço de autenticação indisponível"}), 503
+
+    try:
+        resp = requests.post(
+            f"{base}/auth/v1/token?grant_type=refresh_token",
+            json={"refresh_token": refresh_token},
+            headers={"apikey": key, "Content-Type": "application/json"},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        logger.warning("refresh: falha de rede: %s", e)
+        return jsonify({"status": "error", "error": "Erro ao contatar o serviço de autenticação."}), 502
+
+    if resp.status_code != 200:
+        # refresh_token inválido/revogado -> o front manda pro login
+        return jsonify({"status": "error", "error": "Sessão expirada. Faça login novamente."}), 401
+
+    body = resp.json() or {}
+    return jsonify({
+        "status": "success",
+        "data": {
+            "token": body.get("access_token"),
+            "refresh_token": body.get("refresh_token"),
+        }
+    }), 200
 
 
 # ✅ NOVO ENDPOINT: RETORNA DADOS DO USUÁRIO AUTENTICADO (INCLUI EMAIL)

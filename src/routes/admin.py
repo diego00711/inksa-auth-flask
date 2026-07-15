@@ -1,8 +1,10 @@
 # src/routes/admin.py
+import os
 import re
 import logging
 from functools import wraps
 
+import requests
 from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 import psycopg2
@@ -105,6 +107,18 @@ def _fetchall(conn, sql, params=None):
         except Exception: pass
         return []
 
+def _HOJE_SP(coluna):
+    """Predicado SQL: a coluna (timestamptz) cai no dia de HOJE em São Paulo.
+
+    O banco roda em UTC, então CURRENT_DATE vira o dia seguinte às 21h de SP —
+    bem no pico do delivery. Isso zerava os contadores de "hoje" no meio do
+    movimento (crítico no painel de TV, que fica aberto direto).
+    """
+    tz = "America/Sao_Paulo"
+    return (f"({coluna} AT TIME ZONE '{tz}')::date "
+            f"= (now() AT TIME ZONE '{tz}')::date")
+
+
 def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     # leitura apenas -> autocommit evita “aborted transaction”
     try: conn.autocommit = True
@@ -137,9 +151,9 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     payload["kpis"]["averageTicket"] = _safe_float(_fetchval(
         conn, f"SELECT COALESCE(AVG(total_amount),0) FROM {ORDERS_TABLE} WHERE status IN ('delivered','completed')", default=0.0))
     payload["kpis"]["ordersToday"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {ORDERS_TABLE} WHERE created_at::date = CURRENT_DATE", default=0))
+        conn, f"SELECT COUNT(*)::int FROM {ORDERS_TABLE} WHERE {_HOJE_SP('created_at')}", default=0))
     payload["kpis"]["newClientsToday"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {CLIENTS_TABLE} WHERE created_at::date = CURRENT_DATE", default=0))
+        conn, f"SELECT COUNT(*)::int FROM {CLIENTS_TABLE} WHERE {_HOJE_SP('created_at')}", default=0))
 
     row = _fetchrow(conn, f"""
         SELECT
@@ -177,20 +191,24 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
                    COALESCE(SUM(o.total_amount),0) AS daily_revenue
               FROM generate_series(%s::date, %s::date, '1 day') AS d
          LEFT JOIN {ORDERS_TABLE} o
-                ON o.created_at::date = d::date AND o.status IN ('delivered','completed')
+                ON (o.created_at AT TIME ZONE 'America/Sao_Paulo')::date = d::date
+               AND o.status IN ('delivered','completed')
           GROUP BY d ORDER BY d
         """, (date_from, date_to))
     else:
         chart_rows = _fetchall(conn, f"""
-            WITH days AS (
-              SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
+            WITH hoje AS (
+              SELECT (now() AT TIME ZONE 'America/Sao_Paulo')::date AS d0
+            ), days AS (
+              SELECT generate_series(d0 - INTERVAL '6 day', d0, INTERVAL '1 day')::date AS d
+                FROM hoje
             )
             SELECT to_char(d,'DD/MM') AS formatted_date,
                    COALESCE((
                      SELECT SUM(o.total_amount)
                        FROM {ORDERS_TABLE} o
                       WHERE o.status IN ('delivered','completed')
-                        AND o.created_at::date = d
+                        AND (o.created_at AT TIME ZONE 'America/Sao_Paulo')::date = d
                    ),0) AS daily_revenue
               FROM days ORDER BY d
         """)
@@ -230,11 +248,15 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
 
     # Crescimento clientes
     payload["clientsGrowth"] = _fetchall(conn, f"""
-        WITH days AS (
-          SELECT generate_series(CURRENT_DATE - INTERVAL '6 day', CURRENT_DATE, INTERVAL '1 day')::date AS d
+        WITH hoje AS (
+          SELECT (now() AT TIME ZONE 'America/Sao_Paulo')::date AS d0
+        ), days AS (
+          SELECT generate_series(d0 - INTERVAL '6 day', d0, INTERVAL '1 day')::date AS d
+            FROM hoje
         )
         SELECT to_char(d,'DD/MM') AS formatted_date,
-               COALESCE((SELECT COUNT(*) FROM {CLIENTS_TABLE} c WHERE c.created_at::date <= d),0)::int AS total_clients
+               COALESCE((SELECT COUNT(*) FROM {CLIENTS_TABLE} c
+                          WHERE (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= d),0)::int AS total_clients
           FROM days ORDER BY d
     """)
 
@@ -272,6 +294,10 @@ def admin_login():
             "status": "success",
             "message": "Login de administrador realizado",
             "access_token": response.session.access_token,
+            # Sem o refresh_token o front não consegue renovar a sessão e o
+            # admin caía no login quando o access_token expirava (~1h). Isso
+            # inviabilizava o painel de TV, que fica aberto 24/7.
+            "refresh_token": response.session.refresh_token,
             "data": {"user": {"id": user.id, "email": user.email, "user_type": db_user["user_type"]}},
         }), 200
     except AuthApiError:
@@ -279,6 +305,10 @@ def admin_login():
     except Exception as e:
         logger.exception("Erro no admin_login")
         return jsonify({"status": "error", "message": f"Erro inesperado: {str(e)}"}), 500
+
+
+# A renovação de sessão vive em POST /api/auth/refresh (auth.py), que é o login
+# usado pelos 4 apps — não duplicar aqui.
 
 @admin_bp.route("/logout", methods=["POST"])
 @admin_required
@@ -439,6 +469,68 @@ def admin_dashboard():
         return jsonify({"kpis":{}, "chartData":[], "recentOrders":[], "ordersStatus":{}, "clientsGrowth":[]}), 200
     finally:
         conn.close()
+
+@admin_bp.route("/tv/stats", methods=["GET", "OPTIONS"])
+@admin_required
+def admin_tv_stats():
+    """Painel de TV do escritório (rota /tv do admin).
+
+    Reaproveita o _build_dashboard_payload (KPIs, status e feed) e complementa
+    com os recortes que só fazem sentido num painel ao vivo: faturamento de
+    HOJE (o payload padrão é all-time) e quem está online AGORA.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "DB connection error"}), 500
+    try:
+        base = _build_dashboard_payload(conn, limit=8)
+        k = base.get("kpis", {})
+
+        today = _fetchrow(conn, f"""
+            SELECT COALESCE(SUM(total_amount),0)        AS revenue,
+                   COALESCE(SUM(comissao_plataforma),0) AS commission,
+                   COALESCE(SUM(margem_frete),0)        AS margin
+              FROM {ORDERS_TABLE}
+             WHERE {_HOJE_SP('created_at')}
+               AND status IN ('delivered','completed')
+        """) or {}
+        revenue_today = _safe_float(today.get("revenue"))
+        platform_today = round(
+            _safe_float(today.get("commission")) + _safe_float(today.get("margin")), 2
+        )
+
+        deliverymen_online = _safe_int(_fetchval(
+            conn,
+            f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} "
+            f"WHERE is_available IS TRUE AND active IS TRUE",
+            default=0))
+        restaurants_open = _safe_int(_fetchval(
+            conn,
+            f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} "
+            f"WHERE is_open IS TRUE AND active IS TRUE AND approved IS TRUE",
+            default=0))
+
+        return jsonify({"status": "success", "data": {
+            "ordersToday":          k.get("ordersToday", 0),
+            "ordersInProgress":     k.get("ordersInProgress", 0),
+            "revenueToday":         revenue_today,
+            "platformRevenueToday": platform_today,
+            "revenueTotal":         k.get("totalRevenue", 0.0),
+            "platformRevenueTotal": k.get("platformRevenue", 0.0),
+            "deliverymenOnline":    deliverymen_online,
+            "restaurantsOpen":      restaurants_open,
+            "ordersStatus":         base.get("ordersStatus", {}),
+            "recentOrders":         base.get("recentOrders", []),
+        }}), 200
+    except Exception:
+        logger.exception("Erro no /api/admin/tv/stats")
+        return jsonify({"status": "error", "message": "Erro ao montar o painel"}), 500
+    finally:
+        conn.close()
+
 
 @admin_bp.route("/metrics", methods=["GET", "OPTIONS"])
 @admin_required
