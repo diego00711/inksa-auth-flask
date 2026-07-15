@@ -164,8 +164,10 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     payload["kpis"]["ordersInProgress"] = _safe_int(row.get("in_progress"))
     payload["kpis"]["ordersCanceled"]   = _safe_int(row.get("canceled"))
 
+    # IS NOT TRUE (nao IS FALSE): as colunas aceitam NULL, e um restaurante com
+    # approved NULL esta esperando aprovacao igual aos outros.
     payload["kpis"]["restaurantsPending"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} WHERE (approved IS FALSE) OR (status='pending')", default=0))
+        conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} WHERE (approved IS NOT TRUE) OR (status='pending')", default=0))
     payload["kpis"]["activeDeliverymen"] = _safe_int(_fetchval(
         conn, f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} WHERE active IS TRUE", default=0))
 
@@ -513,6 +515,19 @@ def admin_tv_stats():
             f"WHERE is_open IS TRUE AND active IS TRUE AND approved IS TRUE",
             default=0))
 
+        # Placar da base. Antes do lancamento e o unico numero que se move: e o
+        # retorno das campanhas de pre-cadastro que aparece aqui, nao em pedidos.
+        base_row = _fetchrow(conn, f"""
+            SELECT
+              (SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE})   AS rest_total,
+              (SELECT COUNT(*)::int FROM {DELIVERY_TABLE})      AS deliv_total,
+              (SELECT COUNT(*)::int FROM {CLIENTS_TABLE})       AS cli_total,
+              (SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE}
+                WHERE {_HOJE_SP('created_at')})                 AS rest_hoje,
+              (SELECT COUNT(*)::int FROM {DELIVERY_TABLE}
+                WHERE {_HOJE_SP('created_at')})                 AS deliv_hoje
+        """) or {}
+
         return jsonify({"status": "success", "data": {
             "ordersToday":          k.get("ordersToday", 0),
             "ordersInProgress":     k.get("ordersInProgress", 0),
@@ -522,6 +537,17 @@ def admin_tv_stats():
             "platformRevenueTotal": k.get("platformRevenue", 0.0),
             "deliverymenOnline":    deliverymen_online,
             "restaurantsOpen":      restaurants_open,
+
+            # Base cadastrada (o placar do pre-lancamento)
+            "restaurantsTotal":     _safe_int(base_row.get("rest_total")),
+            "restaurantsPending":   k.get("restaurantsPending", 0),
+            "restaurantsToday":     _safe_int(base_row.get("rest_hoje")),
+            "deliverymenTotal":     _safe_int(base_row.get("deliv_total")),
+            "deliverymenToday":     _safe_int(base_row.get("deliv_hoje")),
+            "clientsTotal":         _safe_int(base_row.get("cli_total")),
+            "clientsToday":         k.get("newClientsToday", 0),
+
+            "chartData":            base.get("chartData", []),
             "ordersStatus":         base.get("ordersStatus", {}),
             "recentOrders":         base.get("recentOrders", []),
         }}), 200
