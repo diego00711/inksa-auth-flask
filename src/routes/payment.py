@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Helpers de cálculo (admin-configuráveis via platform_settings)
 from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
-from ..utils.helpers import get_user_id_from_token
+from ..utils.helpers import get_user_id_from_token, supabase_admin
 from ..utils.coupons import evaluate_coupon, consume_coupon
 from ..utils import asaas
 from ..utils.gateway import payment_provider
@@ -25,24 +25,17 @@ from src.extensions import limiter
 # Criação do Blueprint
 mp_payment_bp = Blueprint('mp_payment_bp', __name__)
 
-# Inicialização do Cliente Supabase
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-# ✅ Tentar ambos os nomes possíveis da variável
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
-supabase_client = None
-
-if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    logging.error("ERRO: SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurados.")
-    logging.error(f"SUPABASE_URL presente: {bool(SUPABASE_URL)}")
-    logging.error(f"SUPABASE_SERVICE_ROLE_KEY presente: {bool(os.environ.get('SUPABASE_SERVICE_ROLE_KEY'))}")
-    logging.error(f"SUPABASE_SERVICE_KEY presente: {bool(os.environ.get('SUPABASE_SERVICE_KEY'))}")
-else:
-    try:
-        supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        logging.info("Cliente Supabase (payment.py) inicializado com sucesso.")
-        logging.info(f"🔑 Usando chave que começa com: {SUPABASE_SERVICE_KEY[:20]}...")
-    except Exception as e:
-        logging.error(f"ERRO ao inicializar cliente Supabase: {e}")
+# Cliente Supabase: reusa o supabase_admin compartilhado (helpers), NAO cria um
+# proprio. Antes, este arquivo montava seu proprio cliente lendo
+# SUPABASE_SERVICE_ROLE_KEY *antes* de SUPABASE_SERVICE_KEY. No Render essas duas
+# envs divergem: SUPABASE_SERVICE_KEY tem a service_role correta (o resto do
+# backend usa e funciona), mas SUPABASE_SERVICE_ROLE_KEY tem uma chave que NAO
+# bypassa RLS. Resultado: o INSERT do pedido batia em "violates row-level
+# security policy for table orders" (500) so aqui, no fluxo de pagamento,
+# enquanto todo o resto funcionava. Usar o mesmo cliente elimina a divergencia.
+supabase_client = supabase_admin
+if supabase_client is None:
+    logging.error("ERRO: supabase_admin não inicializado (ver SUPABASE_SERVICE_KEY em helpers).")
 
 
 def verify_mp_signature(req, secret):
