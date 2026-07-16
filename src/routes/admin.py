@@ -447,6 +447,85 @@ def set_restaurant_approval(restaurant_id):
     finally:
         conn.close()
 
+@admin_bp.route("/restaurants/<uuid:restaurant_id>", methods=["PUT"])
+@admin_required
+def update_restaurant(restaurant_id):
+    """Edita os dados do restaurante pelo admin (modal 'Editar Restaurante').
+
+    Esta rota nao existia: o front chamava PUT /api/admin/restaurants/<id> e
+    tomava 404 ('Endpoint nao encontrado'). So havia GET e /approve.
+
+    Allowlist obrigatoria: o front manda o objeto inteiro do GET (id, user_id,
+    latitude, created_at, average_rating de JOIN...) — escrever isso quebraria.
+    Mapeia tambem address_postal_code (nome do form) -> address_zipcode (coluna
+    real), senao o CEP nao salvaria mesmo com a rota existindo.
+    """
+    data = request.get_json(silent=True) or {}
+
+    # front -> coluna real. So o que esta aqui pode ser gravado.
+    CAMPOS = {
+        "restaurant_name": "restaurant_name",
+        "cnpj": "cnpj",
+        "phone": "phone",
+        "address_postal_code": "address_zipcode",
+        "address_zipcode": "address_zipcode",
+        "address_city": "address_city",
+        "address_street": "address_street",
+        "address_number": "address_number",
+        "address_neighborhood": "address_neighborhood",
+        "address_complement": "address_complement",
+        "address_state": "address_state",
+    }
+
+    sets, params = [], []
+    for campo, coluna in CAMPOS.items():
+        if campo in data and coluna not in [s.split(" =")[0] for s in sets]:
+            sets.append(f"{coluna} = %s")
+            v = data.get(campo)
+            params.append(v.strip() if isinstance(v, str) else v)
+
+    if not sets:
+        return jsonify({"status": "error", "message": "Nenhum campo editável enviado"}), 400
+
+    sets.append("updated_at = NOW()")
+    params.append(str(restaurant_id))
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                f"""UPDATE restaurant_profiles
+                       SET {", ".join(sets)}
+                     WHERE id = %s
+                 RETURNING id, restaurant_name""",
+                tuple(params),
+            )
+            row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return jsonify({"status": "error", "message": "Restaurante não encontrado"}), 404
+        conn.commit()
+        try:
+            log_admin_action_auto(
+                "UpdateRestaurant",
+                f"Editou o restaurante {row['restaurant_name']} ({restaurant_id})",
+            )
+        except Exception:
+            pass
+        return jsonify({"status": "success", "data": dict(row)}), 200
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao atualizar restaurante")
+        return jsonify({"status": "error", "message": "Erro interno ao atualizar restaurante."}), 500
+    finally:
+        conn.close()
+
+
 # --------- Dashboard + rotas de compat ---------
 def _is_admin(user_type: str) -> bool:
     return user_type == "admin"
