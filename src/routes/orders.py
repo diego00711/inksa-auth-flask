@@ -836,6 +836,80 @@ def confirm_delivery_return(order_id):
         if conn:
             conn.close()
 
+@orders_bp.route('/<uuid:order_id>', methods=['GET'])
+@limiter.limit("60 per minute")
+def get_order(order_id):
+    """Detalhe de UM pedido, escopado a quem tem direito de ver.
+
+    Esta rota nao existia: so havia DELETE neste caminho, entao a tela de
+    acompanhamento do cliente (GET /api/orders/<id>) tomava 405 e mostrava
+    "Pedido nao encontrado" em TODO pedido.
+
+    O lat/lng/endereco do restaurante vem do JOIN (nao existem em orders) —
+    e o que desenha o mapa. pickup_code/delivery_code sao removidos: a tela
+    nao usa e eles valem como segredo de entrega.
+    """
+    conn = None
+    try:
+        user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
+
+        query = """
+            SELECT o.*,
+                   rp.restaurant_name,
+                   rp.logo_url  AS restaurant_logo,
+                   rp.phone     AS restaurant_phone,
+                   rp.latitude  AS restaurant_latitude,
+                   rp.longitude AS restaurant_longitude,
+                   NULLIF(TRIM(CONCAT_WS(', ',
+                     NULLIF(CONCAT_WS(' ', rp.address_street, rp.address_number), ''),
+                     rp.address_neighborhood,
+                     rp.address_city)), '') AS restaurant_address
+              FROM orders o
+              LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+             WHERE o.id = %s
+        """
+        params = [str(order_id)]
+
+        # Escopo por dono — sem isto qualquer logado leria o pedido de qualquer
+        # outro so trocando o id na URL.
+        if user_type == 'client':
+            query += " AND o.client_id = (SELECT id FROM client_profiles WHERE user_id = %s)"
+            params.append(user_auth_id)
+        elif user_type == 'restaurant':
+            query += " AND o.restaurant_id = (SELECT id FROM restaurant_profiles WHERE user_id = %s)"
+            params.append(user_auth_id)
+        elif user_type == 'delivery':
+            query += " AND o.delivery_id = (SELECT id FROM delivery_profiles WHERE user_id = %s)"
+            params.append(user_auth_id)
+        elif user_type != 'admin':
+            return jsonify({"error": "Não autorizado"}), 403
+
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(query, tuple(params))
+            row = cur.fetchone()
+
+        if not row:
+            return jsonify({"error": "Pedido não encontrado"}), 404
+
+        order = dict(row)
+        order.pop('pickup_code', None)
+        order.pop('delivery_code', None)
+        return jsonify({"status": "success", "data": order}), 200
+
+    except Exception as e:
+        logger.error(f"Erro em get_order: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 @orders_bp.route('/valid-statuses', methods=['GET'])
 def get_valid_statuses():
     logger.info("=== INÍCIO get_valid_statuses ===")
