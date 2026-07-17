@@ -51,7 +51,14 @@ def _period_bounds(cycle_type: str, reference_date: date = None):
     today = reference_date or date.today()
     now = datetime.now(timezone.utc)
     if cycle_type == "monthly":
-        start = datetime(today.year, today.month, 1, 0, 0, 0, tzinfo=timezone.utc)
+        # O ciclo mensal roda no dia 1 e paga o MES ANTERIOR inteiro. Antes
+        # cobria do dia 1 do mes CORRENTE ate agora — ou seja, so as primeiras
+        # horas do proprio dia 1: pedidos do meio do mes nunca entravam em
+        # repasse mensal nenhum (ficavam orfaos com payout_status=pending).
+        first_this = datetime(today.year, today.month, 1, 0, 0, 0, tzinfo=timezone.utc)
+        last_prev = first_this - timedelta(days=1)
+        start = datetime(last_prev.year, last_prev.month, 1, 0, 0, 0, tzinfo=timezone.utc)
+        return start, first_this
     elif cycle_type == "bi-weekly":
         start = (now - timedelta(days=14)).replace(microsecond=0)
     else:  # weekly
@@ -60,13 +67,17 @@ def _period_bounds(cycle_type: str, reference_date: date = None):
 
 
 def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
-    """Returns list of partner IDs whose payout_cycle matches *cycle_type*.
+    """Returns list of partner IDs whose CHOSEN frequency matches *cycle_type*.
 
-    Ambas as tabelas de perfil (restaurant_profiles / delivery_profiles) tem
-    as colunas `active` e `payout_cycle`. Antes isto apontava para uma tabela
-    `restaurants` inexistente e para uma coluna `is_active` que
-    restaurant_profiles nao tem -- entao repasse de restaurante nunca era
-    gerado (a query dava erro, caia no except e retornava lista vazia).
+    A frequencia que vale e a que o parceiro escolheu NO APP, salva em
+    `payout_frequency` ('weekly' | 'biweekly' | 'monthly'; NULL = nao escolheu
+    -> default 'weekly'). Antes isto lia `payout_cycle`, uma coluna legada que
+    nenhum app escreve e que nasce 'monthly' por default — a escolha do
+    parceiro era simplesmente ignorada (Gabriel escolheu semanal e o motor o
+    tratava como mensal).
+
+    Normalizacao: os apps salvam 'biweekly' (sem hifen); o motor usa
+    'bi-weekly'. Valores desconhecidos caem no default 'weekly'.
     """
     table = "restaurant_profiles" if partner_type == "restaurant" else "delivery_profiles"
     try:
@@ -75,17 +86,24 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
                 f"""
                 SELECT id AS partner_id
                 FROM {table}
-                WHERE COALESCE(payout_cycle, 'weekly') = %s
+                WHERE CASE lower(trim(COALESCE(payout_frequency, 'weekly')))
+                        WHEN 'monthly'   THEN 'monthly'
+                        WHEN 'mensal'    THEN 'monthly'
+                        WHEN 'biweekly'  THEN 'bi-weekly'
+                        WHEN 'bi-weekly' THEN 'bi-weekly'
+                        WHEN 'quinzenal' THEN 'bi-weekly'
+                        ELSE 'weekly'
+                      END = %s
                   AND COALESCE(active, true) = true
                 """,
                 (cycle_type,),
             )
             return [str(row["partner_id"]) for row in cur.fetchall()]
     except Exception as exc:
-        # payout_cycle column may not exist yet — fall back gracefully
+        # payout_frequency column may not exist yet — fall back gracefully
         conn.rollback()
-        if "payout_cycle" in str(exc) and cycle_type == "weekly":
-            logger.warning("payout_cycle column missing on %s; treating all as 'weekly'", table)
+        if "payout_frequency" in str(exc) and cycle_type == "weekly":
+            logger.warning("payout_frequency column missing on %s; treating all as 'weekly'", table)
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(
                     f"SELECT id AS partner_id FROM {table} WHERE COALESCE(active, true) = true"
