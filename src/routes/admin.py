@@ -1,11 +1,13 @@
 # src/routes/admin.py
 import os
 import re
+import csv
+import io
 import logging
 from functools import wraps
 
 import requests
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, Response
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
@@ -668,6 +670,85 @@ def admin_revenue_series():
         return jsonify({"status": "success", "data": data["chartData"]}), 200
     finally:
         conn.close()
+
+@admin_bp.route("/reports/export", methods=["GET", "OPTIONS"])
+@admin_required
+def admin_reports_export():
+    """CSV dos pedidos do período (from/to em YYYY-MM-DD, dias no fuso de SP).
+
+    O botão "Exportar CSV" da tela de Relatórios chamava esta rota desde
+    sempre, mas ela nunca existiu — dava 404 "Endpoint não encontrado".
+    Formato pensado pro Excel pt-BR: separador ';', BOM UTF-8 (acentos) e
+    valores monetários com vírgula decimal.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    date_from = request.args.get("from")
+    date_to = request.args.get("to")
+    # request.args.get("scope"): reservado; hoje só existe o escopo 'orders'.
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "DB connection error"}), 500
+    try:
+        where, params = ["1=1"], []
+        if date_from:
+            where.append("(o.created_at AT TIME ZONE 'America/Sao_Paulo')::date >= %s")
+            params.append(date_from)
+        if date_to:
+            where.append("(o.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= %s")
+            params.append(date_to)
+
+        rows = _fetchall(conn, f"""
+            SELECT o.id::text AS id,
+                   to_char(o.created_at AT TIME ZONE 'America/Sao_Paulo', 'DD/MM/YYYY HH24:MI') AS criado_em,
+                   COALESCE(rp.restaurant_name, '')                       AS restaurante,
+                   TRIM(COALESCE(dp.first_name,'') || ' ' || COALESCE(dp.last_name,'')) AS entregador,
+                   o.status,
+                   COALESCE(o.status_pagamento, '')                       AS status_pagamento,
+                   COALESCE(o.payment_method, '')                         AS forma_pagamento,
+                   COALESCE(o.total_amount_items, 0)                      AS total_itens,
+                   COALESCE(o.delivery_fee, 0)                            AS frete,
+                   COALESCE(o.total_amount, 0)                            AS total,
+                   COALESCE(o.comissao_plataforma, 0)                     AS comissao_plataforma,
+                   COALESCE(o.valor_repassado_restaurante, 0)             AS repasse_restaurante,
+                   COALESCE(o.valor_repassado_entregador, 0)              AS repasse_entregador,
+                   COALESCE(o.margem_frete, 0)                            AS margem_frete
+              FROM {ORDERS_TABLE} o
+              LEFT JOIN {RESTAURANTS_TABLE} rp ON rp.id = o.restaurant_id
+              LEFT JOIN {DELIVERY_TABLE}    dp ON dp.id = o.delivery_id
+             WHERE {" AND ".join(where)}
+             ORDER BY o.created_at
+        """, tuple(params))
+
+        money_cols = {"total_itens", "frete", "total", "comissao_plataforma",
+                      "repasse_restaurante", "repasse_entregador", "margem_frete"}
+        headers = ["id", "criado_em", "restaurante", "entregador", "status",
+                   "status_pagamento", "forma_pagamento", "total_itens", "frete",
+                   "total", "comissao_plataforma", "repasse_restaurante",
+                   "repasse_entregador", "margem_frete"]
+
+        buf = io.StringIO()
+        writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+        writer.writerow(headers)
+        for r in rows:
+            writer.writerow([
+                (f"{float(r.get(h) or 0):.2f}".replace(".", ",") if h in money_cols else r.get(h, ""))
+                for h in headers
+            ])
+
+        fname = f"relatorio_{date_from or 'inicio'}_{date_to or 'hoje'}.csv"
+        return Response(
+            "﻿" + buf.getvalue(),  # BOM: Excel pt-BR abre os acentos certos
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={fname}"},
+        )
+    except Exception:
+        logger.exception("Erro ao gerar o export CSV")
+        return jsonify({"status": "error", "message": "Erro ao gerar o CSV"}), 500
+    finally:
+        conn.close()
+
 
 @admin_bp.route("/user-metrics", methods=["GET", "OPTIONS"])
 @admin_required
