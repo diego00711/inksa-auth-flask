@@ -80,8 +80,12 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
     'bi-weekly'. Valores desconhecidos caem no default 'weekly'.
     """
     table = "restaurant_profiles" if partner_type == "restaurant" else "delivery_profiles"
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # SAVEPOINT (e não conn.rollback() no except): esta função roda no MEIO
+        # da transação do ciclo — um rollback total apagaria payouts já
+        # inseridos pro tipo/parceiro anterior sem ninguém perceber.
+        cur.execute("SAVEPOINT partners_cycle")
+        try:
             cur.execute(
                 f"""
                 SELECT id AS partner_id
@@ -99,17 +103,16 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
                 (cycle_type,),
             )
             return [str(row["partner_id"]) for row in cur.fetchall()]
-    except Exception as exc:
-        # payout_frequency column may not exist yet — fall back gracefully
-        conn.rollback()
-        if "payout_frequency" in str(exc) and cycle_type == "weekly":
-            logger.warning("payout_frequency column missing on %s; treating all as 'weekly'", table)
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        except Exception as exc:
+            # payout_frequency column may not exist yet — fall back gracefully
+            cur.execute("ROLLBACK TO SAVEPOINT partners_cycle")
+            if "payout_frequency" in str(exc) and cycle_type == "weekly":
+                logger.warning("payout_frequency column missing on %s; treating all as 'weekly'", table)
                 cur.execute(
                     f"SELECT id AS partner_id FROM {table} WHERE COALESCE(active, true) = true"
                 )
                 return [str(row["partner_id"]) for row in cur.fetchall()]
-        return []
+            return []
 
 
 def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start, period_end) -> list:
@@ -124,6 +127,9 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
         payout_col = "delivery_payout_id"
 
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # SAVEPOINT pelo mesmo motivo de _get_partners_for_cycle: rollback
+        # total aqui apagaria payouts já inseridos nesta transação.
+        cur.execute("SAVEPOINT eligible_orders")
         try:
             cur.execute(
                 f"""
@@ -144,7 +150,7 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
                 (partner_id, period_start, period_end),
             )
         except Exception:
-            conn.rollback()
+            cur.execute("ROLLBACK TO SAVEPOINT eligible_orders")
             # Fallback: no payout_status column
             cur.execute(
                 f"""
@@ -306,6 +312,13 @@ def _insert_payout(conn, partner_type, partner_id, period_start, period_end,
             )
 
         # 3. Mark orders as processed
+        # `id = ANY(%s)` SEM cast era o que derrubava a geração inteira
+        # ("operator does not exist: uuid = text"): o psycopg2 transforma a
+        # lista Python em ARRAY['...'], e o construtor ARRAY com literais
+        # resolve como text[] ANTES do operador — diferente de um literal
+        # solto, que o Postgres coage pra uuid pelo contexto. O ::uuid[]
+        # força o tipo do lado direito.
+        cur.execute("SAVEPOINT mark_orders")
         try:
             cur.execute(
                 f"""
@@ -313,19 +326,22 @@ def _insert_payout(conn, partner_type, partner_id, period_start, period_end,
                    SET {payout_col} = %s,
                        payout_status = 'processed',
                        updated_at = NOW()
-                 WHERE id = ANY(%s)
+                 WHERE id = ANY(%s::uuid[])
                 """,
                 (payout_id, order_ids),
             )
         except Exception:
-            # payout_status column may not exist
-            conn.rollback()
+            # payout_status column may not exist. ROLLBACK TO (e não
+            # conn.rollback()): o rollback total apagava o payout inserido nos
+            # passos 1-2 desta MESMA transação, e o fallback então marcava
+            # pedidos apontando pra um payout que nunca chegou a existir.
+            cur.execute("ROLLBACK TO SAVEPOINT mark_orders")
             cur.execute(
                 f"""
                 UPDATE orders
                    SET {payout_col} = %s,
                        updated_at = NOW()
-                 WHERE id = ANY(%s)
+                 WHERE id = ANY(%s::uuid[])
                 """,
                 (payout_id, order_ids),
             )
