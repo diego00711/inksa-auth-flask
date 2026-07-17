@@ -179,13 +179,15 @@ def get_dashboard_stats():
             # ✅ PEDIDOS ATIVOS DO ENTREGADOR
             logger.info(f"🚚 Buscando pedidos ativos para profile_id: {profile_id}")
             cur.execute("""
-                SELECT 
+                SELECT
                     o.id, o.status, o.total_amount, o.delivery_fee, o.created_at,
+                    o.valor_repassado_entregador,
                     o.delivery_address, o.pickup_code,
                     o.payment_method, o.change_for,
                     CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
                     rp.restaurant_name,
-                    rp.address_street, rp.address_number, rp.address_neighborhood
+                    rp.address_street, rp.address_number,
+                    rp.address_neighborhood, rp.address_city
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
@@ -201,6 +203,9 @@ def get_dashboard_stats():
                     'status': order['status'],
                     'total_amount': float(order.get('total_amount') or 0.0),
                     'delivery_fee': float(order.get('delivery_fee') or 0.0),
+                    # líquido do entregador (frete menos a taxa da plataforma) —
+                    # o app mostra ISTO pro entregador, não o frete bruto
+                    'valor_repassado_entregador': float(order.get('valor_repassado_entregador') or 0.0),
                     'created_at': order['created_at'].isoformat() if order.get('created_at') else None,
                     'delivery_address': order.get('delivery_address'),
                     'client_name': order.get('client_name'),
@@ -208,6 +213,7 @@ def get_dashboard_stats():
                     'restaurant_street': order.get('address_street'),
                     'restaurant_number': order.get('address_number'),
                     'restaurant_neighborhood': order.get('address_neighborhood'),
+                    'restaurant_city': order.get('address_city'),
                     'pickup_code': order.get('pickup_code'),
                     'payment_method': order.get('payment_method'),
                     'change_for': float(order.get('change_for') or 0.0),

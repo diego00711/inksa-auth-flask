@@ -1107,6 +1107,7 @@ def get_available_orders():
                     o.delivery_address,
                     COALESCE(o.total_amount, 0) AS total_amount,
                     COALESCE(o.delivery_fee, 0) AS delivery_fee,
+                    COALESCE(o.valor_repassado_entregador, 0) AS valor_repassado_entregador,
                     o.status,
                     o.created_at
                 FROM orders o
@@ -1139,6 +1140,8 @@ def get_available_orders():
                     order_dict['total_amount'] = float(order_dict['total_amount'])
                 if order_dict.get('delivery_fee') is not None:
                     order_dict['delivery_fee'] = float(order_dict['delivery_fee'])
+                if order_dict.get('valor_repassado_entregador') is not None:
+                    order_dict['valor_repassado_entregador'] = float(order_dict['valor_repassado_entregador'])
 
                 available_orders.append(order_dict)
 
