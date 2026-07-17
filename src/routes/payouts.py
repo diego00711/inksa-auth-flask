@@ -129,13 +129,20 @@ def process_payouts_route():
 
         body = request.get_json(silent=True) or {}
         partner_type = (body.get("partner_type") or "").strip().lower() or None
-        cycle_type   = (body.get("cycle_type") or "weekly").strip().lower()
+        cycle_type   = (body.get("cycle_type") or "all").strip().lower()
         dry_run      = bool(body.get("dry_run", False))
+
+        # Apps salvam 'biweekly' (sem hífen); o motor usa 'bi-weekly'. Aceita
+        # os dois no request pra não depender de qual lado normaliza.
+        if cycle_type == "biweekly":
+            cycle_type = "bi-weekly"
 
         if partner_type and partner_type not in ("restaurant", "delivery"):
             return jsonify({"error": "partner_type inválido (restaurant|delivery)"}), 400
-        if cycle_type not in ("weekly", "bi-weekly", "monthly"):
-            return jsonify({"error": "cycle_type inválido (weekly|bi-weekly|monthly)"}), 400
+        # 'all' = todos os ciclos; parceiro sem tipo (None) = os dois tipos.
+        # Default é 'all' pra quem só quer "paga todo mundo que está pendente".
+        if cycle_type not in ("weekly", "bi-weekly", "monthly", "all"):
+            return jsonify({"error": "cycle_type inválido (weekly|bi-weekly|monthly|all)"}), 400
 
         conn = get_db_connection()
         if not conn:

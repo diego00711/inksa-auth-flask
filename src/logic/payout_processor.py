@@ -127,48 +127,32 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
         payout_col = "delivery_payout_id"
 
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        # SAVEPOINT pelo mesmo motivo de _get_partners_for_cycle: rollback
-        # total aqui apagaria payouts já inseridos nesta transação.
-        cur.execute("SAVEPOINT eligible_orders")
-        try:
-            cur.execute(
-                f"""
-                SELECT id,
-                       COALESCE({amount_col}, 0)      AS repasse,
-                       COALESCE(delivery_fee, 0)      AS delivery_fee,
-                       COALESCE(comissao_plataforma, 0) AS comissao_historica
-                FROM orders
-                WHERE {partner_col} = %s
-                  AND status IN ('delivered', 'delivery_failed')
-                  AND (status_pagamento = 'approved' OR status = 'delivery_failed')
-                  AND (payout_status = 'pending' OR payout_status IS NULL)
-                  AND {payout_col} IS NULL
-                  AND COALESCE({amount_col}, 0) > 0
-                  AND updated_at >= %s AND updated_at <= %s
-                ORDER BY updated_at ASC
-                """,
-                (partner_id, period_start, period_end),
-            )
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT eligible_orders")
-            # Fallback: no payout_status column
-            cur.execute(
-                f"""
-                SELECT id,
-                       COALESCE({amount_col}, 0)      AS repasse,
-                       COALESCE(delivery_fee, 0)      AS delivery_fee,
-                       COALESCE(comissao_plataforma, 0) AS comissao_historica
-                FROM orders
-                WHERE {partner_col} = %s
-                  AND status IN ('delivered', 'delivery_failed')
-                  AND (status_pagamento = 'approved' OR status = 'delivery_failed')
-                  AND {payout_col} IS NULL
-                  AND COALESCE({amount_col}, 0) > 0
-                  AND updated_at >= %s AND updated_at <= %s
-                ORDER BY updated_at ASC
-                """,
-                (partner_id, period_start, period_end),
-            )
+        # NÃO filtrar por orders.payout_status aqui. Um pedido gera DOIS
+        # repasses (restaurante + entregador), mas payout_status é UMA coluna
+        # só, compartilhada. O motor processa restaurante e depois entregador
+        # na mesma rodada: quando a passada do restaurante marcava o pedido
+        # como 'processed', a passada do entregador filtrava por
+        # payout_status='pending' e não enxergava mais o pedido — o repasse do
+        # entregador NUNCA nascia (nem no manual, nem no job das 6h). O
+        # dedup correto e POR TIPO já existe: {payout_col} IS NULL
+        # (restaurant_payout_id / delivery_payout_id são colunas separadas).
+        cur.execute(
+            f"""
+            SELECT id,
+                   COALESCE({amount_col}, 0)      AS repasse,
+                   COALESCE(delivery_fee, 0)      AS delivery_fee,
+                   COALESCE(comissao_plataforma, 0) AS comissao_historica
+            FROM orders
+            WHERE {partner_col} = %s
+              AND status IN ('delivered', 'delivery_failed')
+              AND (status_pagamento = 'approved' OR status = 'delivery_failed')
+              AND {payout_col} IS NULL
+              AND COALESCE({amount_col}, 0) > 0
+              AND updated_at >= %s AND updated_at <= %s
+            ORDER BY updated_at ASC
+            """,
+            (partner_id, period_start, period_end),
+        )
         return cur.fetchall()
 
 
@@ -408,9 +392,18 @@ def process_automatic_payouts(
 
     # Determine which cycles are due
     if force_cycle:
-        if force_cycle not in ("weekly", "bi-weekly", "monthly"):
+        if force_cycle == "all":
+            # Força TODOS os ciclos. Cada parceiro entra em exatamente um
+            # (o da frequência que ele escolheu — _get_partners_for_cycle
+            # filtra por isso), então "all" = "processe todo mundo que tem
+            # repasse pendente, cada um no ciclo dele". É o modo certo pro
+            # botão manual: o admin não precisa adivinhar a frequência de
+            # cada parceiro.
+            cycles_due = ["weekly", "bi-weekly", "monthly"]
+        elif force_cycle not in ("weekly", "bi-weekly", "monthly"):
             raise ValueError(f"Invalid cycle_type: {force_cycle!r}")
-        cycles_due = [force_cycle]
+        else:
+            cycles_due = [force_cycle]
     else:
         cycles_due = [c for c in ("weekly", "bi-weekly", "monthly") if is_payout_day(c, today)]
 
