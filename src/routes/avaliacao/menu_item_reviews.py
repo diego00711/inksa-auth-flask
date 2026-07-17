@@ -14,7 +14,8 @@ def create_menu_item_review(menu_item_id):
     data = request.get_json()
     rating = data.get('rating')
     comment = data.get('comment', '')
-    order_id = data.get('order_id')
+    # os apps mandam orderId (camelCase); aceitar as duas grafias
+    order_id = data.get('order_id') or data.get('orderId')
     if not order_id or not rating:
         return jsonify({'error': 'order_id e rating são obrigatórios'}), 400
 

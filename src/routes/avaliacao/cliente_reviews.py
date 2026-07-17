@@ -22,7 +22,8 @@ def create_client_review(client_id):
     data = request.get_json()
     rating = data.get('rating')
     comment = data.get('comment', '')
-    order_id = data.get('order_id')
+    # os apps mandam orderId (camelCase); aceitar as duas grafias
+    order_id = data.get('order_id') or data.get('orderId')
     # "tags" (entregador) e "badges" (restaurante) são o mesmo conceito de
     # marcação rápida com nomes diferentes por app -- aceita os dois.
     tags = data.get('tags') or data.get('badges')

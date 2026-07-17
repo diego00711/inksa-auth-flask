@@ -30,7 +30,8 @@ def create_restaurant_review(restaurant_id):
     data = request.get_json()
     rating = data.get('rating')
     comment = data.get('comment', '')
-    order_id = data.get('order_id')
+    # os apps mandam orderId (camelCase); aceitar as duas grafias
+    order_id = data.get('order_id') or data.get('orderId')
     tags = data.get('tags')
     category_ratings = data.get('categoryRatings') or data.get('category_ratings') or data.get('categories')
     if not order_id or not rating:
