@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Helpers de cálculo (admin-configuráveis via platform_settings)
 from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
 from ..utils.helpers import get_user_id_from_token, supabase_admin
+from .orders import generate_verification_code
 from ..utils.coupons import evaluate_coupon, consume_coupon
 from ..utils import asaas
 from ..utils.gateway import payment_provider
@@ -214,6 +215,11 @@ def criar_preferencia_mercado_pago():
             'delivery_distance_km': dados_pedido.get('delivery_distance_km'),
             'payment_method': payment_method,
             'change_for': change_for,
+            # Sem estes, o pedido online nascia SEM codigos: o entregador nao
+            # tinha o que retirar e o cliente nao tinha o que conferir na
+            # entrega. So o caminho de pedido em dinheiro (orders.py) gerava.
+            'pickup_code': generate_verification_code(),
+            'delivery_code': generate_verification_code(),
             'created_at': datetime.utcnow().isoformat(),
             'updated_at': datetime.utcnow().isoformat()
         }
@@ -677,6 +683,8 @@ def processar_pagamento_cartao():
             'client_longitude': d.get('client_longitude'),
             'delivery_distance_km': d.get('delivery_distance_km'),
             'payment_method': payment_method_id,
+            'pickup_code': generate_verification_code(),
+            'delivery_code': generate_verification_code(),
             'created_at': datetime.utcnow().isoformat(),
             'updated_at': datetime.utcnow().isoformat(),
         }
