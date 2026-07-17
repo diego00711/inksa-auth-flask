@@ -869,9 +869,12 @@ def get_order(order_id):
                    NULLIF(TRIM(CONCAT_WS(', ',
                      NULLIF(CONCAT_WS(' ', rp.address_street, rp.address_number), ''),
                      rp.address_neighborhood,
-                     rp.address_city)), '') AS restaurant_address
+                     rp.address_city)), '') AS restaurant_address,
+                   cp.first_name AS client_first_name,
+                   cp.last_name  AS client_last_name
               FROM orders o
               LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+              LEFT JOIN client_profiles cp ON o.client_id = cp.id
              WHERE o.id = %s
         """
         params = [str(order_id)]
