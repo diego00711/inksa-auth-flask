@@ -49,8 +49,8 @@ def get_dashboard_stats():
             response_data = {
                 "todayDeliveries": 0,
                 "todayEarnings": 0.0,
-                "avgRating": float(delivery_profile.get('rating') or 0.0),
-                "totalDeliveries": delivery_profile.get('total_deliveries') or 0,
+                "avgRating": 0.0,      # ao vivo abaixo (delivery_reviews)
+                "totalDeliveries": 0,  # ao vivo abaixo (orders entregues)
                 "available": 0,
                 "activeOrders": [],
                 "weeklyEarnings": [],
@@ -67,7 +67,8 @@ def get_dashboard_stats():
                 "totalCashReceived": float(delivery_profile.get('total_cash_received') or 0.0),
             }
 
-            # ✅ GANHOS E ENTREGAS DE HOJE
+            # ✅ GANHOS E ENTREGAS DE HOJE (fuso de São Paulo — com DATE(created_at)
+            # em UTC uma entrega das 22h caía no dia seguinte e "hoje" mentia)
             logger.info(f"🔍 Buscando entregas de hoje para profile_id: {profile_id}")
             cur.execute("""
                 SELECT
@@ -76,15 +77,38 @@ def get_dashboard_stats():
                 FROM orders
                 WHERE delivery_id = %s
                 AND status IN ('delivered', 'delivery_failed')
-                AND DATE(created_at) = %s
-            """, (profile_id, today))
-            
+                AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date
+                    = (now() AT TIME ZONE 'America/Sao_Paulo')::date
+            """, (profile_id,))
+
             today_stats = cur.fetchone()
             if today_stats:
                 response_data["todayDeliveries"] = today_stats['count']
                 response_data["todayEarnings"] = float(today_stats['total'])
                 logger.info(f"💰 Ganhos hoje: R$ {response_data['todayEarnings']:.2f}")
                 logger.info(f"📦 Entregas hoje: {response_data['todayDeliveries']}")
+
+            # ✅ TOTAL DE ENTREGAS (desde o início) + AVALIAÇÃO MÉDIA — AO VIVO.
+            # delivery_profiles.total_deliveries e .rating existem mas NUNCA são
+            # escritas por lugar nenhum do backend (contadores mortos): ficavam
+            # 0 pra sempre mesmo com o entregador já tendo entregas/avaliações.
+            # Contamos direto da fonte, igual a tela de Ganhos já faz.
+            cur.execute("""
+                SELECT COUNT(*) AS total
+                FROM orders
+                WHERE delivery_id = %s
+                AND status IN ('delivered', 'delivery_failed')
+            """, (profile_id,))
+            _tot = cur.fetchone()
+            response_data["totalDeliveries"] = (_tot and _tot['total']) or 0
+
+            cur.execute("""
+                SELECT COALESCE(AVG(rating), 0) AS avg_rating
+                FROM delivery_reviews
+                WHERE delivery_id = %s
+            """, (profile_id,))
+            _rt = cur.fetchone()
+            response_data["avgRating"] = float((_rt and _rt['avg_rating']) or 0.0)
 
             # ✅ PEDIDOS DISPONÍVEIS (sem entregador)
             cur.execute("""
