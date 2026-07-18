@@ -304,8 +304,7 @@ def get_payout_detail(payout_id):
 
             cur.execute(
                 """
-                SELECT id, order_id, order_total, delivery_fee,
-                       commission_applied, net_amount
+                SELECT id, order_id, gross_amount, fee, net_amount, breakdown
                 FROM payout_items
                 WHERE payout_id = %s
                 ORDER BY created_at ASC
