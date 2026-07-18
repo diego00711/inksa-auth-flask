@@ -223,16 +223,23 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     # Recentes
     params, where = [], []
     if date_from:
-        where.append("created_at::date >= %s"); params.append(date_from)
+        where.append("o.created_at::date >= %s"); params.append(date_from)
     if date_to:
-        where.append("created_at::date <= %s"); params.append(date_to)
+        where.append("o.created_at::date <= %s"); params.append(date_to)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    # client_name/restaurant_name NÃO existem em orders — vêm dos perfis via
+    # JOIN (senão caía sempre no fallback "Cliente"/"Restaurante").
     recent_rows = _fetchall(conn, f"""
-        SELECT id, client_name, restaurant_name, total_amount, status, created_at,
-               comissao_plataforma, margem_frete
-          FROM {ORDERS_TABLE}
+        SELECT o.id,
+               NULLIF(TRIM(CONCAT_WS(' ', cp.first_name, cp.last_name)), '') AS client_name,
+               rp.restaurant_name AS restaurant_name,
+               o.total_amount, o.status, o.created_at,
+               o.comissao_plataforma, o.margem_frete
+          FROM {ORDERS_TABLE} o
+          LEFT JOIN client_profiles cp     ON o.client_id = cp.id
+          LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
         {where_sql}
-      ORDER BY created_at DESC
+      ORDER BY o.created_at DESC
          LIMIT %s
     """, (*params, limit))
     payload["recentOrders"] = [{
