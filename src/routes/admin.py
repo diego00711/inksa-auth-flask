@@ -456,6 +456,50 @@ def set_restaurant_approval(restaurant_id):
     finally:
         conn.close()
 
+
+@admin_bp.route("/restaurants/<uuid:restaurant_id>/founding", methods=["POST"])
+@admin_required
+def set_restaurant_founding(restaurant_id):
+    """Marca/desmarca o restaurante como Parceiro Fundador (campanha: comissão
+    pela metade até a data global configurada). Body: {"fundador": bool}."""
+    data = request.get_json(silent=True) or {}
+    fundador = bool(data.get("fundador", True))
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """UPDATE restaurant_profiles
+                      SET fundador = %s, updated_at = NOW()
+                    WHERE id = %s
+                RETURNING id, restaurant_name, fundador""",
+                (fundador, str(restaurant_id)),
+            )
+            row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return jsonify({"status": "error", "message": "Restaurante não encontrado"}), 404
+        conn.commit()
+        try:
+            log_admin_action_auto(
+                "SetRestaurantFounding",
+                f"{'Marcou' if fundador else 'Removeu'} o selo de Parceiro Fundador do restaurante {row['restaurant_name']} ({restaurant_id})",
+            )
+        except Exception:
+            pass
+        return jsonify({"status": "success", "data": dict(row)}), 200
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao atualizar selo de fundador")
+        return jsonify({"status": "error", "message": "Erro interno ao atualizar fundador."}), 500
+    finally:
+        conn.close()
+
+
 @admin_bp.route("/restaurants/<uuid:restaurant_id>", methods=["PUT"])
 @admin_required
 def update_restaurant(restaurant_id):
