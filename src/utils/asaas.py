@@ -144,10 +144,33 @@ def create_checkout_payment(customer_id: str, value: float, external_reference: 
 
     if not ok:
         return False, _error_message(data)
-    return True, {
+
+    result = {
         "payment_id": data.get("id"),
         "invoice_url": data.get("invoiceUrl"),
         "status": data.get("status"),
+        "pix": None,
+    }
+    # Se a cobrança acabou saindo como PIX, já busca o QR/copia-e-cola pra
+    # mostrar DENTRO do app (sem mandar o cliente pro checkout do Asaas). Se
+    # falhar, `pix` fica None e o app usa a invoice_url como rede de segurança.
+    if body["billingType"] == "PIX" and result["payment_id"]:
+        ok_qr, qr = get_pix_qrcode(result["payment_id"])
+        if ok_qr and qr.get("payload"):
+            result["pix"] = qr
+    return True, result
+
+
+def get_pix_qrcode(payment_id: str):
+    """(ok, {payload, encoded_image, expiration}). QR + copia-e-cola de uma
+    cobrança PIX já criada — endpoint GET /payments/{id}/pixQrCode do Asaas."""
+    ok, data = _request("GET", f"/payments/{payment_id}/pixQrCode")
+    if not ok:
+        return False, _error_message(data)
+    return True, {
+        "payload": data.get("payload"),           # copia-e-cola
+        "encoded_image": data.get("encodedImage"),  # PNG em base64 (sem prefixo)
+        "expiration": data.get("expirationDate"),
     }
 
 

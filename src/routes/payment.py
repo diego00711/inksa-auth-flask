@@ -475,6 +475,9 @@ def criar_preferencia_mercado_pago():
                 "preference_id": pay_or_msg['payment_id'],
                 "pedido_id": pedido_id,
                 "provider": "asaas",
+                # Quando é PIX, vai o QR/copia-e-cola pro app mostrar inline; se
+                # None (cartão ou PIX indisponível), o app usa o checkout_link.
+                "pix": pay_or_msg.get('pix'),
             }), 200
 
         # ✅ PASSO 3: Criar preferência no Mercado Pago
