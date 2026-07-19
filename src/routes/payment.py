@@ -729,7 +729,7 @@ def processar_pagamento_cartao():
 
         if status == 'approved':
             # Comissão e repasse vêm de platform_settings (editáveis no admin)
-            comissao = float(calculate_platform_commission(subtotal_validado))
+            comissao = float(calculate_platform_commission(subtotal_validado, d.get('restaurant_id')))
             delivery_fee_charged = float(d.get('delivery_fee', 0) or 0)
             courier_payout = float(calculate_courier_payout(
                 d.get('delivery_distance_km'),
@@ -872,7 +872,7 @@ def mercadopago_webhook():
                     valor_total_itens = float(pedido_do_bd.get('total_amount_items', 0.0))
 
                     # Comissão e repasse vêm de platform_settings (editáveis no admin)
-                    comissao_plataforma = float(calculate_platform_commission(valor_total_itens))
+                    comissao_plataforma = float(calculate_platform_commission(valor_total_itens, pedido_do_bd.get('restaurant_id')))
                     valor_para_restaurante = valor_total_itens - comissao_plataforma
 
                     delivery_fee_charged = float(pedido_do_bd.get('delivery_fee', 0.0) or 0.0)
@@ -1042,7 +1042,7 @@ def asaas_webhook():
                 return jsonify({"status": "already_processed"}), 200
 
             valor_itens = float(pedido.get('total_amount_items') or 0)
-            comissao = float(calculate_platform_commission(valor_itens))
+            comissao = float(calculate_platform_commission(valor_itens, pedido.get('restaurant_id')))
             fee = float(pedido.get('delivery_fee') or 0)
             courier = float(calculate_courier_payout(pedido.get('delivery_distance_km'), delivery_fee=fee))
             supabase_client.table('orders').update({

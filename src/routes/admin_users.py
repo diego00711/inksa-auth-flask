@@ -116,7 +116,8 @@ def list_users():
                     u.id, u.email, u.user_type, u.created_at,
                     {DISPLAY_NAME_SQL} AS full_name,
                     COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
-                    COALESCE(cp.phone, rp.phone, dp.phone) AS phone
+                    COALESCE(cp.phone, rp.phone, dp.phone) AS phone,
+                    COALESCE(rp.fundador, false) AS fundador
                 FROM users u
                 LEFT JOIN client_profiles cp ON u.id = cp.user_id AND u.user_type = 'client'
                 LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant'
@@ -585,6 +586,16 @@ def update_user(user_id):
                     return jsonify({"status": "error", "message": "Falha ao atualizar usuário"}), 500
 
                 conn.commit()
+
+            # Selo "Parceiro Fundador" (campanha) — vive em restaurant_profiles.
+            # UPDATE por user_id; só afeta linha se o usuário for restaurante.
+            if "fundador" in data:
+                cur.execute(
+                    "UPDATE restaurant_profiles SET fundador = %s WHERE user_id = %s",
+                    (bool(data["fundador"]), str(user_id)),
+                )
+                conn.commit()
+                update_details.append(f"fundador: -> {bool(data['fundador'])}")
 
             if update_details:
                 log_admin_action_auto(

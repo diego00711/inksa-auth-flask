@@ -182,11 +182,74 @@ def calculate_courier_payout(delivery_distance_km, delivery_fee=None) -> Decimal
     return payout.quantize(Decimal("0.01"))
 
 
-def calculate_platform_commission(subtotal) -> Decimal:
-    """Calcula a comissão da plataforma sobre o subtotal do pedido."""
+def founding_commission_factor(restaurant_id) -> Decimal:
+    """Fator multiplicador da comissão para a campanha "Parceiro Fundador".
+
+    Retorna o fator promocional (ex.: 0.5 = metade) quando o restaurante está
+    marcado como `fundador` E a campanha ainda está no prazo (data fixa global
+    `founding_partner_until`, comparada no fuso America/Sao_Paulo). Caso
+    contrário retorna 1 (comissão cheia).
+
+    Fail-safe: sem restaurante, sem data definida, campanha expirada ou qualquer
+    erro → 1 (nunca dá desconto por engano).
+    """
+    if not restaurant_id:
+        return Decimal("1")
+    conn = get_db_connection()
+    if not conn:
+        return Decimal("1")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(fundador, false) FROM restaurant_profiles WHERE id = %s",
+                (str(restaurant_id),),
+            )
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return Decimal("1")
+
+            cur.execute(
+                "SELECT key, value FROM platform_settings WHERE key = ANY(%s)",
+                (["founding_partner_until", "founding_partner_factor"],),
+            )
+            cfg = {k: v for k, v in cur.fetchall()}
+
+            until = (cfg.get("founding_partner_until") or "").strip()
+            if not until:
+                return Decimal("1")  # sem data = sem promo (fail-safe)
+            cur.execute(
+                "SELECT (now() AT TIME ZONE 'America/Sao_Paulo')::date <= %s::date",
+                (until,),
+            )
+            if not cur.fetchone()[0]:
+                return Decimal("1")  # campanha já encerrada
+
+        factor = _to_decimal(cfg.get("founding_partner_factor"), Decimal("0.5"))
+        if factor < 0:
+            factor = Decimal("0")
+        elif factor > 1:
+            factor = Decimal("1")
+        return factor
+    except Exception:
+        logger.exception("founding_commission_factor falhou — cobrando comissão cheia")
+        return Decimal("1")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def calculate_platform_commission(subtotal, restaurant_id=None) -> Decimal:
+    """Calcula a comissão da plataforma sobre o subtotal do pedido.
+
+    Se `restaurant_id` for de um Parceiro Fundador dentro do prazo da campanha,
+    aplica o fator promocional (metade da comissão)."""
     try:
         sub = Decimal(str(subtotal))
     except (InvalidOperation, TypeError):
         return Decimal("0.00")
     rate = get_settings()["commission_rate"]
+    if restaurant_id:
+        rate = rate * founding_commission_factor(restaurant_id)
     return (sub * rate).quantize(Decimal("0.01"))

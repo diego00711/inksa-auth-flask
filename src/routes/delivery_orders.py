@@ -284,7 +284,7 @@ def confirm_cash_payment(order_id):
                 # Configurações > Taxas. Agora usa a mesma funcao/fonte dos
                 # pedidos online, garantindo a mesma taxa em qualquer forma de
                 # pagamento.
-                commission = float(calculate_platform_commission(total_amount - delivery_fee))
+                commission = float(calculate_platform_commission(total_amount - delivery_fee, order['restaurant_id']))
 
             # Repasse do frete ao entregador = frete integral menos a taxa de
             # administracao da plataforma (mesmo modelo do online). No dinheiro
