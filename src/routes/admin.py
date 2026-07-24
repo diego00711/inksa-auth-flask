@@ -16,6 +16,8 @@ from gotrue.errors import AuthApiError
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, _extract_bearer_token
 from ..utils.audit import log_admin_action, log_admin_action_auto
+from ..utils.email_service import send_email, render_simple
+from ..utils.platform_settings import get_settings
 from src.extensions import limiter
 
 logger = logging.getLogger(__name__)
@@ -409,6 +411,64 @@ def get_all_restaurants():
         conn.close()
 
 
+def _send_restaurant_welcome_email(to_email: str, restaurant_name: str) -> None:
+    """E-mail de boas-vindas quando o restaurante é aprovado: explica o app, a
+    comissão (puxada do platform_settings, nunca desatualiza) e os repasses.
+    Nunca levanta — o chamador envolve em try/except pra não afetar a aprovação."""
+    from decimal import Decimal
+    try:
+        rate = Decimal(str(get_settings().get("commission_rate") or "0.15"))
+    except Exception:
+        rate = Decimal("0.15")
+    pct = (f"{rate * 100:.2f}".rstrip("0").rstrip(".")).replace(".", ",") + "%"
+    nome = (restaurant_name or "Seu restaurante").strip()
+
+    body = f"""
+      <p>Boa notícia! O seu restaurante <strong>{nome}</strong> foi <strong>aprovado</strong>
+      e já aparece para os clientes no app Inksa. 🚀</p>
+
+      <div style="background:#FFF4EC;border-left:4px solid #FF6B35;padding:12px 16px;border-radius:8px;margin:18px 0">
+        <strong>Sem mensalidade.</strong> Você só paga quando vende — nada de taxa fixa no fim do mês.
+      </div>
+
+      <p><strong>Como funciona</strong><br>
+      Os pedidos chegam no app <strong>Inksa Restaurante</strong>: você aceita → prepara →
+      o entregador retira → o cliente acompanha a entrega em tempo real. Você controla
+      quando fica <strong>aberto/fechado</strong>.</p>
+
+      <p><strong>Comissão de {pct}</strong><br>
+      A Inksa cobra <strong>{pct} sobre o valor dos itens</strong> de cada pedido. O
+      <strong>frete é pago à parte pelo cliente e vai integral para o entregador</strong> —
+      não sai da sua comissão.</p>
+
+      <p><strong>Repasses</strong><br>
+      São <strong>semanais e automáticos, via PIX</strong> na chave que você cadastrar.
+      Você recebe o valor dos pedidos do período menos a comissão. Acompanhe tudo na aba
+      <strong>Financeiro</strong> do app.</p>
+
+      <p><strong>Primeiros passos</strong><br>
+      1) Cadastre sua <strong>chave PIX</strong> (é como você recebe)<br>
+      2) Monte o <strong>cardápio</strong> (fotos e preços)<br>
+      3) Configure os <strong>horários</strong><br>
+      4) <strong>Abra</strong> o restaurante para começar a vender</p>
+
+      <p>Qualquer dúvida, responda este e-mail ou fale com
+      <strong>suporte@inksadelivery.com.br</strong>. Bem-vindo(a) à Inksa! 🧡</p>
+    """
+    html = render_simple(
+        title=f"{nome} foi aprovado! 🎉",
+        body_html=body,
+        cta_text="Acessar meu painel",
+        cta_url="https://restaurantes.inksadelivery.com.br",
+    )
+    send_email(
+        to=to_email,
+        subject=f"🎉 {nome} foi aprovado na Inksa Delivery!",
+        html=html,
+        reply_to="suporte@inksadelivery.com.br",
+    )
+
+
 @admin_bp.route("/restaurants/<uuid:restaurant_id>/approve", methods=["POST"])
 @admin_required
 def set_restaurant_approval(restaurant_id):
@@ -426,6 +486,12 @@ def set_restaurant_approval(restaurant_id):
         return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Estado anterior — o e-mail de boas-vindas só dispara na TRANSIÇÃO
+            # de não-aprovado -> aprovado (não reenvia se reclicar em Aprovar).
+            cur.execute("SELECT approved FROM restaurant_profiles WHERE id = %s", (str(restaurant_id),))
+            _prev = cur.fetchone()
+            was_approved = bool(_prev and _prev["approved"])
+
             cur.execute(
                 """UPDATE restaurant_profiles
                       SET approved = %s, status = %s, updated_at = NOW()
@@ -445,6 +511,24 @@ def set_restaurant_approval(restaurant_id):
             )
         except Exception:
             pass
+        # E-mail de boas-vindas ao aprovar — nunca bloqueia a resposta da aprovação
+        if approved and not was_approved:
+            try:
+                with conn.cursor() as _ec:
+                    _ec.execute(
+                        """SELECT u.email FROM public.users u
+                             JOIN restaurant_profiles rp ON rp.user_id = u.id
+                            WHERE rp.id = %s""",
+                        (str(restaurant_id),),
+                    )
+                    _er = _ec.fetchone()
+                _to = _er[0] if _er else None
+                if _to:
+                    _send_restaurant_welcome_email(_to, row["restaurant_name"])
+                else:
+                    logger.warning("Aprovação: sem e-mail p/ restaurante %s — boas-vindas não enviado", restaurant_id)
+            except Exception:
+                logger.exception("Falha ao enviar e-mail de boas-vindas ao restaurante %s", restaurant_id)
         return jsonify({"status": "success", "data": dict(row)}), 200
     except Exception:
         try:
