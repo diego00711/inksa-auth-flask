@@ -38,6 +38,25 @@ supabase_client = supabase_admin
 if supabase_client is None:
     logging.error("ERRO: supabase_admin não inicializado (ver SUPABASE_SERVICE_KEY em helpers).")
 
+_SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+
+
+def _force_service_role():
+    """Re-fixa a service_role no PostgREST do cliente admin antes de escrever.
+
+    O cliente supabase-py é compartilhado entre requisições; se outra rota fez
+    sign_in de usuário (ex.: /auth/login), a sessão pode 'vazar' e o PostgREST
+    passa a mandar o JWT do usuário em vez da service_role. Aí o INSERT do pedido
+    bate na RLS: orders.client_id é o id do PERFIL, mas a policy de usuário exige
+    auth.uid() = client_id (o auth.uid() é o user_id), então só a service_role
+    consegue (policy orders_service_role_all). Isto garante esse bypass.
+    """
+    try:
+        if _SUPABASE_SERVICE_KEY and supabase_client is not None:
+            supabase_client.postgrest.auth(_SUPABASE_SERVICE_KEY)
+    except Exception as e:
+        logging.warning(f"Não foi possível re-fixar a service_role no PostgREST: {e}")
+
 
 def verify_mp_signature(req, secret):
     """Verifica a assinatura da notificação de webhook do Mercado Pago.
@@ -226,6 +245,11 @@ def criar_preferencia_mercado_pago():
         if payment_method == 'cash':
             order_data['status_pagamento'] = 'pending_cash'
         
+        # Garante service_role no PostgREST antes de mexer em 'orders' — evita o
+        # 42501 (RLS) caso a sessão do cliente supabase tenha sido poluída por
+        # um login de usuário em outra rota deste mesmo worker.
+        _force_service_role()
+
         logging.info(f"💾 PASSO 1: Criando pedido {pedido_id} no banco...")
         logging.info(f"🔑 Cliente Supabase configurado: {bool(supabase_client)}")
         
