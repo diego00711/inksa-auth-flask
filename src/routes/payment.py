@@ -58,6 +58,15 @@ def _force_service_role():
         logging.warning(f"Não foi possível re-fixar a service_role no PostgREST: {e}")
 
 
+@mp_payment_bp.before_request
+def _pin_service_role():
+    """Antes de QUALQUER rota de pagamento (checkout, cartão e os webhooks
+    MP/Asaas), garante a service_role no PostgREST. Todas escrevem em 'orders'
+    e não podem cair na RLS (42501) por sessão poluída — em especial os webhooks,
+    que confirmam o pagamento e precisam marcar o pedido como pago."""
+    _force_service_role()
+
+
 def verify_mp_signature(req, secret):
     """Verifica a assinatura da notificação de webhook do Mercado Pago.
     Retorna True apenas se a assinatura for válida. Retorna False em qualquer falha.
