@@ -117,6 +117,133 @@ def login():
         return jsonify({"status": "error", "error": "Erro interno ao entrar. Tente novamente em instantes."}), 500
 
 
+def _ensure_client_profile(user_id: str, meta: dict) -> None:
+    """Garante um client_profile pra quem entrou via Google (1º acesso)."""
+    full_name = (meta.get('name') or meta.get('full_name') or '').strip()
+    parts = full_name.split(' ', 1)
+    first = parts[0] if parts and parts[0] else 'Cliente'
+    last = parts[1] if len(parts) > 1 else ''
+    conn = get_db_connection()
+    if not conn:
+        logger.warning("google_login: sem conexão DB p/ criar client_profile de %s", user_id)
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO client_profiles (user_id, first_name, last_name)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (user_id) DO NOTHING""",
+                (user_id, first, last or None)
+            )
+        conn.commit()
+        logger.info("✅ client_profile garantido para Google user %s", user_id)
+    except Exception as e:
+        logger.warning("google_login: falha ao criar client_profile de %s: %s", user_id, e)
+        try: conn.rollback()
+        except Exception: pass
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@auth_bp.route('/google', methods=['POST', 'OPTIONS'])
+@limiter.limit("10 per minute")
+def google_login():
+    """Login com Google. Recebe o id_token do Google, troca por uma sessão
+    Supabase (GoTrue direto, grant_type=id_token — mesmo padrão do /refresh) e
+    devolve os mesmos tokens do login normal. 1º acesso vira conta 'client'."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+    try:
+        data = request.get_json(silent=True) or {}
+        id_token = (data.get('id_token') or data.get('credential') or '').strip()
+        expected_user_type = (data.get('expected_user_type') or '').strip().lower() or None
+        if not id_token:
+            return jsonify({"status": "error", "error": "Token do Google ausente."}), 400
+
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+        base = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+        if not key or not base:
+            return jsonify({"status": "error", "error": "Serviço de autenticação indisponível"}), 503
+
+        # Troca o idToken do Google por uma sessão Supabase (cria a conta na 1ª vez)
+        try:
+            resp = requests.post(
+                f"{base}/auth/v1/token?grant_type=id_token",
+                json={"provider": "google", "id_token": id_token},
+                headers={"apikey": key, "Content-Type": "application/json"},
+                timeout=10,
+            )
+        except requests.RequestException as e:
+            logger.warning("google_login: falha de rede: %s", e)
+            return jsonify({"status": "error", "error": "Erro ao contatar o serviço de autenticação."}), 502
+
+        if resp.status_code != 200:
+            logger.warning("google_login: GoTrue %s: %s", resp.status_code, resp.text[:300])
+            return jsonify({"status": "error", "error": "Não foi possível entrar com o Google. Tente novamente."}), 401
+
+        body = resp.json() or {}
+        access_token = body.get("access_token")
+        refresh_token = body.get("refresh_token")
+        gu = body.get("user") or {}
+        user_id = gu.get("id")
+        email = gu.get("email")
+        meta = gu.get("user_metadata") or {}
+        if not access_token or not user_id:
+            return jsonify({"status": "error", "error": "Não foi possível entrar com o Google."}), 401
+
+        # Tipo de conta: metadata -> public.users -> (1º acesso) vira client
+        user_type = (meta.get('user_type') or '').strip()
+        if not user_type:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT user_type FROM public.users WHERE id = %s", (str(user_id),))
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            user_type = row[0]
+                except Exception:
+                    logger.warning("google_login: falha ao ler public.users", exc_info=True)
+                finally:
+                    conn.close()
+
+        is_new = False
+        if not user_type:
+            user_type = 'client'
+            is_new = True
+            try:
+                new_meta = dict(meta); new_meta['user_type'] = 'client'
+                supabase_admin.auth.admin.update_user_by_id(str(user_id), {"user_metadata": new_meta})
+            except Exception as e:
+                logger.warning("google_login: falha ao gravar user_type de %s: %s", user_id, e)
+            _ensure_client_profile(str(user_id), meta)
+
+        # Bloqueia login cruzado (conta de restaurante/entregador no app do cliente)
+        if expected_user_type and user_type != expected_user_type:
+            conta_label = USER_TYPE_LABELS.get(user_type, 'de outro tipo')
+            app_label = USER_TYPE_LABELS.get(expected_user_type, 'este')
+            return jsonify({
+                "status": "error",
+                "error": f"Esta conta é de {conta_label}, não pode entrar no app de {app_label}. Use o app correto.",
+                "error_code": "WRONG_ACCOUNT_TYPE"
+            }), 403
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "message": "Login realizado com sucesso",
+                "token": access_token,
+                "refresh_token": refresh_token,
+                "is_new_user": is_new,
+                "user": {"id": user_id, "email": email, "user_type": user_type}
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Erro no login Google: {e}", exc_info=True)
+        return jsonify({"status": "error", "error": "Erro interno ao entrar com o Google."}), 500
+
+
 @auth_bp.route('/refresh', methods=['POST', 'OPTIONS'])
 @limiter.limit("60 per minute")
 def refresh():
