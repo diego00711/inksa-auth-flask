@@ -68,8 +68,8 @@ def get_analytics_summary(conn):
             logging.info(f"📅 Filtrando desde: {date_limit}")
             
             cur.execute("""
-                SELECT total_amount, items, created_at 
-                FROM orders 
+                SELECT total_amount, items, created_at, client_id, estimated_prep_time
+                FROM orders
                 WHERE restaurant_id = %s 
                 AND status = 'delivered'
                 AND created_at >= %s
@@ -80,8 +80,8 @@ def get_analytics_summary(conn):
             logging.info(f"📅 Buscando TODOS os pedidos")
             
             cur.execute("""
-                SELECT total_amount, items, created_at 
-                FROM orders 
+                SELECT total_amount, items, created_at, client_id, estimated_prep_time
+                FROM orders
                 WHERE restaurant_id = %s 
                 AND status = 'delivered'
                 ORDER BY created_at DESC
@@ -105,8 +105,12 @@ def get_analytics_summary(conn):
             for order in orders:
                 if order['items'] and isinstance(order['items'], list):
                     for item in order['items']:
-                        if isinstance(item, dict) and 'name' in item and 'quantity' in item:
-                            all_item_names.extend([item['name']] * item.get('quantity', 1))
+                        # Itens sao gravados como {title, unit_price, quantity}.
+                        # Ler item['name'] deixava item_mais_vendido sempre 'N/A'.
+                        if isinstance(item, dict):
+                            nome_item = item.get('title') or item.get('name')
+                            if nome_item and str(nome_item).strip().lower() not in ('taxa de entrega', 'frete'):
+                                all_item_names.extend([nome_item] * int(item.get('quantity', 1) or 1))
         
         if all_item_names:
             item_counts = Counter(all_item_names)
@@ -131,12 +135,48 @@ def get_analytics_summary(conn):
         
         logging.info(f"📈 Dias com vendas: {len(vendas_por_dia)}")
 
+        # 6. Métricas extras (o front lê analyticsData.metricas_extras — sem isto
+        #    avaliação/clientes/preparo/cancelados ficavam sempre N/A/0).
+        clientes_unicos = len({o['client_id'] for o in orders if o.get('client_id')})
+        prep_times = [float(o['estimated_prep_time']) for o in orders if o.get('estimated_prep_time') is not None]
+        tempo_medio_preparo = round(sum(prep_times) / len(prep_times)) if prep_times else None
+
+        cur.execute(
+            "SELECT COALESCE(AVG(rating), 0)::float AS media, COUNT(*) AS total "
+            "FROM restaurant_reviews WHERE restaurant_id = %s",
+            (restaurant_id,),
+        )
+        rev = cur.fetchone()
+        avaliacao_media = round(float(rev['media']), 1) if rev and rev['total'] else None
+
+        if days_filter:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM orders WHERE restaurant_id = %s "
+                "AND status IN ('cancelled','canceled') AND created_at >= %s",
+                (restaurant_id, date_limit),
+            )
+        else:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM orders WHERE restaurant_id = %s "
+                "AND status IN ('cancelled','canceled')",
+                (restaurant_id,),
+            )
+        pedidos_cancelados = int(cur.fetchone()['c'] or 0)
+
+        metricas_extras = {
+            "avaliacao_media": avaliacao_media,
+            "tempo_medio_preparo": tempo_medio_preparo,
+            "clientes_unicos": clientes_unicos,
+            "pedidos_cancelados": pedidos_cancelados,
+        }
+
         # Monta resposta final
         summary = {
             "total_vendas": total_vendas,
             "pedidos_concluidos": pedidos_concluidos,
             "item_mais_vendido": item_mais_vendido,
             "vendas_por_dia": vendas_por_dia,
+            "metricas_extras": metricas_extras,
             "periodo_dias": days_param  # ✅ Retorna o período filtrado
         }
 
