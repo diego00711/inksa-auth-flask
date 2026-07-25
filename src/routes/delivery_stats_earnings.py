@@ -184,10 +184,12 @@ def get_dashboard_stats():
                     o.valor_repassado_entregador,
                     o.delivery_address, o.pickup_code,
                     o.payment_method, o.change_for,
+                    o.client_latitude, o.client_longitude,
                     CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
                     rp.restaurant_name,
                     rp.address_street, rp.address_number,
-                    rp.address_neighborhood, rp.address_city
+                    rp.address_neighborhood, rp.address_city,
+                    rp.latitude AS restaurant_latitude, rp.longitude AS restaurant_longitude
                 FROM orders o
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
@@ -209,11 +211,15 @@ def get_dashboard_stats():
                     'created_at': order['created_at'].isoformat() if order.get('created_at') else None,
                     'delivery_address': order.get('delivery_address'),
                     'client_name': order.get('client_name'),
+                    'client_latitude': float(order['client_latitude']) if order.get('client_latitude') is not None else None,
+                    'client_longitude': float(order['client_longitude']) if order.get('client_longitude') is not None else None,
                     'restaurant_name': order.get('restaurant_name'),
                     'restaurant_street': order.get('address_street'),
                     'restaurant_number': order.get('address_number'),
                     'restaurant_neighborhood': order.get('address_neighborhood'),
                     'restaurant_city': order.get('address_city'),
+                    'restaurant_latitude': float(order['restaurant_latitude']) if order.get('restaurant_latitude') is not None else None,
+                    'restaurant_longitude': float(order['restaurant_longitude']) if order.get('restaurant_longitude') is not None else None,
                     'pickup_code': order.get('pickup_code'),
                     'payment_method': order.get('payment_method'),
                     'change_for': float(order.get('change_for') or 0.0),
