@@ -399,8 +399,30 @@ def get_my_payouts():
                         r[key] = r[key].isoformat()
 
             pending_rows = [r for r in rows if r['status'] in ('pending', 'pending_transfer')]
-            balance = sum(float(r['total_net'] or 0) for r in pending_rows)
+            balance_payouts = sum(float(r['total_net'] or 0) for r in pending_rows)
             next_payout_date = min((r['period_end'] for r in pending_rows), default=None) if pending_rows else None
+
+            # Pendente REAL: pedidos entregues que ainda NAO entraram em nenhum
+            # repasse (restaurant_payout_id IS NULL). Usa o valor_repassado_restaurante
+            # ja gravado no pedido (exato, sem recalcular comissao). Assim o "A
+            # Receber" sobe na hora que o pedido e entregue, sem esperar o
+            # scheduler das 6h fechar o repasse.
+            cur.execute("""
+                SELECT COALESCE(SUM(valor_repassado_restaurante), 0) AS total,
+                       COUNT(*) AS cnt
+                  FROM orders
+                 WHERE restaurant_id = %s
+                   AND status = 'delivered'
+                   AND restaurant_payout_id IS NULL
+                   AND valor_repassado_restaurante IS NOT NULL
+            """, (restaurant_id,))
+            prow = cur.fetchone()
+            pending_orders_total = float(prow['total'] or 0)
+            pending_orders_count = int(prow['cnt'] or 0)
+
+            # Total a receber = repasses ja gerados e nao pagos + pedidos entregues
+            # ainda nao fechados (conjuntos disjuntos: os do payout tem payout_id).
+            a_receber = balance_payouts + pending_orders_total
 
             cur.execute("""
                 SELECT COALESCE(SUM(total_net), 0) AS month_total
@@ -413,7 +435,10 @@ def get_my_payouts():
 
             return jsonify({
                 "status": "success",
-                "balance": round(balance, 2),
+                "balance": round(a_receber, 2),
+                "a_receber": round(a_receber, 2),
+                "pendente_pedidos": round(pending_orders_total, 2),
+                "pendente_pedidos_count": pending_orders_count,
                 "next_payout_date": next_payout_date,
                 "month_total": round(month_total, 2),
                 "payouts": [
