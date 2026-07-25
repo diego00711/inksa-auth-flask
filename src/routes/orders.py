@@ -1064,6 +1064,11 @@ def get_pending_delivery_review():
                 return jsonify({'error': 'Perfil de entregador não encontrado.'}), 404
             delivery_id = delivery_profile['id']
 
+            # Pendente = pedido entregue por este entregador em que ELE ainda não
+            # avaliou o CLIENTE. A avaliação entregador->cliente mora em
+            # client_reviews (reviewer_type='delivery') — NÃO em delivery_reviews
+            # (que é cliente->entregador). Checar delivery_reviews fazia o pedido
+            # sumir da lista assim que o CLIENTE avaliava o entregador.
             sql_query = """
                 SELECT o.id, o.restaurant_id, rp.restaurant_name, o.client_id,
                        (cp.first_name || ' ' || cp.last_name) as client_name,
@@ -1073,17 +1078,70 @@ def get_pending_delivery_review():
                 JOIN client_profiles cp ON o.client_id = cp.id
                 WHERE o.delivery_id = %s AND o.status = 'delivered'
                   AND NOT EXISTS (
-                    SELECT 1 FROM delivery_reviews dr
-                    WHERE dr.order_id = o.id AND dr.delivery_id = %s
+                    SELECT 1 FROM client_reviews cr
+                    WHERE cr.order_id = o.id AND cr.reviewer_type = 'delivery'
                   )
                 ORDER BY o.updated_at DESC;
             """
-            cur.execute(sql_query, (delivery_id, delivery_id))
+            cur.execute(sql_query, (delivery_id,))
             orders_to_review = [dict(row) for row in cur.fetchall()]
             return jsonify(orders_to_review), 200
 
     except Exception as e:
         logger.error(f"Erro em get_pending_delivery_review: {e}", exc_info=True)
+        return jsonify({'error': 'Erro interno do servidor.'}), 500
+    finally:
+        if conn:
+            conn.close()
+
+@orders_bp.route('/pending-restaurant-review', methods=['GET', 'OPTIONS'])
+def get_pending_restaurant_review():
+    """Pedidos entregues em que o RESTAURANTE ainda não avaliou o cliente.
+
+    O app do restaurante chamava /pending-client-review (exclusivo de cliente,
+    dava 403), então nunca aparecia nada pra avaliar. Aqui o restaurante vê seus
+    pedidos entregues e avalia cliente + entregador (o card mostra os dois forms).
+    'Pendente' = ainda não existe review do restaurante sobre o cliente
+    (client_reviews.reviewer_type='restaurant')."""
+    logger.info("=== INÍCIO get_pending_restaurant_review ===")
+    conn = None
+    try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'restaurant':
+            return jsonify({'error': 'Acesso negado. Apenas para restaurantes.'}), 403
+
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_id,))
+            rp = cur.fetchone()
+            if not rp:
+                return jsonify({'error': 'Perfil de restaurante não encontrado.'}), 404
+            restaurant_id = rp['id']
+
+            sql_query = """
+                SELECT o.id, o.client_id,
+                       (cp.first_name || ' ' || cp.last_name) as client_name,
+                       o.delivery_id as deliveryman_id,
+                       (dp.first_name || ' ' || dp.last_name) as deliveryman_name,
+                       o.updated_at as completed_at, o.total_amount
+                FROM orders o
+                JOIN client_profiles cp ON o.client_id = cp.id
+                LEFT JOIN delivery_profiles dp ON o.delivery_id = dp.id
+                WHERE o.restaurant_id = %s AND o.status = 'delivered'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM client_reviews cr
+                    WHERE cr.order_id = o.id AND cr.reviewer_type = 'restaurant'
+                  )
+                ORDER BY o.updated_at DESC;
+            """
+            cur.execute(sql_query, (restaurant_id,))
+            orders_to_review = [dict(row) for row in cur.fetchall()]
+            return jsonify(orders_to_review), 200
+
+    except Exception as e:
+        logger.error(f"Erro em get_pending_restaurant_review: {e}", exc_info=True)
         return jsonify({'error': 'Erro interno do servidor.'}), 500
     finally:
         if conn:
