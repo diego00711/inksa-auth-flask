@@ -135,7 +135,7 @@ def list_restaurants():
                     COALESCE(rp.cuisine_type, rp.category)     AS cuisine_type,
                     rp.category,
                     rp.is_open,
-                    COALESCE(rp.rating, 0)                     AS rating,
+                    COALESCE((SELECT ROUND(AVG(r.rating)::numeric, 1) FROM restaurant_reviews r WHERE r.restaurant_id = rp.id), 0)                     AS rating,
                     COALESCE(rp.delivery_fee, 0)                AS delivery_fee,
                     COALESCE(rp.minimum_order, 0)                AS minimum_order,
                     rp.delivery_time                            AS delivery_time,
@@ -205,7 +205,7 @@ def get_restaurant(restaurant_id):
                         NULLIF(TRIM(COALESCE(rp.address_state,        '')), '')
                     )                                             AS address,
                     rp.is_open,
-                    COALESCE(rp.rating, 0)                        AS rating,
+                    COALESCE((SELECT ROUND(AVG(r.rating)::numeric, 1) FROM restaurant_reviews r WHERE r.restaurant_id = rp.id), 0)                        AS rating,
                     COALESCE(rp.delivery_fee, 0)                  AS delivery_fee,
                     COALESCE(rp.minimum_order, 0)                 AS minimum_order,
                     rp.delivery_time                              AS delivery_time,
