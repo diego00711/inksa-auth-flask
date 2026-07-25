@@ -157,9 +157,16 @@ def handle_orders():
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         if request.method == 'GET':
+            # Whitelist de ordenação (o valor entra interpolado no ORDER BY —
+            # sem isto, sort_by/sort_order abririam SQL injection).
+            ALLOWED_SORT = {'created_at', 'updated_at', 'total_amount'}
             sort_by = request.args.get('sort_by', 'created_at')
-            sort_order = request.args.get('sort_order', 'desc')
+            if sort_by not in ALLOWED_SORT:
+                sort_by = 'created_at'
+            sort_order = 'asc' if str(request.args.get('sort_order', 'desc')).lower() == 'asc' else 'desc'
             status_filter = request.args.get('status')
+            start_date = (request.args.get('start_date') or '').strip()
+            end_date = (request.args.get('end_date') or '').strip()
 
             query = """
                 SELECT o.*,
@@ -193,6 +200,17 @@ def handle_orders():
             if status_filter:
                 query += " AND o.status = %s"
                 params.append(status_filter)
+
+            # Filtro de período (De/Até) do painel — compara pela DATA LOCAL do
+            # pedido (created_at é UTC; converte pro fuso de SP pra o dia bater
+            # com o que o restaurante vê). Antes esses params eram IGNORADOS, por
+            # isso o filtro de data "não fazia nada".
+            if start_date:
+                query += " AND (o.created_at AT TIME ZONE 'America/Sao_Paulo')::date >= %s"
+                params.append(start_date)
+            if end_date:
+                query += " AND (o.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= %s"
+                params.append(end_date)
 
             query += f" ORDER BY o.{sort_by} {sort_order}"
 
