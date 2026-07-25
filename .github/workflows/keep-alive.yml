@@ -1,16 +1,16 @@
-name: Keep-alive (Supabase + Render)
+name: Keep-alive (Supabase)
 
-# Mantém o backend do Render QUENTE (o plano free hiberna após ~15 min sem
-# tráfego, causando cold start de ~50s na próxima visita). Pingar a cada 10
-# min evita a hibernação. O /api/health faz uma consulta real no banco, o que
-# também conta como atividade no Supabase e impede a pausa automática dele.
-# Obs.: o cron do GitHub Actions pode atrasar alguns minutos sob carga. Para
-# produção de verdade, considere um monitor externo (cron-job.org a cada 5min)
-# ou um plano pago do Render (sem hibernação).
+# O Render agora é PAGO (Starter, sempre ligado) desde 25/07/2026 — não hiberna
+# mais, então não precisamos mais pingar de 10 em 10 min pra mantê-lo quente.
+# O que AINDA precisa de ping é o SUPABASE free, que pausa sozinho após ~7 dias
+# sem atividade. O /api/health faz uma consulta real no banco, então um ping a
+# cada 6h já mantém o Supabase acordado com folga de sobra.
+# Obs.: o monitoramento de uptime/alerta fica por conta do UptimeRobot (que
+# pinga /health à parte). Este workflow é só o "não deixa o banco dormir".
 
 on:
   schedule:
-    - cron: "*/10 * * * *"  # a cada 10 minutos (mantém o Render quente)
+    - cron: "0 */6 * * *"  # a cada 6h — mantém só o Supabase acordado
   workflow_dispatch: {}
 
 jobs:
