@@ -243,7 +243,11 @@ def get_order_details(order_id):
         if conn:
             conn.close()
 
-@delivery_orders_bp.route('/orders/<order_id>/cash-payment', methods=['POST'])
+# O blueprint já entra com prefixo /api/delivery/orders (main.py:283), então a
+# rota NÃO deve repetir /orders — senão o caminho vira /api/delivery/orders/orders/...
+# e o app do entregador (que chama POST /api/delivery/orders/<id>/cash-payment)
+# tomava 404 ao confirmar recebimento em dinheiro.
+@delivery_orders_bp.route('/<order_id>/cash-payment', methods=['POST'])
 @cross_origin()
 @delivery_token_required
 def confirm_cash_payment(order_id):
