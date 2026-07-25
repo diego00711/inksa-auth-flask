@@ -10,8 +10,6 @@ Concurrency safety (Render multi-dyno):
 """
 import logging
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -83,41 +81,6 @@ def _run_payouts_job() -> None:
 # ---------------------------------------------------------------------------
 # Expire pending payments job
 # ---------------------------------------------------------------------------
-
-# Só o backend: o /api/health faz um SELECT real, então este ping mantém o
-# Render acordado E o Supabase ativo de uma vez. Os fronts na Vercel NÃO
-# hibernam — pingar eles era inútil e virava ponto de trava do job.
-_KEEP_ALIVE_SERVICES = [
-    "https://inksa-auth-flask-dev.onrender.com/api/health",
-]
-
-
-def _keep_alive_job() -> None:
-    """Ping do backend a cada 10 min pra evitar cold start (Render) + Supabase pausar.
-
-    Blindado contra travamento: o timeout do requests NÃO cobre resolução de DNS,
-    então uma trava de DNS pendurava o job (era a causa do "skipped: maximum
-    number of running instances reached"). O gevent.Timeout aborta o greenlet
-    inteiro em N segundos, aconteça o que acontecer."""
-    import requests as _requests
-    try:
-        from gevent import Timeout as _GeventTimeout
-    except Exception:
-        _GeventTimeout = None
-
-    extra = [u.strip() for u in os.environ.get("KEEP_ALIVE_EXTRA_URLS", "").split(",") if u.strip()]
-    services = _KEEP_ALIVE_SERVICES + extra
-
-    for url in services:
-        try:
-            if _GeventTimeout is not None:
-                with _GeventTimeout(15):  # teto duro por URL — cobre até DNS travado
-                    resp = _requests.get(url, timeout=(5, 6))
-            else:
-                resp = _requests.get(url, timeout=(5, 6))
-            logger.info("[KEEP-ALIVE] %s → %d", url, resp.status_code)
-        except Exception as exc:
-            logger.warning("[KEEP-ALIVE] %s → FAILED: %s", url, exc)
 
 
 def _expire_pending_payments_job() -> None:
@@ -330,20 +293,11 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=300,
     )
     logger.info("[SCHEDULER] Job de expiração de pagamentos: a cada 30 minutos")
-    _scheduler.add_job(
-        func=_keep_alive_job,
-        trigger="interval",
-        minutes=10,
-        id="keep_alive",
-        name="Keep-alive ping to prevent Render cold start",
-        replace_existing=True,
-        misfire_grace_time=120,
-        # Sem isso, o APScheduler so roda a 1a vez em now+10min — deixando o
-        # backend vulneravel a hibernar (free tier) logo apos cada deploy/restart,
-        # antes do 1o self-ping acontecer. Dispara imediatamente ao subir tambem.
-        next_run_time=datetime.now(ZoneInfo(tz)),
-    )
-    logger.info("[SCHEDULER] Keep-alive job: a cada 10 minutos")
+    # Keep-alive interno REMOVIDO (25/07/2026): o Render agora e pago (Starter,
+    # sempre ligado), entao nao precisa mais se auto-pingar pra evitar cold start.
+    # O self-ping ainda dava gevent.Timeout de DNS (dois tracebacks vermelhos no
+    # log). O Supabase segue protegido pelo GitHub Action
+    # (.github/workflows/keep-alive.yml, a cada 6h, que bate no /api/health).
     _scheduler.add_job(
         func=_apply_opening_hours_job,
         trigger="interval",
