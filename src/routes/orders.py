@@ -178,6 +178,7 @@ def handle_orders():
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 WHERE 1=1
+                  AND o.archived_at IS NULL
             """
             params = []
 
@@ -336,6 +337,22 @@ def update_order_status(order_id):
             if not is_valid_status_transition(current_status, new_status_internal):
                 error_message = f"Transição de status de '{current_status}' para '{new_status_internal}' não permitida"
                 return jsonify({"error": error_message}), 400
+
+            # Arquivar NÃO apaga o status de entrega. Antes o arquivamento fazia
+            # status='archived', e aí o pedido sumia de TODAS as queries que
+            # filtram status='delivered' (financeiro, repasses, analytics) — a
+            # receita "entregue e arquivada" simplesmente desaparecia. Agora
+            # marca só archived_at; o painel esconde por esse campo, mas o
+            # status (delivered/cancelled) e o financeiro permanecem intactos.
+            if new_status_internal == 'archived':
+                cur.execute(
+                    "UPDATE orders SET archived_at = NOW(), updated_at = NOW() WHERE id = %s RETURNING *",
+                    (str(order_id),))
+                _arch = dict(cur.fetchone())
+                conn.commit()
+                _arch.pop('pickup_code', None)
+                _arch.pop('delivery_code', None)
+                return jsonify(_arch), 200
 
             cur.execute(
                 "UPDATE orders SET status = %s, updated_at = NOW() WHERE id = %s RETURNING *",
@@ -1771,13 +1788,13 @@ def archive_order(order_id):
 
                 cur.execute("""
                     UPDATE orders
-                    SET status = 'archived', updated_at = NOW()
+                    SET archived_at = NOW(), updated_at = NOW()
                     WHERE id = %s
-                    RETURNING id, status, updated_at
+                    RETURNING id, status, archived_at
                 """, (str(order_id),))
                 result = cur.fetchone()
                 conn.commit()
-                return jsonify({"status": "success", "order_id": str(result['id']), "new_status": result['status']}), 200
+                return jsonify({"status": "success", "order_id": str(result['id']), "new_status": result['status'], "archived": True}), 200
 
             elif user_type == 'restaurant':
                 cur.execute("""
@@ -1795,13 +1812,13 @@ def archive_order(order_id):
 
                 cur.execute("""
                     UPDATE orders
-                    SET status = 'archived', updated_at = NOW()
+                    SET archived_at = NOW(), updated_at = NOW()
                     WHERE id = %s
-                    RETURNING id, status, updated_at
+                    RETURNING id, status, archived_at
                 """, (str(order_id),))
                 result = cur.fetchone()
                 conn.commit()
-                return jsonify({"status": "success", "order_id": str(result['id']), "new_status": result['status']}), 200
+                return jsonify({"status": "success", "order_id": str(result['id']), "new_status": result['status'], "archived": True}), 200
 
             else:
                 return jsonify({"error": "Acesso negado"}), 403
