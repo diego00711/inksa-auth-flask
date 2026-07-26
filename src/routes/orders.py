@@ -864,8 +864,10 @@ def get_order(order_id):
     "Pedido nao encontrado" em TODO pedido.
 
     O lat/lng/endereco do restaurante vem do JOIN (nao existem em orders) —
-    e o que desenha o mapa. pickup_code/delivery_code sao removidos: a tela
-    nao usa e eles valem como segredo de entrega.
+    e o que desenha o mapa. O pickup_code (segredo entre restaurante e
+    entregador) e sempre removido. O delivery_code fica visivel SO pro cliente
+    dono do pedido — e ele quem mostra esse codigo ao entregador na entrega, e
+    a tela de acompanhamento exibe pra nao precisar sair pra outra tela.
     """
     conn = None
     try:
@@ -920,7 +922,12 @@ def get_order(order_id):
 
         order = dict(row)
         order.pop('pickup_code', None)
-        order.pop('delivery_code', None)
+        # O delivery_code (4 letras) é o que o CLIENTE mostra ao entregador pra
+        # confirmar a entrega — então o próprio cliente PRECISA vê-lo na tela de
+        # acompanhamento. Continua escondido pros demais (o entregador pega do
+        # cliente na hora).
+        if user_type != 'client':
+            order.pop('delivery_code', None)
         return jsonify({"status": "success", "data": order}), 200
 
     except Exception as e:
