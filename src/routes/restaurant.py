@@ -429,7 +429,8 @@ def get_my_payouts():
                   FROM payouts
                  WHERE partner_type = 'restaurant' AND partner_id = %s
                    AND status = 'paid'
-                   AND date_trunc('month', updated_at) = date_trunc('month', CURRENT_DATE)
+                   AND date_trunc('month', updated_at AT TIME ZONE 'America/Sao_Paulo')
+                       = date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo')
             """, (restaurant_id,))
             month_total = float(cur.fetchone()['month_total'] or 0)
 

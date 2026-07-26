@@ -225,9 +225,9 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     # Recentes
     params, where = [], []
     if date_from:
-        where.append("o.created_at::date >= %s"); params.append(date_from)
+        where.append("(o.created_at AT TIME ZONE 'America/Sao_Paulo')::date >= %s"); params.append(date_from)
     if date_to:
-        where.append("o.created_at::date <= %s"); params.append(date_to)
+        where.append("(o.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= %s"); params.append(date_to)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     # client_name/restaurant_name NÃO existem em orders — vêm dos perfis via
     # JOIN (senão caía sempre no fallback "Cliente"/"Restaurante").

@@ -1,10 +1,13 @@
 # inksa-auth-flask/src/routes/delivery_stats_earnings.py - VERSÃO OTIMIZADA
 
 from flask import Blueprint, request, jsonify
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import psycopg2.extras
 import traceback
 import logging
+
+_TZ_SP = ZoneInfo('America/Sao_Paulo')
 
 from ..utils.helpers import get_db_connection
 from ..utils.decorators import delivery_token_required
@@ -26,7 +29,9 @@ def get_dashboard_stats():
             return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            today = date.today()
+            # HOJE no fuso de São Paulo — date.today() no Render (UTC) já virava o
+            # dia seguinte às 21h de SP, jogando a semana/gráfico pro dia errado.
+            today = datetime.now(_TZ_SP).date()
             
             # Buscar perfil do entregador
             cur.execute("""
@@ -132,12 +137,12 @@ def get_dashboard_stats():
             
             cur.execute("""
                 SELECT
-                    DATE_TRUNC('day', created_at)::date as day,
+                    (created_at AT TIME ZONE 'America/Sao_Paulo')::date as day,
                     SUM(COALESCE(valor_repassado_entregador, delivery_fee)) as value
                 FROM orders
                 WHERE delivery_id = %s
                 AND status IN ('delivered', 'delivery_failed')
-                AND created_at >= %s
+                AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= %s
                 GROUP BY 1
                 ORDER BY 1;
             """, (profile_id, start_of_week))
