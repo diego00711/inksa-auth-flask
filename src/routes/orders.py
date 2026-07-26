@@ -509,7 +509,11 @@ def complete_order(order_id):
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT status, delivery_code, restaurant_id, delivery_id FROM orders WHERE id = %s", (str(order_id),))
+            cur.execute(
+                "SELECT status, delivery_code, restaurant_id, delivery_id, "
+                "payment_method, total_amount, delivery_fee, comissao_plataforma "
+                "FROM orders WHERE id = %s",
+                (str(order_id),))
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado"}), 404
@@ -550,7 +554,7 @@ def complete_order(order_id):
             # ao repasse DESTE pedido (bônus por entrega + % a mais do frete). Só
             # agora, que a entrega tem dono. Seed é 0 -> inerte até o admin configurar.
             try:
-                if completed_order and completed_order['delivery_id']:
+                if completed_order and completed_order['delivery_id'] and order['payment_method'] != 'cash':
                     from ..utils.club import delivery_level_benefits
                     _cb = delivery_level_benefits(str(completed_order['delivery_id']))
                     _bonus = float(_cb.get('per_delivery_bonus') or 0)
@@ -570,6 +574,25 @@ def complete_order(order_id):
                         logger.info(f"🏅 Clube entregador no pedido {order_id}: repasse {_base}->{_new_pay}")
             except Exception as _club_e:
                 logger.warning(f"Falha ao aplicar clube do entregador: {_club_e}")
+
+            # Pedido em DINHEIRO: liquida agora, no fechamento da entrega. O
+            # entregador recolheu em espécie ao entregar, então já registramos o
+            # split financeiro do pedido E a dívida dele com a plataforma — sem
+            # depender de ele clicar "confirmar recebimento" (que podia ser
+            # pulado por outra tela ou por "não agora", deixando o financeiro
+            # zerado e a dívida perdida). É idempotente: se a confirmação manual
+            # rodar depois, não duplica.
+            cash_breakdown = None
+            try:
+                if order['payment_method'] == 'cash' and completed_order and completed_order['delivery_id']:
+                    from ..utils.cash_settlement import settle_cash_order
+                    cash_breakdown, _was_new = settle_cash_order(
+                        cur, order_id,
+                        completed_order['delivery_id'], completed_order['restaurant_id'],
+                        order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'))
+                    logger.info(f"💵 Pedido dinheiro {order_id} liquidado no fechamento (novo={_was_new})")
+            except Exception as _cash_e:
+                logger.error(f"Falha ao liquidar pedido em dinheiro {order_id}: {_cash_e}", exc_info=True)
 
             conn.commit()
             logger.info(f"✅ Pedido {order_id} marcado como entregue!")
@@ -609,7 +632,18 @@ def complete_order(order_id):
                 except Exception as _gam_err:
                     logger.warning(f"Gamificação: falha ao conceder pontos para pedido {order_id}: {_gam_err}")
 
-            return jsonify({"status": "success", "message": "Pedido entregue com sucesso!"}), 200
+            _resp = {"status": "success", "message": "Pedido entregue com sucesso!"}
+            if cash_breakdown:
+                # Resumo do dinheiro pro app mostrar direto (o entregador recebeu
+                # X, a taxa dele é Y, e ele deve Z à plataforma).
+                _resp["cash"] = {
+                    "voce_recebeu": cash_breakdown["total_amount"],
+                    "sua_taxa": cash_breakdown["courier_freight"],
+                    "deve_a_plataforma": cash_breakdown["cash_debt"],
+                    "comissao": cash_breakdown["commission"],
+                    "repasse_restaurante": cash_breakdown["restaurant_share"],
+                }
+            return jsonify(_resp), 200
 
     except Exception as e:
         logger.error(f"Erro em complete_order: {e}", exc_info=True)

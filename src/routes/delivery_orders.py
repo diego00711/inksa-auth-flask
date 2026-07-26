@@ -275,73 +275,25 @@ def confirm_cash_payment(order_id):
             if order['status'] != 'delivered':
                 return jsonify({"status": "error", "message": "Pedido ainda não foi entregue"}), 400
 
-            cur.execute("SELECT id FROM cash_payment_records WHERE order_id = %s", (order_id,))
-            if cur.fetchone():
-                return jsonify({"status": "error", "message": "Pagamento em dinheiro já confirmado"}), 409
-
-            total_amount = float(order['total_amount'] or 0)
-            delivery_fee = float(order['delivery_fee'] or 0)
-            commission = float(order.get('comissao_plataforma') or 0)
-            if not commission:
-                # Antes usava PLATFORM_COMMISSION_RATE fixo em config.py (15%,
-                # nunca atualizado) -- desconectado do que o admin configura em
-                # Configurações > Taxas. Agora usa a mesma funcao/fonte dos
-                # pedidos online, garantindo a mesma taxa em qualquer forma de
-                # pagamento.
-                commission = float(calculate_platform_commission(total_amount - delivery_fee, order['restaurant_id']))
-
-            # Repasse do frete ao entregador = frete integral menos a taxa de
-            # administracao da plataforma (mesmo modelo do online). No dinheiro
-            # o entregador recolhe tudo em especie, entao a administracao do
-            # frete (freight_admin) entra na divida dele com a plataforma.
-            courier_freight = float(calculate_courier_payout(None, delivery_fee=delivery_fee))
-            freight_admin = round(delivery_fee - courier_freight, 2)  # = frete * taxa admin
-            restaurant_share = round(total_amount - delivery_fee - commission, 2)
-            cash_debt = round(total_amount - courier_freight, 2)
-
-            # Colunas reais: restaurant_id (NOT NULL), platform_commission (nao
-            # `commission`). `cash_debt` nao existe nesta tabela -- o debito
-            # corrente do entregador fica em delivery_profiles.cash_debt (abaixo);
-            # aqui debt_status default 'pending' cobre o estado do registro.
-            cur.execute("""
-                INSERT INTO cash_payment_records
-                    (order_id, delivery_id, restaurant_id, total_amount, delivery_fee, platform_commission, restaurant_share)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (order_id, profile_id, order['restaurant_id'], total_amount, delivery_fee, commission, restaurant_share))
-
-            cur.execute("""
-                UPDATE delivery_profiles
-                SET cash_debt = COALESCE(cash_debt, 0) + %s,
-                    total_cash_received = COALESCE(total_cash_received, 0) + %s,
-                    updated_at = NOW()
-                WHERE id = %s
-            """, (cash_debt, total_amount, profile_id))
-
-            # Grava a segregação financeira no proprio pedido para os relatorios
-            # (que leem de orders). Mesmo modelo do online: entregador recebe o
-            # frete menos a taxa de administracao; a margem_frete da plataforma
-            # e essa taxa (freight_admin).
-            cur.execute("""
-                UPDATE orders
-                   SET comissao_plataforma = %s,
-                       valor_repassado_restaurante = %s,
-                       valor_repassado_entregador = %s,
-                       margem_frete = %s,
-                       updated_at = NOW()
-                 WHERE id = %s
-            """, (commission, restaurant_share, courier_freight, freight_admin, order_id))
-
+            # Liquidação idempotente (mesma lógica do fechamento da entrega):
+            # se o pedido já foi liquidado no complete_order, isto NÃO duplica a
+            # dívida — apenas recalcula e devolve o resumo pro app mostrar. Não é
+            # mais erro confirmar um pedido já liquidado.
+            from ..utils.cash_settlement import settle_cash_order
+            breakdown, _was_new = settle_cash_order(
+                cur, order_id, profile_id, order['restaurant_id'],
+                order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'))
             conn.commit()
 
         return jsonify({
             "status": "success",
             "message": "Recebimento em dinheiro confirmado!",
             "data": {
-                "voce_recebeu": total_amount,
-                "sua_taxa": courier_freight,
-                "deve_a_plataforma": cash_debt,
-                "comissao": commission,
-                "repasse_restaurante": restaurant_share,
+                "voce_recebeu": breakdown["total_amount"],
+                "sua_taxa": breakdown["courier_freight"],
+                "deve_a_plataforma": breakdown["cash_debt"],
+                "comissao": breakdown["commission"],
+                "repasse_restaurante": breakdown["restaurant_share"],
             }
         }), 200
 
