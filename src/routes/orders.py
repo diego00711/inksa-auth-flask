@@ -178,7 +178,6 @@ def handle_orders():
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
                 WHERE 1=1
-                  AND o.archived_at IS NULL
             """
             params = []
 
@@ -193,10 +192,16 @@ def handle_orders():
                     # Restaurante NÃO vê pedidos aguardando pagamento
                     query += " AND o.status != 'awaiting_payment'"
                     logger.info("🔒 Filtrando pedidos não pagos para restaurante")
+                    # NÃO filtra arquivados aqui: o painel do restaurante esconde
+                    # os arquivados das colunas do kanban no front, mas os KPIs
+                    # (Pedidos Hoje/Faturamento) precisam contar a venda do dia
+                    # mesmo depois de arquivar. Só o cliente esconde os deletados.
 
             elif user_type == 'client':
                 query += " AND o.client_id = (SELECT id FROM client_profiles WHERE user_id = %s)"
                 params.append(user_auth_id)
+                # Cliente não vê pedidos que ele "excluiu" (arquivou).
+                query += " AND o.archived_at IS NULL"
 
             if status_filter:
                 query += " AND o.status = %s"
