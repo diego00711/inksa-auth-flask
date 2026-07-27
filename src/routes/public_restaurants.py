@@ -109,6 +109,20 @@ def list_restaurants():
             # params do CASE de destaque (logo após o dist_expr, ainda no SELECT)
             params += [featured_threshold, featured_threshold]
 
+            # Filtro por RAIO de atendimento: quando temos as coordenadas do
+            # cliente, só mostra restaurantes dentro de service_radius_km dele —
+            # é o que separa as cidades (cliente vê só o que dá pra atender).
+            # Restaurantes sem coordenadas continuam aparecendo (fail-open) pra
+            # não sumirem por falta de geocode.
+            if has_coords:
+                from ..utils.platform_settings import get_settings as _get_settings
+                radius_km = float(_get_settings()["platform_max_delivery_radius"])
+                where.append(
+                    "(rp.latitude IS NULL OR rp.longitude IS NULL OR "
+                    "earth_distance(ll_to_earth(rp.latitude, rp.longitude), ll_to_earth(%s, %s)) <= %s)"
+                )
+                params += [user_lat, user_lon, radius_km * 1000.0]
+
             if category:
                 where.append("(rp.category ILIKE %s OR rp.cuisine_type ILIKE %s)")
                 params += [f"%{category}%", f"%{category}%"]

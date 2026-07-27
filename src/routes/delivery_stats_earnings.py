@@ -38,7 +38,9 @@ def get_dashboard_stats():
                 SELECT id, is_available, daily_goal, rating, total_deliveries,
                        online_minutes_today, distance_today,
                        COALESCE(cash_debt, 0) AS cash_debt,
-                       COALESCE(total_cash_received, 0) AS total_cash_received
+                       COALESCE(total_cash_received, 0) AS total_cash_received,
+                       COALESCE(current_lat, latitude) AS lat,
+                       COALESCE(current_lng, longitude) AS lng
                 FROM delivery_profiles
                 WHERE user_id = %s
             """, (user_id,))
@@ -115,13 +117,32 @@ def get_dashboard_stats():
             _rt = cur.fetchone()
             response_data["avgRating"] = float((_rt and _rt['avg_rating']) or 0.0)
 
-            # ✅ PEDIDOS DISPONÍVEIS (sem entregador)
-            cur.execute("""
-                SELECT COUNT(*) as available_count
-                FROM orders
-                WHERE status = 'ready'
-                AND delivery_id IS NULL
-            """)
+            # ✅ PEDIDOS DISPONÍVEIS (sem entregador) — no MESMO raio da lista de
+            # disponíveis, pra o contador do dashboard bater com o que o
+            # entregador realmente vê (senão diria "3 disponíveis" com pedidos de
+            # outra cidade e a lista viria vazia).
+            _drv_lat = delivery_profile.get('lat')
+            _drv_lng = delivery_profile.get('lng')
+            if _drv_lat is not None and _drv_lng is not None:
+                from ..utils.platform_settings import get_settings
+                _radius_m = float(get_settings()["platform_max_delivery_radius"]) * 1000.0
+                cur.execute("""
+                    SELECT COUNT(*) as available_count
+                    FROM orders o
+                    LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                    WHERE (o.status = 'ready' OR o.status = 'accepted_by_delivery')
+                      AND o.delivery_id IS NULL
+                      AND (rp.latitude IS NULL OR rp.longitude IS NULL OR
+                           earth_distance(ll_to_earth(rp.latitude, rp.longitude),
+                                          ll_to_earth(%s, %s)) <= %s)
+                """, (float(_drv_lat), float(_drv_lng), _radius_m))
+            else:
+                cur.execute("""
+                    SELECT COUNT(*) as available_count
+                    FROM orders
+                    WHERE (status = 'ready' OR status = 'accepted_by_delivery')
+                      AND delivery_id IS NULL
+                """)
             available_result = cur.fetchone()
             if available_result:
                 response_data["available"] = available_result['available_count']

@@ -39,6 +39,12 @@ _DEFAULTS: dict[str, Decimal] = {
     # O entregador recebe o frete integral MENOS esta taxa. Editável no admin
     # (campo "Taxa de administração sobre o frete", key financial_delivery_commission).
     "financial_delivery_commission": Decimal("0.15"),
+    # Raio de atendimento em km (chave já existente e editável no admin em
+    # "Raio máximo de entrega"). O cliente só vê restaurantes dentro deste raio
+    # dele, e o entregador só vê pedidos cujo restaurante está dentro deste raio
+    # dele. É o que separa as cidades sem misturar tudo (cada um vê o que é da
+    # sua região).
+    "platform_max_delivery_radius": Decimal("15"),
 }
 
 
@@ -58,7 +64,7 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
 
     # Campos em R$ ou km (números diretos)
     for k in ("fixed_delivery_fee", "per_km_delivery_fee", "free_delivery_threshold_km",
-              "delivery_base_fee", "delivery_per_km_fee"):
+              "delivery_base_fee", "delivery_per_km_fee", "platform_max_delivery_radius"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 
     # commission_rate é guardado como percentual humano (10 = 10%);

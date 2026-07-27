@@ -1234,8 +1234,34 @@ def get_available_orders():
             return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            sql_query = """
-                SELECT 
+            # Localização do entregador: usa o GPS ao vivo (current_lat/lng) e,
+            # se não tiver, o endereço cadastrado (latitude/longitude).
+            cur.execute(
+                "SELECT COALESCE(current_lat, latitude) AS lat, "
+                "COALESCE(current_lng, longitude) AS lng "
+                "FROM delivery_profiles WHERE user_id = %s", (user_id,))
+            _dp = cur.fetchone()
+            drv_lat = _dp['lat'] if _dp else None
+            drv_lng = _dp['lng'] if _dp else None
+
+            # Filtro por RAIO: o entregador só vê pedidos cujo RESTAURANTE está
+            # dentro de service_radius_km dele — é o que separa as cidades (cada
+            # entregador vê só o que é da sua região). Fail-open: sem coordenadas
+            # do entregador (ou restaurante sem coords), não filtra pra não sumir.
+            radius_clause = ""
+            params = []
+            if drv_lat is not None and drv_lng is not None:
+                from ..utils.platform_settings import get_settings
+                radius_km = float(get_settings()["platform_max_delivery_radius"])
+                radius_clause = (
+                    " AND (rp.latitude IS NULL OR rp.longitude IS NULL OR "
+                    "earth_distance(ll_to_earth(rp.latitude, rp.longitude), "
+                    "ll_to_earth(%s, %s)) <= %s)"
+                )
+                params += [float(drv_lat), float(drv_lng), radius_km * 1000.0]
+
+            sql_query = f"""
+                SELECT
                     o.id,
                     o.restaurant_id,
                     COALESCE(rp.restaurant_name, 'Restaurante') AS restaurant_name,
@@ -1254,12 +1280,13 @@ def get_available_orders():
                     o.created_at
                 FROM orders o
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
-                WHERE 
+                WHERE
                     (o.status = 'ready' OR o.status = 'accepted_by_delivery')
                     AND o.delivery_id IS NULL
+                    {radius_clause}
                 ORDER BY o.created_at ASC;
             """
-            cur.execute(sql_query)
+            cur.execute(sql_query, params)
             rows = cur.fetchall()
 
             available_orders = []
