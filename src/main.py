@@ -376,6 +376,14 @@ def health_check():
         except Exception as exc:
             logger.warning(f"Health check: consulta ao banco falhou: {exc}")
             db_status = "error"
+    # Provedores de pagamento/repasse ativos. O Asaas é o atual (PAYMENT_PROVIDER=
+    # asaas); o Mercado Pago virou legado. A tela de Integrações lê isto pra
+    # mostrar o provider certo em vez de só "Mercado Pago".
+    import os
+    _payment_provider = (os.environ.get("PAYMENT_PROVIDER") or "mercadopago").strip().lower()
+    _payout_provider = (os.environ.get("PAYOUT_PROVIDER") or "mock").strip().lower()
+    _asaas_configured = bool(os.environ.get("ASAAS_API_KEY"))
+    _asaas_env = (os.environ.get("ASAAS_ENV") or "sandbox").strip().lower()
     return jsonify({
         "status": "ok" if db_status == "connected" else "degraded",
         "timestamp": datetime.now().isoformat(),
@@ -383,6 +391,10 @@ def health_check():
         "version": "1.0.0",
         "database": db_status,
         "mercado_pago": "configured" if app.mp_sdk else "not_configured",
+        "payment_provider": _payment_provider,
+        "payout_provider": _payout_provider,
+        "asaas": "configured" if _asaas_configured else "not_configured",
+        "asaas_env": _asaas_env,
     }), 200
 
 # --- Handlers de SocketIO ---
