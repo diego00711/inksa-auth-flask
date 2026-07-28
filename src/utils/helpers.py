@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 import logging
+import jwt  # PyJWT — validação LOCAL do JWT do Supabase (sem bater no Auth remoto)
 import psycopg2
 import psycopg2.extras
 from psycopg2.extras import register_uuid
@@ -94,6 +95,43 @@ def get_db_connection():
         return None
 
 
+# --- Validação LOCAL do JWT (corta a ida-e-volta cross-continente do Auth) ---
+# O Supabase assina os access tokens com este segredo (HS256). Dashboard →
+# Settings → API → JWT Settings → "JWT Secret". Com ele setado, validamos o
+# token localmente (assinatura + expiração), SEM chamar supabase.auth.get_user()
+# (um HTTP pro Auth em São Paulo) a CADA request autenticado. Sem o segredo, o
+# código cai no caminho remoto de antes — então é seguro subir antes de configurar.
+_SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
+if _SUPABASE_JWT_SECRET:
+    logger.info("✅ SUPABASE_JWT_SECRET presente — validação de token LOCAL ativa.")
+else:
+    logger.warning("⚠️ SUPABASE_JWT_SECRET ausente — validando token via Auth REMOTO (mais lento).")
+
+
+def _verify_jwt_local(token):
+    """Valida o JWT do Supabase localmente (HS256 + exp), sem rede.
+
+    Retorna o user_id (claim 'sub') em caso de sucesso, ou None se não der pra
+    validar localmente (segredo ausente, assinatura inválida, expirado, sem
+    'sub'/'exp', audience diferente) — nesses casos o chamador cai no Auth
+    remoto, que é autoritativo. Nunca levanta."""
+    if not _SUPABASE_JWT_SECRET or not token:
+        return None
+    try:
+        claims = jwt.decode(
+            token,
+            _SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            audience="authenticated",
+            options={"require": ["exp", "sub"]},
+        )
+        sub = claims.get("sub")
+        return str(sub) if sub else None
+    except Exception:
+        # Expirado/assinatura errada/aud diferente/etc. — deixa o remoto decidir.
+        return None
+
+
 # --- Auth helper ---
 def _extract_bearer_token(auth_header: str):
     """Extrai o token de um cabeçalho Authorization.
@@ -123,16 +161,19 @@ def get_user_id_from_token(auth_header):
 
     conn = None
     try:
-        if not supabase:
-            raise RuntimeError("Supabase client não inicializado.")
-
-        # Valida o JWT no Supabase e extrai o user.id (UUID do auth)
-        user_resp = supabase.auth.get_user(token)
-        user = getattr(user_resp, "user", None)
-        if not user:
-            return None, None, (jsonify({"error": "Token inválido ou expirado"}), 401)
-
-        user_id = str(user.id)
+        # 1) Tenta validar o JWT LOCALMENTE (rápido, sem rede). 2) Se não rolar
+        #    (sem segredo, expirado, etc.), cai no Auth REMOTO do Supabase, que é
+        #    autoritativo mas cross-continente. O caminho local corta uma
+        #    ida-e-volta a São Paulo de todo request autenticado.
+        user_id = _verify_jwt_local(token)
+        if not user_id:
+            if not supabase:
+                raise RuntimeError("Supabase client não inicializado.")
+            user_resp = supabase.auth.get_user(token)
+            user = getattr(user_resp, "user", None)
+            if not user:
+                return None, None, (jsonify({"error": "Token inválido ou expirado"}), 401)
+            user_id = str(user.id)
 
         conn = get_db_connection()
         if not conn:
