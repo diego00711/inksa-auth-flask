@@ -102,35 +102,56 @@ def get_db_connection():
 # token localmente (assinatura + expiração), SEM chamar supabase.auth.get_user()
 # (um HTTP pro Auth em São Paulo) a CADA request autenticado. Sem o segredo, o
 # código cai no caminho remoto de antes — então é seguro subir antes de configurar.
-_SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
-if _SUPABASE_JWT_SECRET:
-    logger.info("✅ SUPABASE_JWT_SECRET presente — validação de token LOCAL ativa.")
+# Candidatos a segredo do JWT do Supabase, tentados em ordem. Aceita
+# SUPABASE_JWT_SECRET (nome dedicado) OU o JWT_SECRET que já pode existir no
+# Render — MAS SÓ funciona se esse valor for de fato o "JWT Secret" do Supabase
+# (Dashboard → Settings → API → JWT Settings). ⚠️ O JWT_SECRET também vira o
+# Flask SECRET_KEY (main.py); se ele for um valor próprio/aleatório (NÃO o do
+# Supabase), a validação local só falha e cai no remoto — sem quebrar, mas sem
+# ganho. O log de 1ª validação abaixo confirma qual caso é o real.
+_JWT_SECRET_CANDIDATES = [s for s in (
+    os.environ.get("SUPABASE_JWT_SECRET"),
+    os.environ.get("JWT_SECRET"),
+) if s]
+_jwt_local_logged = {"ok": False, "fail": False}
+
+if _JWT_SECRET_CANDIDATES:
+    logger.info("✅ Segredo(s) de JWT presente(s) — tentando validação de token LOCAL (confirmar no log de 1ª validação).")
 else:
-    logger.warning("⚠️ SUPABASE_JWT_SECRET ausente — validando token via Auth REMOTO (mais lento).")
+    logger.warning("⚠️ Sem segredo de JWT — validando token via Auth REMOTO (mais lento).")
 
 
 def _verify_jwt_local(token):
     """Valida o JWT do Supabase localmente (HS256 + exp), sem rede.
 
-    Retorna o user_id (claim 'sub') em caso de sucesso, ou None se não der pra
-    validar localmente (segredo ausente, assinatura inválida, expirado, sem
-    'sub'/'exp', audience diferente) — nesses casos o chamador cai no Auth
-    remoto, que é autoritativo. Nunca levanta."""
-    if not _SUPABASE_JWT_SECRET or not token:
+    Tenta cada segredo candidato. Retorna o user_id (claim 'sub') em caso de
+    sucesso, ou None se não der pra validar localmente (sem segredo, assinatura
+    inválida com todos, expirado, sem 'sub'/'exp', audience diferente) — aí o
+    chamador cai no Auth remoto, que é autoritativo. Nunca levanta."""
+    if not _JWT_SECRET_CANDIDATES or not token:
         return None
-    try:
-        claims = jwt.decode(
-            token,
-            _SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"require": ["exp", "sub"]},
-        )
-        sub = claims.get("sub")
-        return str(sub) if sub else None
-    except Exception:
-        # Expirado/assinatura errada/aud diferente/etc. — deixa o remoto decidir.
-        return None
+    for secret in _JWT_SECRET_CANDIDATES:
+        try:
+            claims = jwt.decode(
+                token, secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"require": ["exp", "sub"]},
+            )
+            sub = claims.get("sub")
+            if sub:
+                if not _jwt_local_logged["ok"]:
+                    _jwt_local_logged["ok"] = True
+                    logger.info("🔓 Validação de token LOCAL funcionando (segredo do Supabase correto). Latência de auth cortada.")
+                return str(sub)
+        except jwt.ExpiredSignatureError:
+            return None  # assinatura ok mas expirou — deixa o remoto rejeitar
+        except Exception:
+            continue  # este candidato não bate — tenta o próximo
+    if not _jwt_local_logged["fail"]:
+        _jwt_local_logged["fail"] = True
+        logger.warning("⚠️ Token não validou com NENHUM segredo local — caindo no Auth remoto. Se isto persistir, o JWT_SECRET do Render NÃO é o JWT Secret do Supabase: setar SUPABASE_JWT_SECRET com o valor do Dashboard → Settings → API.")
+    return None
 
 
 # Cache em memória do user_type por user_id. O user_type é praticamente imutável
