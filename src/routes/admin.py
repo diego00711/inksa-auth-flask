@@ -1304,6 +1304,7 @@ def list_delivery_incidents():
             SELECT di.id, di.order_id, di.delivery_id, di.reason, di.notes, di.photo_url,
                    di.contact_attempts, di.resolution, di.outcome,
                    di.fault, di.refund_amount, di.refund_status, di.created_at, di.resolved_at,
+                   di.return_code, di.return_confirmed_at, di.courier_charge, di.auto_decided,
                    o.total_amount, o.status AS order_status,
                    COALESCE(cp.first_name || ' ' || cp.last_name, '') AS client_name,
                    cp.phone AS client_phone,
@@ -1329,6 +1330,10 @@ def list_delivery_incidents():
             "fault": r.get("fault"),
             "refund_amount": _safe_float(r.get("refund_amount")),
             "refund_status": r.get("refund_status"),
+            "return_code": r.get("return_code"),
+            "return_confirmed_at": r["return_confirmed_at"].isoformat() if r.get("return_confirmed_at") else None,
+            "courier_charge": _safe_float(r.get("courier_charge")),
+            "auto_decided": bool(r.get("auto_decided")),
             "order_status": r.get("order_status"),
             "total_amount": _safe_float(r.get("total_amount")),
             "client_name": (r.get("client_name") or "").strip(),
@@ -1346,7 +1351,7 @@ def list_delivery_incidents():
         conn.close()
 
 
-_INCIDENT_RESOLUTIONS = {"pending", "returned", "refunded", "retry", "closed"}
+_INCIDENT_RESOLUTIONS = {"pending", "returned", "discarded", "refunded", "retry", "closed"}
 
 @admin_bp.route("/incidents/<uuid:incident_id>/resolve", methods=["POST"])
 @admin_required
@@ -1380,6 +1385,63 @@ def resolve_delivery_incident(incident_id):
         return jsonify({"status": "success", "message": "Ocorrência atualizada"}), 200
     except Exception as e:
         logger.exception("Erro em resolve_delivery_incident")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@admin_bp.route("/incidents/<uuid:incident_id>/charge-courier", methods=["POST"])
+@admin_required
+def charge_incident_courier(incident_id):
+    """Desconta um valor do entregador por uma ocorrência (culpa dele): lança na
+    dívida (delivery_profiles.cash_debt), abatida do próximo repasse online. Quem
+    decide se cabe e quanto é o admin, caso a caso. Idempotente por ocorrência."""
+    data = request.get_json() or {}
+    try:
+        amount = round(float(data.get("amount") or 0), 2)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Valor inválido"}), 400
+    if amount <= 0:
+        return jsonify({"status": "error", "message": "Informe um valor maior que zero"}), 400
+    note = (data.get("note") or "").strip()
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT delivery_id, courier_charge FROM delivery_incidents WHERE id = %s", (str(incident_id),))
+            inc = cur.fetchone()
+            if not inc:
+                return jsonify({"status": "error", "message": "Ocorrência não encontrada"}), 404
+            if not inc["delivery_id"]:
+                return jsonify({"status": "error", "message": "Ocorrência sem entregador atribuído"}), 400
+            if float(inc["courier_charge"] or 0) > 0:
+                return jsonify({"status": "error", "message": "Este entregador já foi descontado nesta ocorrência"}), 400
+            cur.execute(
+                "UPDATE delivery_profiles SET cash_debt = COALESCE(cash_debt,0) + %s WHERE id = %s RETURNING cash_debt",
+                (amount, str(inc["delivery_id"])),
+            )
+            drow = cur.fetchone()
+            if not drow:
+                return jsonify({"status": "error", "message": "Entregador não encontrado"}), 404
+            if note:
+                cur.execute(
+                    "UPDATE delivery_incidents SET courier_charge = %s, courier_charge_at = NOW(), "
+                    "notes = COALESCE(notes,'') || %s WHERE id = %s",
+                    (amount, f"\n[admin] desconto do entregador R${amount:.2f}: {note}", str(incident_id)),
+                )
+            else:
+                cur.execute(
+                    "UPDATE delivery_incidents SET courier_charge = %s, courier_charge_at = NOW() WHERE id = %s",
+                    (amount, str(incident_id)),
+                )
+            conn.commit()
+        return jsonify({"status": "success", "message": "Desconto lançado na dívida do entregador",
+                        "new_cash_debt": float(drow["cash_debt"] or 0)}), 200
+    except Exception as e:
+        logger.exception("Erro em charge_incident_courier")
         try: conn.rollback()
         except Exception: pass
         return jsonify({"status": "error", "message": str(e)}), 500

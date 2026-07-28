@@ -85,17 +85,27 @@ DELIVERY_INCIDENT_REASONS = {
     'wrong_address',        # endereço errado ou incompleto
     'customer_refused',     # cliente recusou o pedido
     'customer_absent',      # ninguém para receber
-    'courier_issue',        # problema com o entregador
+    'courier_issue',        # problema com o entregador (acidente, moto, etc.)
+    'courier_damaged',      # o entregador derrubou / danificou o pedido
     'wrong_order',          # pedido errado/incompleto
     'payment_issue',        # problema no pagamento (dinheiro)
 }
 
-# Desfechos (o que o entregador faz com o pedido) — padrão iFood
+# Desfechos (o que fazer com o pedido). O entregador NÃO escolhe mais — quem
+# decide é o bot (danificado/restaurante fechado → descartar) e, quando cabe
+# devolução, o RESTAURANTE (quer de volta? sim→devolver, não→descartar). Enquanto
+# o restaurante não responde, fica 'awaiting_restaurant' (o bot cai pra dispose
+# após ~10min pra não travar o entregador).
 DELIVERY_INCIDENT_OUTCOMES = {
-    'return_to_restaurant',  # devolver ao restaurante
-    'dispose',               # descartar (perecível / não vale a volta)
+    'return_to_restaurant',  # devolver ao restaurante (restaurante quis de volta)
+    'dispose',               # descartar (danificado / restaurante não quis / timeout)
+    'awaiting_restaurant',   # aguardando o restaurante decidir se quer a devolução
     'keep',                  # entregador liberado / fica com o pedido
 }
+
+# Minutos que o restaurante tem pra responder "quer a devolução?" antes de o bot
+# cair pro descarte (libera o entregador — comida fria dificilmente serve mesmo).
+INCIDENT_RESTAURANT_WAIT_MIN = 10
 
 # Regra de dinheiro por motivo (padrão dos grandes deliverys), baseada na culpa.
 # pay_restaurant/pay_courier = continuam recebendo; refund_client = cliente reembolsado.
@@ -108,7 +118,10 @@ DELIVERY_INCIDENT_POLICY = {
     # Culpa do restaurante: cliente reembolsado; restaurante NÃO recebe; entregador recebe.
     'wrong_order':        {'fault': 'restaurant', 'pay_restaurant': False, 'pay_courier': True,  'refund_client': True},
     # Culpa do entregador: cliente reembolsado; entregador NÃO recebe; restaurante recebe.
+    # (Se cabe DESCONTAR o entregador pelo prejuízo, quem decide é o admin, caso a
+    #  caso, no painel de Ocorrências — não é automático aqui.)
     'courier_issue':      {'fault': 'courier',    'pay_restaurant': True,  'pay_courier': False, 'refund_client': True},
+    'courier_damaged':    {'fault': 'courier',    'pay_restaurant': True,  'pay_courier': False, 'refund_client': True},
     # Pagamento (dinheiro): nada foi cobrado pela plataforma.
     'payment_issue':      {'fault': 'none',       'pay_restaurant': False, 'pay_courier': False, 'refund_client': False},
 }
@@ -702,7 +715,8 @@ def report_delivery_incident(order_id):
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
-                "SELECT status, delivery_id, client_id, total_amount, status_pagamento, id_transacao_mp, payment_provider "
+                "SELECT status, delivery_id, client_id, restaurant_id, total_amount, delivery_fee, "
+                "status_pagamento, id_transacao_mp, payment_provider "
                 "FROM orders WHERE id = %s",
                 (str(order_id),),
             )
@@ -721,17 +735,35 @@ def report_delivery_incident(order_id):
                     "error": f"Não é possível reportar ocorrência no status: {STATUS_DISPLAY_MAP.get(order['status'], order['status'])}"
                 }), 400
 
+            # --- BOT decide o rumo (o entregador NÃO escolhe mais o desfecho) ---
+            # Danificado por ele exige foto. Danificado OU restaurante fechado →
+            # descartar direto. Senão → pergunta ao restaurante se quer a devolução
+            # (fica 'awaiting_restaurant'; um job cai pra dispose após ~10min).
+            if reason == 'courier_damaged' and not photo_url:
+                return jsonify({"error": "Para 'derrubei/danifiquei o pedido', anexe uma foto-comprovante."}), 400
+
+            restaurant_closed = False
+            if order['restaurant_id']:
+                cur.execute("SELECT is_open FROM restaurant_profiles WHERE id = %s", (str(order['restaurant_id']),))
+                _r = cur.fetchone()
+                restaurant_closed = bool(_r and _r['is_open'] is False)
+
+            bot_outcome = 'dispose' if (reason == 'courier_damaged' or restaurant_closed) else 'awaiting_restaurant'
+            return_code = generate_verification_code() if bot_outcome == 'awaiting_restaurant' else None
+
             cur.execute(
                 "UPDATE orders SET status = 'delivery_failed', cancellation_reason = %s, updated_at = NOW() WHERE id = %s",
                 (f"delivery_incident:{reason}", str(order_id)),
             )
             cur.execute(
                 """INSERT INTO delivery_incidents
-                       (order_id, delivery_id, reason, notes, photo_url, contact_attempts, outcome)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                       (order_id, delivery_id, reason, notes, photo_url, contact_attempts,
+                        outcome, auto_decided, return_code)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s) RETURNING id""",
                 (str(order_id),
                  str(order['delivery_id']) if order['delivery_id'] else None,
-                 reason, notes, photo_url, psycopg2.extras.Json(contact_attempts), outcome),
+                 reason, notes, photo_url, psycopg2.extras.Json(contact_attempts),
+                 bot_outcome, return_code),
             )
             incident_id = cur.fetchone()['id']
 
@@ -818,10 +850,17 @@ def report_delivery_incident(order_id):
             except Exception as _e:
                 logger.warning(f"FCM report_incident: {_e}")
 
+        instruction = {
+            'dispose': 'Pode descartar o pedido. Ocorrência registrada — nossa equipe cuida do resto.',
+            'awaiting_restaurant': 'Aguarde: o restaurante vai dizer se quer a devolução. Você será avisado aqui.',
+        }.get(bot_outcome, '')
         return jsonify({
             "status": "success",
             "incident_id": str(incident_id),
             "order_status": "delivery_failed",
+            "outcome": bot_outcome,          # 'dispose' | 'awaiting_restaurant'
+            "return_code": return_code,      # null enquanto não há devolução confirmada
+            "instruction": instruction,
         }), 200
 
     except Exception as e:
@@ -832,6 +871,117 @@ def report_delivery_incident(order_id):
     finally:
         if conn:
             conn.close()
+
+
+@orders_bp.route('/<uuid:order_id>/incident/restaurant-decision', methods=['POST'])
+def incident_restaurant_decision(order_id):
+    """Restaurante responde se QUER a devolução de um pedido com ocorrência.
+    body {want_return: bool}. Sim → fica pra devolver (entregador leva com o
+    código); Não → descartar. Só o restaurante dono do pedido (ou admin)."""
+    user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type not in ('restaurant', 'admin'):
+        return jsonify({"error": "Não autorizado"}), 403
+    want_return = bool((request.get_json() or {}).get('want_return'))
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """SELECT di.id, di.outcome, o.restaurant_id
+                     FROM delivery_incidents di JOIN orders o ON o.id = di.order_id
+                    WHERE di.order_id = %s ORDER BY di.created_at DESC LIMIT 1""",
+                (str(order_id),))
+            inc = cur.fetchone()
+            if not inc:
+                return jsonify({"error": "Ocorrência não encontrada"}), 404
+            if user_type == 'restaurant':
+                cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_auth_id,))
+                p = cur.fetchone()
+                if not p or str(p['id']) != str(inc['restaurant_id']):
+                    return jsonify({"error": "Este pedido não é do seu restaurante"}), 403
+            if inc['outcome'] != 'awaiting_restaurant':
+                return jsonify({"error": "Esta ocorrência já foi decidida"}), 400
+            if want_return:
+                cur.execute("UPDATE delivery_incidents SET outcome = 'return_to_restaurant' WHERE id = %s", (str(inc['id']),))
+                msg = "Devolução solicitada — o entregador leva o pedido e você confirma com o código."
+            else:
+                cur.execute("UPDATE delivery_incidents SET outcome = 'dispose', return_code = NULL WHERE id = %s", (str(inc['id']),))
+                msg = "Ok — o entregador vai descartar o pedido."
+            conn.commit()
+        return jsonify({"status": "success", "message": msg}), 200
+    except Exception:
+        logger.exception("Erro em incident_restaurant_decision")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
+
+@orders_bp.route('/<uuid:order_id>/incident/confirm-return', methods=['POST'])
+def incident_confirm_return(order_id):
+    """Restaurante CONFIRMA que recebeu a devolução, validando o código que o
+    entregador mostra. Ao confirmar, se a culpa NÃO for do entregador, credita a
+    taxa de retorno (= frete cheio) ao entregador. Admin pode confirmar sem código."""
+    user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type not in ('restaurant', 'admin'):
+        return jsonify({"error": "Não autorizado"}), 403
+    code = str((request.get_json() or {}).get('return_code') or '').strip().upper()
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """SELECT di.id, di.outcome, di.return_code, di.return_confirmed_at, di.fault,
+                          di.delivery_id, o.restaurant_id, o.delivery_fee
+                     FROM delivery_incidents di JOIN orders o ON o.id = di.order_id
+                    WHERE di.order_id = %s ORDER BY di.created_at DESC LIMIT 1""",
+                (str(order_id),))
+            inc = cur.fetchone()
+            if not inc:
+                return jsonify({"error": "Ocorrência não encontrada"}), 404
+            if user_type == 'restaurant':
+                cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_auth_id,))
+                p = cur.fetchone()
+                if not p or str(p['id']) != str(inc['restaurant_id']):
+                    return jsonify({"error": "Este pedido não é do seu restaurante"}), 403
+            if inc['outcome'] != 'return_to_restaurant':
+                return jsonify({"error": "Não há devolução pendente para este pedido"}), 400
+            if inc['return_confirmed_at']:
+                return jsonify({"error": "Devolução já confirmada"}), 400
+            # Restaurante precisa do código certo; admin pode confirmar sem código.
+            if user_type == 'restaurant' and (not code or code != (inc['return_code'] or '').upper()):
+                return jsonify({"error": "Código de devolução inválido"}), 403
+
+            cur.execute(
+                "UPDATE delivery_incidents SET return_confirmed_at = NOW(), "
+                "resolution = CASE WHEN resolution = 'pending' THEN 'returned' ELSE resolution END, "
+                "resolved_at = COALESCE(resolved_at, NOW()) WHERE id = %s",
+                (str(inc['id']),))
+            # Taxa de retorno = frete cheio, só quando NÃO é culpa do entregador.
+            return_fee = 0.0
+            if inc['fault'] != 'courier' and inc['delivery_id']:
+                return_fee = round(float(inc['delivery_fee'] or 0), 2)
+                if return_fee > 0:
+                    cur.execute(
+                        "UPDATE orders SET valor_repassado_entregador = COALESCE(valor_repassado_entregador,0) + %s, updated_at = NOW() WHERE id = %s",
+                        (return_fee, str(order_id)))
+            conn.commit()
+        return jsonify({"status": "success", "message": "Devolução confirmada.", "return_fee": return_fee}), 200
+    except Exception:
+        logger.exception("Erro em incident_confirm_return")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
 
 @orders_bp.route('/<uuid:order_id>/incident-photo', methods=['POST'])
 def upload_incident_photo(order_id):

@@ -247,6 +247,47 @@ def _close_stale_restaurants_job() -> None:
                 pass
 
 
+def _expire_awaiting_restaurant_incidents_job() -> None:
+    """Ocorrências 'awaiting_restaurant' (esperando o restaurante dizer se quer a
+    devolução) que passaram do prazo caem pro DESCARTE — libera o entregador,
+    comida fria dificilmente serve. Fica registrado como decisão do bot."""
+    from datetime import datetime, timedelta, timezone
+    from .utils.helpers import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("[INCIDENTS] Sem conexao ao banco — job de timeout abortado")
+            return
+        # Prazo importado lazily pra nao criar import circular no topo.
+        try:
+            from .routes.orders import INCIDENT_RESTAURANT_WAIT_MIN as _wait
+        except Exception:
+            _wait = 10
+        threshold = datetime.now(timezone.utc) - timedelta(minutes=_wait)
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE delivery_incidents
+                      SET outcome = 'dispose', return_code = NULL
+                    WHERE outcome = 'awaiting_restaurant'
+                      AND created_at < %s""",
+                (threshold,),
+            )
+            n = cur.rowcount
+            conn.commit()
+        if n:
+            logger.info("[INCIDENTS] %d ocorrencia(s) sem resposta do restaurante -> descarte", n)
+    except Exception:
+        logger.exception("[INCIDENTS] Erro no job de timeout de ocorrencia")
+        if conn:
+            try: conn.rollback()
+            except Exception: pass
+    finally:
+        if conn:
+            try: conn.close()
+            except Exception: pass
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -318,6 +359,16 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=120,
     )
     logger.info("[SCHEDULER] Fechamento por inatividade: a cada 10 minutos")
+    _scheduler.add_job(
+        func=_expire_awaiting_restaurant_incidents_job,
+        trigger="interval",
+        minutes=3,
+        id="expire_awaiting_restaurant_incidents",
+        name="Descarta ocorrencias sem resposta do restaurante",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+    logger.info("[SCHEDULER] Timeout de ocorrencia (restaurante mudo): a cada 3 minutos")
     _scheduler.start()
 
     logger.info(
