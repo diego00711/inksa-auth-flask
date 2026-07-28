@@ -11,10 +11,14 @@ logger = logging.getLogger(__name__)
 admin_permissions_bp = Blueprint("admin_permissions_bp", __name__)
 
 VALID_ROLES = {"super_admin", "admin", "operator", "viewer"}
+# Tem que bater EXATAMENTE com as chaves `page` do NAV_LINKS (AdminLayout.jsx) e
+# com os checkboxes do AdminsPage.jsx. Se uma página existe no menu com `page`
+# mas não está aqui, ela fica impossível de conceder (some pra admin não-super).
 VALID_PAGES = {
-    "dashboard", "usuarios", "restaurantes", "avaliacoes", "gamificacao", "banners",
-    "logs", "administradores", "relatorios", "financeiro", "payouts",
-    "suporte", "configuracoes", "integracoes",
+    "dashboard", "metricas", "usuarios", "restaurantes", "avaliacoes", "gamificacao",
+    "banners", "cupons", "recompensas", "clube", "social",
+    "logs", "administradores", "relatorios", "financeiro", "payouts", "dividas",
+    "ocorrencias", "suporte", "configuracoes", "integracoes",
 }
 
 
