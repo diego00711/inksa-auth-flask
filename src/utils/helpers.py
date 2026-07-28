@@ -5,6 +5,7 @@ import json
 import uuid
 import time as _time  # módulo time (o 'time' de datetime abaixo é a CLASSE, não colidir)
 import logging
+import threading
 import jwt  # PyJWT — validação LOCAL do JWT do Supabase (sem bater no Auth remoto)
 import psycopg2
 import psycopg2.extras
@@ -84,11 +85,122 @@ def connect_hardened(url):
     return conn
 
 
+# --- POOL de conexão (LIGADO por padrão; kill-switch via DB_POOL_ENABLED=0) ---
+# Sem pool, cada request abre uma conexão NOVA (handshake TLS+auth ~4-5 RTT
+# cross-continente Oregon<->SP = ~0,5-0,8s SÓ pra conectar). O pool reusa
+# conexões, matando esse custo. Vem LIGADO; se der problema em produção,
+# setar DB_POOL_ENABLED=0 no Render desliga na hora (reinicia o worker) sem
+# novo deploy. E qualquer tropeço do pool cai sozinho pra conexão direta.
+_POOL_ENABLED = os.environ.get("DB_POOL_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+_DB_POOL = None
+_DB_POOL_LOCK = threading.Lock()
+
+# Registra o typecaster de UUID GLOBALMENTE (as conexões do pool não passam pelo
+# connect_hardened, que registrava por-conexão). Idempotente.
+try:
+    register_uuid()
+except Exception as _e_uuid:
+    logger.warning(f"⚠️ register_uuid global falhou: {_e_uuid}")
+
+
+def _get_pool(url):
+    """Cria (uma vez) e devolve o ThreadedConnectionPool, ou None se falhar."""
+    global _DB_POOL
+    if _DB_POOL is not None:
+        return _DB_POOL
+    with _DB_POOL_LOCK:
+        if _DB_POOL is not None:  # outro greenlet criou enquanto esperávamos
+            return _DB_POOL
+        from psycopg2 import pool as _pgpool
+        maxc = int(os.environ.get("DB_POOL_MAXCONN", "12"))
+        # Tenta com statement_timeout; se o servidor rejeitar 'options' no
+        # startup, recria sem (mesma lógica do connect_hardened).
+        for opts in ('-c statement_timeout=30000', None):
+            try:
+                kw = dict(_DB_TCP_KWARGS)
+                if opts:
+                    kw["options"] = opts
+                _DB_POOL = _pgpool.ThreadedConnectionPool(1, maxc, dsn=url, **kw)
+                logger.info(f"✅ Pool de conexão DB criado (max={maxc}, statement_timeout={'sim' if opts else 'nao'}).")
+                return _DB_POOL
+            except Exception as e:
+                logger.warning(f"⚠️ Falha ao criar pool DB (opts={bool(opts)}): {e}")
+                _DB_POOL = None
+        return None
+
+
+class _PooledConn:
+    """Proxy de conexão: comporta-se como uma conexão psycopg2, mas .close()
+    DEVOLVE ao pool (limpando o estado) em vez de fechar. Assim nenhuma das ~157
+    rotas precisa mudar — elas seguem chamando get_db_connection()/conn.close().
+    """
+    __slots__ = ("_real", "_pool", "_returned")
+
+    def __init__(self, real, pool):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_pool", pool)
+        object.__setattr__(self, "_returned", False)
+
+    def close(self):
+        # "Fechar" = devolver ao pool. Idempotente (finally pode chamar 2x).
+        if object.__getattribute__(self, "_returned"):
+            return
+        object.__setattr__(self, "_returned", True)
+        real = object.__getattribute__(self, "_real")
+        pool = object.__getattribute__(self, "_pool")
+        try:
+            if getattr(real, "closed", 1):
+                pool.putconn(real, close=True)  # já fechada -> descarta
+                return
+            try:
+                # Reseta o estado antes do próximo uso: encerra qualquer
+                # transação aberta/abortada e tira autocommit (uma rota de
+                # leitura liga autocommit; não pode vazar pra próxima).
+                real.rollback()
+                if getattr(real, "autocommit", False):
+                    real.autocommit = False
+            except Exception:
+                pool.putconn(real, close=True)  # estado suspeito -> descarta
+                return
+            pool.putconn(real)
+        except Exception:
+            try:
+                real.close()
+            except Exception:
+                pass
+
+    # Tudo o mais (cursor, commit, rollback, closed, encoding, ...) delega ao real.
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_real"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_real"), name, value)
+
+    def __enter__(self):
+        # psycopg2: 'with conn:' gerencia transação (commit/rollback), NÃO fecha.
+        object.__getattribute__(self, "_real").__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return object.__getattribute__(self, "_real").__exit__(exc_type, exc, tb)
+
+
 def get_db_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
         logger.error("❌ DATABASE_URL não encontrada.")
         return None
+    # Caminho POOL (opt-in). Qualquer tropeço -> conexão direta (comportamento
+    # de sempre), então ligar o pool nunca deixa a API sem saída.
+    if _POOL_ENABLED:
+        try:
+            pool = _get_pool(url)
+            if pool is not None:
+                real = pool.getconn()
+                if real is not None:
+                    return _PooledConn(real, pool)
+        except Exception as e:
+            logger.warning(f"⚠️ Pool indisponível ({e}); usando conexão direta.")
     try:
         return connect_hardened(url)
     except Exception as e:
