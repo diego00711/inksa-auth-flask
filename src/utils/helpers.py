@@ -3,6 +3,7 @@
 import os
 import json
 import uuid
+import time as _time  # módulo time (o 'time' de datetime abaixo é a CLASSE, não colidir)
 import logging
 import jwt  # PyJWT — validação LOCAL do JWT do Supabase (sem bater no Auth remoto)
 import psycopg2
@@ -132,6 +133,27 @@ def _verify_jwt_local(token):
         return None
 
 
+# Cache em memória do user_type por user_id. O user_type é praticamente imutável
+# (client/restaurant/delivery/admin), então cachear por alguns minutos elimina a
+# consulta a public.users em QUASE todo request autenticado. Processo único
+# (gunicorn -w 1 -k gevent) → dict simples é seguro (gevent é cooperativo, sem
+# preempção no meio de um acesso). Só guarda acertos; miss/403 não são cacheados.
+_USER_TYPE_TTL = 300  # segundos
+_user_type_cache = {}  # user_id -> (user_type, expira_em_monotonic)
+
+
+def _cached_user_type(user_id):
+    hit = _user_type_cache.get(user_id)
+    if hit and hit[1] > _time.monotonic():
+        return hit[0]
+    return None
+
+
+def _store_user_type(user_id, user_type):
+    if user_id and user_type:
+        _user_type_cache[user_id] = (user_type, _time.monotonic() + _USER_TYPE_TTL)
+
+
 # --- Auth helper ---
 def _extract_bearer_token(auth_header: str):
     """Extrai o token de um cabeçalho Authorization.
@@ -175,6 +197,11 @@ def get_user_id_from_token(auth_header):
                 return None, None, (jsonify({"error": "Token inválido ou expirado"}), 401)
             user_id = str(user.id)
 
+        # Cache: user_type quase nunca muda; se em cache, não toca o banco.
+        cached_type = _cached_user_type(user_id)
+        if cached_type:
+            return user_id, cached_type, None
+
         conn = get_db_connection()
         if not conn:
             return None, None, (jsonify({"error": "Falha ao conectar para verificar permissões"}), 500)
@@ -215,6 +242,7 @@ def get_user_id_from_token(auth_header):
         if not row or not row.get("user_type"):
             return None, None, (jsonify({"error": "Permissão não encontrada para este usuário"}), 403)
 
+        _store_user_type(user_id, row["user_type"])
         return user_id, row["user_type"], None
 
     except Exception as e:
