@@ -1432,9 +1432,18 @@ def get_available_orders():
             # se não tiver, o endereço cadastrado (latitude/longitude).
             cur.execute(
                 "SELECT COALESCE(current_lat, latitude) AS lat, "
-                "COALESCE(current_lng, longitude) AS lng "
+                "COALESCE(current_lng, longitude) AS lng, "
+                "COALESCE(is_available, FALSE) AS is_available "
                 "FROM delivery_profiles WHERE user_id = %s", (user_id,))
             _dp = cur.fetchone()
+
+            # Entregador OFFLINE não recebe pedido nenhum. Sem isto, o app
+            # continuava listando (e alarmando) pedidos com o entregador ON/OFF
+            # em OFF — ele via/aceitava entrega estando indisponível.
+            if not _dp or not _dp['is_available']:
+                logger.info("Entregador OFFLINE (is_available=false) — retornando lista vazia")
+                return jsonify([]), 200
+
             drv_lat = _dp['lat'] if _dp else None
             drv_lng = _dp['lng'] if _dp else None
 
