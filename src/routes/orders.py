@@ -983,6 +983,50 @@ def incident_confirm_return(order_id):
         conn.close()
 
 
+@orders_bp.route('/incidents/restaurant', methods=['GET'])
+def list_restaurant_incidents():
+    """Ocorrências ATIVAS dos pedidos do restaurante logado: as que aguardam ele
+    decidir a devolução, ou a devolução ainda não confirmada. NÃO devolve o
+    return_code (o entregador é quem mostra; o restaurante digita)."""
+    user_auth_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'restaurant':
+        return jsonify({"error": "Não autorizado"}), 403
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_auth_id,))
+            prof = cur.fetchone()
+            if not prof:
+                return jsonify({"status": "success", "data": []}), 200
+            cur.execute(
+                """SELECT di.id, di.order_id, di.reason, di.outcome, di.created_at
+                     FROM delivery_incidents di JOIN orders o ON o.id = di.order_id
+                    WHERE o.restaurant_id = %s
+                      AND di.outcome IN ('awaiting_restaurant', 'return_to_restaurant')
+                      AND di.return_confirmed_at IS NULL
+                    ORDER BY di.created_at DESC LIMIT 50""",
+                (str(prof['id']),))
+            rows = cur.fetchall()
+        data = [{
+            "id": str(r["id"]),
+            "order_id": str(r["order_id"]) if r["order_id"] else None,
+            "order_ref": (str(r["order_id"])[:8].upper() if r["order_id"] else ""),
+            "reason": r["reason"],
+            "outcome": r["outcome"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        } for r in rows]
+        return jsonify({"status": "success", "data": data}), 200
+    except Exception:
+        logger.exception("Erro em list_restaurant_incidents")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
+
 @orders_bp.route('/<uuid:order_id>/incident-photo', methods=['POST'])
 def upload_incident_photo(order_id):
     """Entregador envia uma foto-comprovante da ocorrência (ex.: foto do local)."""
