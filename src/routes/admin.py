@@ -688,6 +688,47 @@ def admin_dashboard():
     finally:
         conn.close()
 
+@admin_bp.route("/alerts-summary", methods=["GET", "OPTIONS"])
+def admin_alerts_summary():
+    """Contadores leves pros AVISOS do admin (sino + badges do menu): tickets de
+    suporte não resolvidos (e quantos AGUARDANDO resposta do admin), ocorrências
+    de entrega pendentes e restaurantes aguardando aprovação. Uma chamada barata
+    (só COUNTs) que o front faz em polling — cada COUNT no seu cursor, então se
+    uma tabela não existir o resto ainda responde."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão com banco"}), 500
+    try:
+        tickets_open = _safe_int(_fetchval(
+            conn, "SELECT COUNT(*)::int FROM support_tickets WHERE status <> 'resolvido'", default=0))
+        tickets_waiting = _safe_int(_fetchval(
+            conn, "SELECT COUNT(*)::int FROM support_tickets WHERE status = 'aguardando'", default=0))
+        incidents_pending = _safe_int(_fetchval(
+            conn, "SELECT COUNT(*)::int FROM delivery_incidents WHERE resolution = 'pending'", default=0))
+        restaurants_pending = _safe_int(_fetchval(
+            conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} WHERE (approved IS NOT TRUE) OR (status='pending')", default=0))
+        return jsonify({
+            "tickets_open": tickets_open,
+            "tickets_waiting": tickets_waiting,
+            "incidents_pending": incidents_pending,
+            "restaurants_pending": restaurants_pending,
+            "total": tickets_open + incidents_pending + restaurants_pending,
+        }), 200
+    except Exception:
+        logger.exception("Erro no /api/admin/alerts-summary")
+        return jsonify({"tickets_open": 0, "tickets_waiting": 0,
+                        "incidents_pending": 0, "restaurants_pending": 0, "total": 0}), 200
+    finally:
+        conn.close()
+
 @admin_bp.route("/tv/stats", methods=["GET", "OPTIONS"])
 @admin_required
 def admin_tv_stats():
