@@ -225,6 +225,19 @@ def criar_preferencia_mercado_pago():
         else:
             logging.info(f"🆔 Usando ID de pedido existente: {pedido_id}")
         
+        # Repasse do entregador (LÍQUIDO) e margem de frete JÁ na criação. Antes,
+        # o valor_repassado_entregador só era calculado no webhook (online) ou no
+        # fechamento — então pedido em dinheiro/pendente ficava com o campo NULL e
+        # o app do entregador mostrava o FRETE CHEIO (sem o desconto da plataforma)
+        # na tela de pedido disponível. Calculando aqui, "Você recebe" já sai certo.
+        _fee_create = float(dados_pedido.get('delivery_fee', 0) or 0)
+        try:
+            _payout_create = float(calculate_courier_payout(
+                dados_pedido.get('delivery_distance_km'), delivery_fee=_fee_create))
+        except Exception as _e_payout:
+            logging.warning(f"⚠️ calculate_courier_payout na criação falhou ({_e_payout}); usando frete cheio.")
+            _payout_create = _fee_create
+
         # Preparar dados do pedido para o banco
         order_data = {
             'id': pedido_id,
@@ -243,6 +256,8 @@ def criar_preferencia_mercado_pago():
             'delivery_distance_km': dados_pedido.get('delivery_distance_km'),
             'payment_method': payment_method,
             'change_for': change_for,
+            'valor_repassado_entregador': round(_payout_create, 2),
+            'margem_frete': round(_fee_create - _payout_create, 2),
             # Sem estes, o pedido online nascia SEM codigos: o entregador nao
             # tinha o que retirar e o cliente nao tinha o que conferir na
             # entrega. So o caminho de pedido em dinheiro (orders.py) gerava.
