@@ -184,6 +184,7 @@ def handle_profile():
                 'restaurant_name', 'business_name', 'cnpj', 'phone', 'logo_url', 'address_street',
                 'address_number', 'address_complement', 'address_neighborhood', 'address_city',
                 'address_state', 'address_zipcode', 'latitude', 'longitude', 'category',
+                'segment',
                 'delivery_time', 'cuisine_type', 'description', 'is_open', 'delivery_fee',
                 'minimum_order', 'payout_frequency', 'bank_name', 'bank_agency',
                 'bank_account_number', 'bank_account_type', 'pix_key', 'pix_key_type',
