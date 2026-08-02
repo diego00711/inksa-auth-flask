@@ -67,6 +67,7 @@ def list_restaurants():
     """
     category = (request.args.get("category") or "").strip()
     search   = (request.args.get("search")   or "").strip()
+    city     = (request.args.get("city")     or "").strip()  # filtra por cidade escolhida
     user_lat = request.args.get("user_lat", type=float)
     user_lon = request.args.get("user_lon", type=float)
     # Paginação: cap padrão evita payload ilimitado conforme o catálogo cresce
@@ -114,7 +115,9 @@ def list_restaurants():
             # é o que separa as cidades (cliente vê só o que dá pra atender).
             # Restaurantes sem coordenadas continuam aparecendo (fail-open) pra
             # não sumirem por falta de geocode.
-            if has_coords:
+            # Quando o cliente ESCOLHE uma cidade no seletor, ignora o raio (ele
+            # quer ver aquela cidade, mesmo estando longe/em outro lugar).
+            if has_coords and not city:
                 from ..utils.platform_settings import get_settings as _get_settings
                 radius_km = float(_get_settings()["platform_max_delivery_radius"])
                 where.append(
@@ -130,6 +133,10 @@ def list_restaurants():
             if search:
                 where.append("rp.restaurant_name ILIKE %s")
                 params.append(f"%{search}%")
+
+            if city:
+                where.append("rp.address_city ILIKE %s")
+                params.append(city)
 
             where_sql  = "WHERE " + " AND ".join(where)
             _base_order = "distance_km ASC NULLS LAST" if has_coords else "rp.restaurant_name"
@@ -183,6 +190,34 @@ def list_restaurants():
     except Exception as e:
         logger.exception("Erro ao listar restaurantes: %s", e)
         return jsonify({"error": "Erro ao buscar restaurantes"}), 500
+    finally:
+        if conn:
+            _close(conn)
+
+
+# ─── GET /api/restaurants/cities ────────────────────────────────────────────
+# Cidades que TÊM restaurante aprovado/ativo — alimenta o seletor de cidade do
+# cliente (ele filtra os restaurantes pela cidade escolhida).
+
+@public_restaurants_bp.get("/cities")
+def list_cities():
+    conn = None
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT NULLIF(TRIM(address_city), '') AS city
+                  FROM restaurant_profiles
+                 WHERE COALESCE(approved, TRUE) = TRUE
+                   AND COALESCE(active, TRUE) = TRUE
+                   AND NULLIF(TRIM(address_city), '') IS NOT NULL
+                 ORDER BY city
+            """)
+            cities = [r[0] for r in cur.fetchall()]
+        return jsonify(cities), 200
+    except Exception as e:
+        logger.error(f"Erro em list_cities: {e}")
+        return jsonify([]), 200  # fail-soft: sem cidades, o seletor só não abre
     finally:
         if conn:
             _close(conn)
