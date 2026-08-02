@@ -52,20 +52,26 @@ def get_banners():
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             if is_admin:
-                # Admin vê todos os banners, incluindo a posição do texto
+                # Admin vê todos os banners, incluindo a posição do texto e a
+                # janela de agendamento (starts_at/ends_at).
                 query = """
-                    SELECT id, title, subtitle, image_url, link_url, is_active, 
-                           display_order, created_at, updated_at, text_position
-                    FROM banners 
+                    SELECT id, title, subtitle, image_url, link_url, is_active,
+                           display_order, created_at, updated_at, text_position,
+                           starts_at, ends_at
+                    FROM banners
                     ORDER BY display_order ASC, created_at DESC
                 """
                 cur.execute(query)
             else:
-                # Clientes veem apenas banners ativos, incluindo a posição do texto
+                # Clientes veem apenas banners ativos E dentro da janela de tempo
+                # agendada: já começou (starts_at NULL ou <= agora) e ainda não
+                # expirou (ends_at NULL ou >= agora).
                 query = """
                     SELECT id, title, subtitle, image_url, link_url, display_order, text_position
-                    FROM banners 
-                    WHERE is_active = true 
+                    FROM banners
+                    WHERE is_active = true
+                      AND (starts_at IS NULL OR starts_at <= NOW())
+                      AND (ends_at   IS NULL OR ends_at   >= NOW())
                     ORDER BY display_order ASC, created_at DESC
                 """
                 cur.execute(query)
@@ -122,6 +128,9 @@ def create_banner():
                 'is_active': data.get('is_active', True),
                 'display_order': data.get('display_order', next_order),
                 'text_position': data.get('text_position', 'center'),
+                # Janela de agendamento (opcional). '' -> None (sem limite).
+                'starts_at': data.get('starts_at') or None,
+                'ends_at': data.get('ends_at') or None,
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
             }
@@ -220,13 +229,16 @@ def update_banner(banner_id):
             update_fields = []
             update_values = []
             
-            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position']
-            
+            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position', 'starts_at', 'ends_at']
+
             for field in updatable_fields:
                 if field in data:
                     update_fields.append(f"{field} = %s")
-                    # Permite salvar strings vazias, que serão convertidas para None se necessário no frontend/lógica
-                    update_values.append(data[field])
+                    value = data[field]
+                    # Datas de agendamento: '' vira NULL (remove o limite).
+                    if field in ('starts_at', 'ends_at') and value in ('', None):
+                        value = None
+                    update_values.append(value)
             
             if not update_fields:
                 return jsonify({"error": "Nenhum campo válido para atualização"}), 400

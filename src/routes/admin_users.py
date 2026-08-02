@@ -597,6 +597,57 @@ def update_user(user_id):
                 conn.commit()
                 update_details.append(f"fundador: -> {bool(data['fundador'])}")
 
+            # Edição dos dados de perfil pelo admin (modal na tela de Usuários).
+            # As COLUNAS vêm de um whitelist fixo por tipo — nunca do input — então
+            # não há risco de injeção; os VALORES são sempre parametrizados.
+            # O e-mail (login) NÃO é editável aqui: vive no Supabase Auth e mexer
+            # nele dessincroniza o acesso. O admin usa "redefinir senha" pra isso.
+            PROFILE_FIELD_MAP = {
+                "client": {
+                    "table": "client_profiles",
+                    "fields": [
+                        "first_name", "last_name", "phone", "cpf",
+                        "address_street", "address_number", "address_neighborhood",
+                        "address_city", "address_state", "address_zipcode",
+                    ],
+                },
+                "restaurant": {
+                    "table": "restaurant_profiles",
+                    "fields": [
+                        "restaurant_name", "business_name", "phone", "cnpj",
+                        "address_street", "address_number", "address_neighborhood",
+                        "address_city", "address_state", "address_zipcode",
+                    ],
+                },
+                "delivery": {
+                    "table": "delivery_profiles",
+                    "fields": [
+                        "first_name", "last_name", "phone", "cpf", "vehicle_type",
+                    ],
+                },
+            }
+            pmap = PROFILE_FIELD_MAP.get(user["user_type"])
+            if pmap:
+                p_updates = []
+                p_params = []
+                touched = []
+                for field in pmap["fields"]:
+                    if field in data:
+                        val = data[field]
+                        if isinstance(val, str):
+                            val = val.strip() or None
+                        p_updates.append(f"{field} = %s")
+                        p_params.append(val)
+                        touched.append(field)
+                if p_updates:
+                    p_params.append(str(user_id))
+                    cur.execute(
+                        f"UPDATE {pmap['table']} SET {', '.join(p_updates)} WHERE user_id = %s",
+                        tuple(p_params),
+                    )
+                    conn.commit()
+                    update_details.append(f"perfil({user['user_type']}): {', '.join(touched)}")
+
             if update_details:
                 log_admin_action_auto(
                     "UpdateUser", f"Updated user {user['email']} (ID: {user_id}): {', '.join(update_details)}"
