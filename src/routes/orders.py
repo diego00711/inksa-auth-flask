@@ -1431,7 +1431,9 @@ def get_available_orders():
             # Localização do entregador: usa o GPS ao vivo (current_lat/lng) e,
             # se não tiver, o endereço cadastrado (latitude/longitude).
             cur.execute(
-                "SELECT COALESCE(current_lat, latitude) AS lat, "
+                "SELECT first_name, phone, cpf, vehicle_type, vehicle_plate, cnh, "
+                "latitude AS addr_lat, longitude AS addr_lng, "
+                "COALESCE(current_lat, latitude) AS lat, "
                 "COALESCE(current_lng, longitude) AS lng, "
                 "COALESCE(is_available, FALSE) AS is_available "
                 "FROM delivery_profiles WHERE user_id = %s", (user_id,))
@@ -1442,6 +1444,29 @@ def get_available_orders():
             # em OFF — ele via/aceitava entrega estando indisponível.
             if not _dp or not _dp['is_available']:
                 logger.info("Entregador OFFLINE (is_available=false) — retornando lista vazia")
+                return jsonify([]), 200
+
+            # GATE de cadastro completo NO BACKEND (autoritativo). O app já esconde
+            # o botão de ficar online, mas o backend não validava nada — então um
+            # entregador incompleto (ou com is_available antigo) ainda recebia
+            # pedidos. Pior: SEM COORDENADAS o filtro de raio caía no fail-open e
+            # ele via pedidos de QUALQUER cidade. Aqui é a trava de verdade.
+            _missing = []
+            if not (_dp['first_name'] or '').strip():   _missing.append('nome')
+            if not (_dp['phone'] or '').strip():        _missing.append('telefone')
+            if not (_dp['cpf'] or '').strip():          _missing.append('cpf')
+            if not (_dp['vehicle_type'] or '').strip(): _missing.append('veículo')
+            # Sem endereço geocodificado não há como filtrar por raio → bloqueia.
+            if _dp['addr_lat'] is None or _dp['addr_lng'] is None:
+                _missing.append('endereço')
+            # Veículo motorizado exige placa E CNH (carteira de motorista).
+            if _dp['vehicle_type'] in ('moto', 'carro'):
+                if not (_dp['vehicle_plate'] or '').strip():
+                    _missing.append('placa')
+                if not (_dp['cnh'] or '').strip():
+                    _missing.append('CNH')
+            if _missing:
+                logger.info("Entregador com cadastro incompleto (%s) — lista vazia", ", ".join(_missing))
                 return jsonify([]), 200
 
             drv_lat = _dp['lat'] if _dp else None

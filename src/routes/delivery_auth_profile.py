@@ -107,7 +107,7 @@ def handle_profile():
                 data = request.get_json()
                 allowed_fields = [
                     'first_name', 'last_name', 'phone', 'cpf', 'birth_date', 'vehicle_type',
-                    'vehicle_plate', 'vehicle_model', 'vehicle_color',
+                    'vehicle_plate', 'vehicle_model', 'vehicle_color', 'cnh', 'cnh_category',
                     'address_street', 'address_number', 'address_complement', 'address_neighborhood',
                     'address_city', 'address_state', 'address_zipcode', 'is_available',
                     'bank_name', 'bank_agency', 'bank_account_number', 'bank_account_type',
