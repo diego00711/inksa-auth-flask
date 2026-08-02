@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 banners_bp = Blueprint('banners', __name__)
 
+
+def _coerce_int(value):
+    """Converte para int; '' / None / inválido -> None (sem valor)."""
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 # --- Handler para requisições OPTIONS ---
 @banners_bp.before_request
 def handle_options():
@@ -57,7 +67,7 @@ def get_banners():
                 query = """
                     SELECT id, title, subtitle, image_url, link_url, is_active,
                            display_order, created_at, updated_at, text_position,
-                           starts_at, ends_at
+                           starts_at, ends_at, duration_seconds
                     FROM banners
                     ORDER BY display_order ASC, created_at DESC
                 """
@@ -67,7 +77,8 @@ def get_banners():
                 # agendada: já começou (starts_at NULL ou <= agora) e ainda não
                 # expirou (ends_at NULL ou >= agora).
                 query = """
-                    SELECT id, title, subtitle, image_url, link_url, display_order, text_position
+                    SELECT id, title, subtitle, image_url, link_url, display_order, text_position,
+                           duration_seconds
                     FROM banners
                     WHERE is_active = true
                       AND (starts_at IS NULL OR starts_at <= NOW())
@@ -131,6 +142,8 @@ def create_banner():
                 # Janela de agendamento (opcional). '' -> None (sem limite).
                 'starts_at': data.get('starts_at') or None,
                 'ends_at': data.get('ends_at') or None,
+                # Tempo de exposição no carrossel (segundos). '' -> None (padrão do app).
+                'duration_seconds': _coerce_int(data.get('duration_seconds')),
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
             }
@@ -183,7 +196,7 @@ def get_banner(banner_id):
             if is_admin:
                 query = "SELECT * FROM banners WHERE id = %s"
             else:
-                query = "SELECT id, title, subtitle, image_url, link_url, display_order, text_position FROM banners WHERE id = %s AND is_active = true"
+                query = "SELECT id, title, subtitle, image_url, link_url, display_order, text_position, duration_seconds FROM banners WHERE id = %s AND is_active = true"
             
             cur.execute(query, (str(banner_id),))
             banner = cur.fetchone()
@@ -229,7 +242,7 @@ def update_banner(banner_id):
             update_fields = []
             update_values = []
             
-            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position', 'starts_at', 'ends_at']
+            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position', 'starts_at', 'ends_at', 'duration_seconds']
 
             for field in updatable_fields:
                 if field in data:
@@ -238,6 +251,9 @@ def update_banner(banner_id):
                     # Datas de agendamento: '' vira NULL (remove o limite).
                     if field in ('starts_at', 'ends_at') and value in ('', None):
                         value = None
+                    # Tempo de exposição: coage pra int, '' vira NULL (padrão).
+                    if field == 'duration_seconds':
+                        value = _coerce_int(value)
                     update_values.append(value)
             
             if not update_fields:
