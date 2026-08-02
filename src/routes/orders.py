@@ -1480,7 +1480,22 @@ def get_available_orders():
             params = []
             if drv_lat is not None and drv_lng is not None:
                 from ..utils.platform_settings import get_settings
-                radius_km = float(get_settings()["platform_max_delivery_radius"])
+                _settings = get_settings()
+                # Raio POR TIPO DE VEÍCULO: bike alcança menos que moto/carro.
+                # Se o específico estiver 0/vazio (ou for 'outro'), usa o global.
+                _radius_key = {
+                    'bicicleta': 'delivery_radius_bike_km',
+                    'moto':      'delivery_radius_moto_km',
+                    'carro':     'delivery_radius_carro_km',
+                }.get(_dp['vehicle_type'])
+                radius_km = 0.0
+                if _radius_key:
+                    try:
+                        radius_km = float(_settings.get(_radius_key) or 0)
+                    except (TypeError, ValueError):
+                        radius_km = 0.0
+                if radius_km <= 0:
+                    radius_km = float(_settings["platform_max_delivery_radius"])
                 radius_clause = (
                     " AND (rp.latitude IS NULL OR rp.longitude IS NULL OR "
                     "earth_distance(ll_to_earth(rp.latitude, rp.longitude), "

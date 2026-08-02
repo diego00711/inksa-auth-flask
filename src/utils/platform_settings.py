@@ -45,6 +45,12 @@ _DEFAULTS: dict[str, Decimal] = {
     # dele. É o que separa as cidades sem misturar tudo (cada um vê o que é da
     # sua região).
     "platform_max_delivery_radius": Decimal("15"),
+    # Raio POR TIPO DE VEÍCULO (km). Bike alcança menos que moto/carro. Se um
+    # deles ficar 0/vazio, cai no platform_max_delivery_radius acima. 'outro'
+    # sempre usa o raio global. Editável no admin.
+    "delivery_radius_bike_km":  Decimal("2"),
+    "delivery_radius_moto_km":  Decimal("8"),
+    "delivery_radius_carro_km": Decimal("10"),
 }
 
 
@@ -64,7 +70,8 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
 
     # Campos em R$ ou km (números diretos)
     for k in ("fixed_delivery_fee", "per_km_delivery_fee", "free_delivery_threshold_km",
-              "delivery_base_fee", "delivery_per_km_fee", "platform_max_delivery_radius"):
+              "delivery_base_fee", "delivery_per_km_fee", "platform_max_delivery_radius",
+              "delivery_radius_bike_km", "delivery_radius_moto_km", "delivery_radius_carro_km"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 
     # commission_rate é guardado como percentual humano (10 = 10%);
