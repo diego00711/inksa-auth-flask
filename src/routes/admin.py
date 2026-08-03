@@ -469,6 +469,52 @@ def _send_restaurant_welcome_email(to_email: str, restaurant_name: str) -> None:
     )
 
 
+@admin_bp.route("/couriers/<uuid:user_id>/approve", methods=["POST"])
+@admin_required
+def set_courier_approval(user_id):
+    """Aprova ou reprova um entregador (delivery_profiles.approved). Entregador
+    não aprovado NÃO recebe pedidos (o gate em get_available_orders bloqueia).
+    Body opcional: {"approved": bool} — default true. Chaveado por user_id."""
+    data = request.get_json(silent=True) or {}
+    approved = bool(data.get("approved", True))
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """UPDATE delivery_profiles
+                      SET approved = %s, updated_at = NOW()
+                    WHERE user_id = %s
+                RETURNING user_id, approved""",
+                (approved, str(user_id)),
+            )
+            row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return jsonify({"status": "error", "message": "Entregador não encontrado"}), 404
+        conn.commit()
+        try:
+            log_admin_action_auto(
+                "ApproveCourier" if approved else "UnapproveCourier",
+                f"{'Aprovou' if approved else 'Reprovou'} o entregador {user_id}",
+            )
+        except Exception:
+            pass
+        return jsonify({
+            "status": "success",
+            "message": "Entregador aprovado." if approved else "Aprovação removida.",
+            "data": {"approved": approved},
+        }), 200
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return jsonify({"status": "error", "message": "Erro ao aprovar entregador.", "detail": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 @admin_bp.route("/restaurants/<uuid:restaurant_id>/approve", methods=["POST"])
 @admin_required
 def set_restaurant_approval(restaurant_id):

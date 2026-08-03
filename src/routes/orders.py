@@ -1432,6 +1432,7 @@ def get_available_orders():
             # se não tiver, o endereço cadastrado (latitude/longitude).
             cur.execute(
                 "SELECT first_name, phone, cpf, vehicle_type, vehicle_plate, cnh, "
+                "COALESCE(approved, FALSE) AS approved, "
                 "latitude AS addr_lat, longitude AS addr_lng, "
                 "COALESCE(current_lat, latitude) AS lat, "
                 "COALESCE(current_lng, longitude) AS lng, "
@@ -1444,6 +1445,12 @@ def get_available_orders():
             # em OFF — ele via/aceitava entrega estando indisponível.
             if not _dp or not _dp['is_available']:
                 logger.info("Entregador OFFLINE (is_available=false) — retornando lista vazia")
+                return jsonify([]), 200
+
+            # Entregador PENDENTE de aprovação do admin não recebe pedido (igual
+            # restaurante não-aprovado some do cliente). O app mostra o aviso.
+            if not _dp['approved']:
+                logger.info("Entregador não aprovado pelo admin — retornando lista vazia")
                 return jsonify([]), 200
 
             # GATE de cadastro completo NO BACKEND (autoritativo). O app já esconde
