@@ -194,7 +194,9 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     if date_from and date_to:
         chart_rows = _fetchall(conn, f"""
             SELECT to_char(d::date,'DD/MM') AS formatted_date,
-                   COALESCE(SUM(o.total_amount),0) AS daily_revenue
+                   COALESCE(SUM(o.total_amount),0) AS daily_revenue,
+                   (SELECT COUNT(*) FROM {CLIENTS_TABLE} c
+                     WHERE (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= d::date)::int AS total_clients
               FROM generate_series(%s::date, %s::date, '1 day') AS d
          LEFT JOIN {ORDERS_TABLE} o
                 ON (o.created_at AT TIME ZONE 'America/Sao_Paulo')::date = d::date
@@ -215,11 +217,14 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
                        FROM {ORDERS_TABLE} o
                       WHERE o.status IN ('delivered','completed')
                         AND (o.created_at AT TIME ZONE 'America/Sao_Paulo')::date = d
-                   ),0) AS daily_revenue
+                   ),0) AS daily_revenue,
+                   (SELECT COUNT(*) FROM {CLIENTS_TABLE} c
+                     WHERE (c.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= d)::int AS total_clients
               FROM days ORDER BY d
         """)
     for r in chart_rows:
         r["daily_revenue"] = _safe_float(r.get("daily_revenue"))
+        r["total_clients"] = _safe_int(r.get("total_clients"))
     payload["chartData"] = chart_rows
 
     # Recentes
