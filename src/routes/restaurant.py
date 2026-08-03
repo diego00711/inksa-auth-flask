@@ -230,6 +230,22 @@ def handle_profile():
             # restaurantes abertos sem heartbeat recente — sessão abandonada/token expirado)
             if updates.get('is_open') is True or updates.get('is_open') == 'true':
                 updates['last_heartbeat'] = datetime.now()
+                # GATE server-side: não deixa ABRIR sem coordenadas. Sem elas o
+                # frete quebra e o pedido pode vazar pra entregadores de qualquer
+                # cidade (o app já bloqueia; isto é a defesa no backend).
+                _has_new_coords = (updates.get('latitude') is not None
+                                   and updates.get('longitude') is not None)
+                if not _has_new_coords:
+                    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _cc:
+                        _cc.execute(
+                            "SELECT latitude, longitude FROM restaurant_profiles WHERE user_id = %s",
+                            (user_id,))
+                        _row = _cc.fetchone()
+                    if not _row or _row['latitude'] is None or _row['longitude'] is None:
+                        return jsonify({
+                            "status": "error",
+                            "error": "Complete o endereço (com localização no mapa) antes de abrir."
+                        }), 400
 
             set_clause = ", ".join([f"{k} = %s" for k in updates.keys()])
             values = list(updates.values()) + [user_id]

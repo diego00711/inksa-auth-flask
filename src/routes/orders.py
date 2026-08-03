@@ -1625,10 +1625,15 @@ def get_available_orders():
                         radius_km = 0.0
                 if radius_km <= 0:
                     radius_km = float(_settings["platform_max_delivery_radius"])
+                # FAIL-CLOSED (isolamento geográfico): o restaurante PRECISA ter
+                # coordenadas e estar dentro do raio. Antes, restaurante sem
+                # coords caía no fail-open e aparecia pra TODO entregador
+                # (inclusive de outra cidade). Sem coords o pedido não é
+                # despachável, então não aparece pra ninguém — é o correto.
                 radius_clause = (
-                    " AND (rp.latitude IS NULL OR rp.longitude IS NULL OR "
-                    "earth_distance(ll_to_earth(rp.latitude, rp.longitude), "
-                    "ll_to_earth(%s, %s)) <= %s)"
+                    " AND rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL "
+                    "AND earth_distance(ll_to_earth(rp.latitude, rp.longitude), "
+                    "ll_to_earth(%s, %s)) <= %s"
                 )
                 params += [float(drv_lat), float(drv_lng), radius_km * 1000.0]
 
