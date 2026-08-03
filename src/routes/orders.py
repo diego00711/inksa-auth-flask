@@ -137,7 +137,9 @@ def is_valid_status_transition(current_status, new_status):
         'pending': ['accepted', 'cancelled'],
         'accepted': ['preparing', 'cancelled'],
         'preparing': ['ready', 'cancelled'],
-        'ready': ['accepted_by_delivery', 'cancelled'],
+        # 'ready' -> 'delivering' direto é pra ENTREGA PRÓPRIA (o restaurante
+        # despacha com a própria moto, sem entregador Inksa no meio).
+        'ready': ['accepted_by_delivery', 'delivering', 'cancelled'],
         'accepted_by_delivery': ['delivering', 'cancelled'],
         'delivering': ['delivered'],
         'delivered': ['archived'],
@@ -335,13 +337,11 @@ def update_order_status(order_id):
         if new_status_internal not in VALID_STATUSES_INTERNAL:
             return jsonify({"error": f"Status inválido: '{new_status_internal}'"}), 400
 
-        if new_status_internal in ['delivering', 'delivered']:
-            return jsonify({"error": "Use o endpoint de código para esta transição."}), 400
-
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
-                SELECT o.status, o.status_pagamento, o.total_amount, o.id_transacao_mp, o.payment_provider
+                SELECT o.status, o.status_pagamento, o.total_amount, o.id_transacao_mp, o.payment_provider,
+                       rp.delivery_type
                 FROM orders o
                 JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE o.id = %s AND rp.user_id = %s
@@ -349,6 +349,13 @@ def update_order_status(order_id):
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
+
+            # delivering/delivered com entregador Inksa passam pelos endpoints de
+            # CÓDIGO (retirada/entrega). Na ENTREGA PRÓPRIA (delivery_type='own')
+            # não há entregador Inksa — o restaurante fecha ele mesmo, aqui.
+            _is_own = (order.get('delivery_type') == 'own')
+            if new_status_internal in ('delivering', 'delivered') and not _is_own:
+                return jsonify({"error": "Use o endpoint de código para esta transição."}), 400
 
             current_status = order['status'].strip()
 
