@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 from flask import Blueprint, request, jsonify
 from psycopg2.extras import DictCursor
+import sentry_sdk
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 from ..utils.audit import log_admin_action
@@ -39,6 +40,28 @@ def _get_admin_identifier(user_id: str, conn) -> str:
     except Exception:
         pass
     return str(user_id)
+
+
+def _revert_payout_to_pending(conn, payout_id) -> None:
+    """Devolve um payout 'processing' para 'pending_transfer' (pagável de novo).
+
+    Só chamar quando temos CERTEZA de que NENHUM dinheiro saiu (falha antes/na
+    chamada ao provider). Depois de uma transferência bem-sucedida NUNCA reverter
+    — o repasse fica 'processing' até acerto manual, pra não disparar 2º PIX."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE payouts SET status='pending_transfer', updated_at=NOW() "
+                "WHERE id=%s AND status='processing'",
+                (str(payout_id),),
+            )
+        conn.commit()
+    except Exception:
+        logger.exception("Falha ao reverter payout %s para pending_transfer", payout_id)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +227,7 @@ def list_payouts():
         if not conn:
             return jsonify({"error": "Erro de conexão com banco de dados"}), 500
 
-        valid_statuses = ("pending", "pending_transfer", "paid", "cancelled")
+        valid_statuses = ("pending", "pending_transfer", "processing", "paid", "cancelled")
         where, params = [], []
 
         if partner_type in ("restaurant", "delivery"):
@@ -590,64 +613,110 @@ def auto_pay_payout(payout_id):
         if not conn:
             return jsonify({"error": "Erro de conexão com banco de dados"}), 500
 
+        # ── PASSO 1: CLAIM ATÔMICO ──────────────────────────────────────────
+        # Tira o payout de pending/pending_transfer para 'processing' num único
+        # UPDATE condicional e COMMITA antes de tocar no dinheiro. Um segundo
+        # request (duplo-clique/retry) não encontra mais o payout em estado
+        # pagável e é recusado — nunca dispara um 2º PIX pro mesmo repasse.
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, partner_type, partner_id, total_net, status
-                FROM payouts
-                WHERE id = %s
+                UPDATE payouts
+                   SET status = 'processing', updated_at = NOW()
+                 WHERE id = %s AND status IN ('pending', 'pending_transfer')
+                 RETURNING partner_type, partner_id, total_net
                 """,
                 (str(payout_id),),
             )
-            row = cur.fetchone()
-            if not row:
-                return jsonify({"error": "Payout não encontrado"}), 404
-            row = dict(row)
-
-            if row["status"] not in ("pending", "pending_transfer"):
+            claimed = cur.fetchone()
+            if not claimed:
+                cur.execute("SELECT status FROM payouts WHERE id = %s", (str(payout_id),))
+                exist = cur.fetchone()
+                conn.rollback()
+                if not exist:
+                    return jsonify({"error": "Payout não encontrado"}), 404
                 return jsonify({
-                    "error": f"Somente payouts 'pending' ou 'pending_transfer' podem ser pagos (atual: {row['status']})"
-                }), 400
+                    "error": (f"Repasse indisponível para pagamento (status: {exist['status']}). "
+                              "Se estiver 'processing', confira no Asaas ANTES de repetir — "
+                              "pode ter um PIX em andamento.")
+                }), 409
+            row = dict(claimed)
+            conn.commit()  # torna o claim durável e visível a requests concorrentes
 
+        # ── PASSO 2: EXECUTAR O PIX (sem lock/transação aberta) ──────────────
+        pix_key = full_name = stored_key_type = None
+        try:
             pix_key, full_name, stored_key_type = _get_partner_pix_data(
                 conn, partner_type=row["partner_type"], partner_id=row["partner_id"]
             )
-            if not pix_key:
-                return jsonify({"error": "Parceiro sem PIX cadastrado"}), 400
+        except Exception:
+            logger.exception("Falha ao resolver PIX do parceiro no payout %s", payout_id)
 
-            # Precedência do tipo da chave: escolha manual no modal > tipo que o
-            # parceiro cadastrou > inferência pelo formato (dentro do provider).
-            effective_key_type = pix_key_type or stored_key_type
+        if not pix_key:
+            _revert_payout_to_pending(conn, payout_id)  # nada saiu — volta a ser pagável
+            return jsonify({"error": "Parceiro sem PIX cadastrado"}), 400
 
-            amount_cents = int(round(float(row["total_net"]) * 100))
+        # Precedência do tipo da chave: escolha manual no modal > tipo que o
+        # parceiro cadastrou > inferência pelo formato (dentro do provider).
+        effective_key_type = pix_key_type or stored_key_type
+        amount_cents = int(round(float(row["total_net"]) * 100))
+
+        try:
             provider = get_payout_provider()
             result = provider.transfer_pix(
                 amount_cents=amount_cents,
                 pix_key=pix_key,
                 description=f"{description} - {full_name or row['partner_id']}",
                 pix_key_type=effective_key_type,
+                external_reference=str(payout_id),
             )
+        except NotImplementedError as exc:
+            _revert_payout_to_pending(conn, payout_id)  # provider não moveu dinheiro
+            logger.warning("Provider não implementado: %s", exc)
+            return jsonify({"error": str(exc)}), 501
+        except Exception as exc:
+            # Erro ANTES de ter um resultado do provider: assumimos que nada saiu.
+            _revert_payout_to_pending(conn, payout_id)
+            logger.exception("Erro ao chamar o provider no payout %s", payout_id)
+            sentry_sdk.capture_exception(exc)
+            return jsonify({"error": "Erro ao executar repasse no provedor"}), 502
 
-            if not result["ok"]:
-                logger.error("Falha no provider ao pagar payout %s: %s", payout_id, result["raw"])
-                return jsonify({"error": "Falha ao executar repasse no provedor"}), 502
+        if not result["ok"]:
+            # Provider recusou (saldo, conta em análise, chave inválida): nada saiu.
+            _revert_payout_to_pending(conn, payout_id)
+            logger.error("Falha no provider ao pagar payout %s: %s", payout_id, result["raw"])
+            return jsonify({"error": "Falha ao executar repasse no provedor"}), 502
 
-            txid = result["txid"]
-
-            cur.execute(
-                """
-                UPDATE payouts
-                   SET status = 'paid',
-                       payment_method = 'pix',
-                       payment_ref = %s,
-                       updated_at = NOW()
-                 WHERE id = %s
-                 RETURNING *
-                """,
-                (txid, str(payout_id)),
+        # ── PASSO 3: PIX SAIU — daqui pra frente NUNCA reverter ──────────────
+        txid = result["txid"]
+        try:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE payouts
+                       SET status = 'paid', payment_method = 'pix',
+                           payment_ref = %s, updated_at = NOW()
+                     WHERE id = %s
+                     RETURNING *
+                    """,
+                    (txid, str(payout_id)),
+                )
+                updated = _normalize_dates(dict(cur.fetchone()))
+                conn.commit()
+        except Exception as exc:
+            # Caso raríssimo: o PIX SAIU mas falhou ao gravar 'paid'. NÃO reverter
+            # (senão o admin repetiria e pagaria de novo). Fica 'processing' pra
+            # acerto manual — o externalReference no Asaas aponta este payout.
+            logger.critical(
+                "PIX EXECUTADO (txid=%s) mas falha ao marcar payout %s como pago — "
+                "resolver MANUALMENTE (fica em 'processing').", txid, payout_id,
             )
-            updated = _normalize_dates(dict(cur.fetchone()))
-            conn.commit()
+            sentry_sdk.capture_exception(exc)
+            return jsonify({
+                "error": "Transferência realizada, mas houve erro ao registrar. "
+                         "NÃO repita — confira no Asaas.",
+                "provider_txid": txid,
+            }), 500
 
         admin = _get_admin_identifier(user_id, conn)
         log_admin_action(
@@ -663,9 +732,6 @@ def auto_pay_payout(payout_id):
 
         return jsonify({"status": "success", "payout": updated, "provider_txid": txid}), 200
 
-    except NotImplementedError as exc:
-        logger.warning("Provider não implementado: %s", exc)
-        return jsonify({"error": str(exc)}), 501
     except Exception:
         logger.exception("Erro no auto-pay")
         if conn:

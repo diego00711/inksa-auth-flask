@@ -175,13 +175,16 @@ def get_pix_qrcode(payment_id: str):
 
 
 def create_transfer(value: float, pix_key: str, pix_key_type: str,
-                    description: str = "Repasse Inksa Delivery"):
+                    description: str = "Repasse Inksa Delivery",
+                    external_reference: str | None = None):
     """Transferência PIX de SAÍDA (repasse pro parceiro).
 
     ⚠️ Só funciona com a conta Asaas APROVADA (saque/transferência fica
     bloqueado durante a análise) e com SALDO disponível na conta.
 
     pix_key_type: 'CPF' | 'CNPJ' | 'EMAIL' | 'PHONE' | 'EVP' (chave aleatória).
+    external_reference: id do repasse (payout) — grava no Asaas pra reconciliar
+    depois (ex.: um PIX que ficou preso em 'processing' no nosso lado).
     (ok, {transfer_id, status} | msg_de_erro).
     """
     body = {
@@ -191,6 +194,8 @@ def create_transfer(value: float, pix_key: str, pix_key_type: str,
         "pixAddressKeyType": (pix_key_type or "").strip().upper(),
         "description": (description or "Repasse Inksa Delivery")[:200],
     }
+    if external_reference:
+        body["externalReference"] = str(external_reference)
     ok, data = _request("POST", "/transfers", json_body=body)
     if not ok:
         return False, _error_message(data)

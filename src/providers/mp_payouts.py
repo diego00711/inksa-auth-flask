@@ -37,7 +37,7 @@ class MercadoPagoPayoutProvider(PayoutProvider):
         self.sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
     def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str,
-                     pix_key_type=None) -> PayoutResult:
+                     pix_key_type=None, external_reference=None) -> PayoutResult:
         # IMPORTANTE: este trecho depende dos endpoints habilitados na sua conta.
         # Há contas que usam 'transfers/payouts' privados. Se não tiver, ficará indisponível.
         #

@@ -58,7 +58,8 @@ def infer_pix_key_type(pix_key: str) -> str:
 
 class AsaasPayoutProvider(PayoutProvider):
     def transfer_pix(self, *, amount_cents: int, pix_key: str, description: str,
-                     pix_key_type: Optional[str] = None) -> PayoutResult:
+                     pix_key_type: Optional[str] = None,
+                     external_reference: Optional[str] = None) -> PayoutResult:
         if not asaas_client.is_configured():
             return {"ok": False, "txid": None, "raw": {"error": "ASAAS_API_KEY ausente"}}
 
@@ -74,6 +75,7 @@ class AsaasPayoutProvider(PayoutProvider):
             pix_key=key,
             pix_key_type=key_type,
             description=description or "Repasse Inksa Delivery",
+            external_reference=external_reference,
         )
         if not ok:
             logger.error("Asaas transfer falhou (%s): %s", key_type, detail)
