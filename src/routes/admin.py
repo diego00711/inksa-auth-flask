@@ -354,12 +354,15 @@ def get_all_users():
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             params, where = [], []
             sql = """
-                SELECT 
-                    u.id, u.email, u.user_type, u.created_at,
+                SELECT
+                    u.id, u.email, u.user_type, u.created_at, u.is_active,
                     COALESCE(cp.first_name || ' ' || cp.last_name,
                              rp.restaurant_name,
                              dp.first_name || ' ' || dp.last_name) AS full_name,
-                    COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city
+                    COALESCE(cp.address_city, rp.address_city, dp.address_city) AS city,
+                    COALESCE(cp.phone, rp.phone, dp.phone) AS phone,
+                    COALESCE(rp.fundador, false) AS fundador,
+                    COALESCE(dp.approved, false) AS courier_approved
                 FROM users u
                 LEFT JOIN client_profiles   cp ON u.id = cp.user_id AND u.user_type = 'client'
                 LEFT JOIN restaurant_profiles rp ON u.id = rp.user_id AND u.user_type = 'restaurant'
