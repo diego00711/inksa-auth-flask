@@ -62,30 +62,36 @@ def get_banners():
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             if is_admin:
-                # Admin vê todos os banners, incluindo a posição do texto e a
-                # janela de agendamento (starts_at/ends_at).
+                # Admin vê todos os banners, incluindo a posição do texto, a
+                # janela de agendamento (starts_at/ends_at), o app-alvo (audience)
+                # e os dados de patrocínio.
                 query = """
                     SELECT id, title, subtitle, image_url, link_url, is_active,
                            display_order, created_at, updated_at, text_position,
-                           starts_at, ends_at, duration_seconds
+                           starts_at, ends_at, duration_seconds,
+                           audience, is_sponsored, sponsor_name
                     FROM banners
                     ORDER BY display_order ASC, created_at DESC
                 """
                 cur.execute(query)
             else:
-                # Clientes veem apenas banners ativos E dentro da janela de tempo
-                # agendada: já começou (starts_at NULL ou <= agora) e ainda não
-                # expirou (ends_at NULL ou >= agora).
+                # Público vê apenas banners ativos, do app que está pedindo
+                # (audience) E dentro da janela de tempo agendada: já começou
+                # (starts_at NULL ou <= agora) e ainda não expirou (ends_at NULL
+                # ou >= agora). audience padrão = 'cliente' (compatível com o app
+                # do cliente, que não manda o parâmetro).
+                audience = request.args.get('audience', 'cliente')
                 query = """
                     SELECT id, title, subtitle, image_url, link_url, display_order, text_position,
-                           duration_seconds
+                           duration_seconds, audience, is_sponsored, sponsor_name
                     FROM banners
                     WHERE is_active = true
+                      AND audience = %s
                       AND (starts_at IS NULL OR starts_at <= NOW())
                       AND (ends_at   IS NULL OR ends_at   >= NOW())
                     ORDER BY display_order ASC, created_at DESC
                 """
-                cur.execute(query)
+                cur.execute(query, (audience,))
             
             banners = [dict(row) for row in cur.fetchall()]
             
@@ -144,6 +150,11 @@ def create_banner():
                 'ends_at': data.get('ends_at') or None,
                 # Tempo de exposição no carrossel (segundos). '' -> None (padrão do app).
                 'duration_seconds': _coerce_int(data.get('duration_seconds')),
+                # App-alvo do banner: cliente (padrão) / parceiro / entregador.
+                'audience': data.get('audience') or 'cliente',
+                # Patrocínio (mostra o selo "Patrocinado" + nome do anunciante).
+                'is_sponsored': bool(data.get('is_sponsored', False)),
+                'sponsor_name': (data.get('sponsor_name') or None),
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
             }
@@ -242,7 +253,7 @@ def update_banner(banner_id):
             update_fields = []
             update_values = []
             
-            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position', 'starts_at', 'ends_at', 'duration_seconds']
+            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position', 'starts_at', 'ends_at', 'duration_seconds', 'audience', 'is_sponsored', 'sponsor_name']
 
             for field in updatable_fields:
                 if field in data:
@@ -254,6 +265,15 @@ def update_banner(banner_id):
                     # Tempo de exposição: coage pra int, '' vira NULL (padrão).
                     if field == 'duration_seconds':
                         value = _coerce_int(value)
+                    # Audiência vazia -> volta pro padrão 'cliente'.
+                    if field == 'audience' and value in ('', None):
+                        value = 'cliente'
+                    # Patrocínio é booleano.
+                    if field == 'is_sponsored':
+                        value = bool(value)
+                    # Nome do anunciante: '' vira NULL.
+                    if field == 'sponsor_name' and value in ('', None):
+                        value = None
                     update_values.append(value)
             
             if not update_fields:
