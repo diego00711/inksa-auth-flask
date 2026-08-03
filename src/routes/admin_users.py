@@ -588,6 +588,27 @@ def update_user(user_id):
 
                 conn.commit()
 
+            # Espelha o status no PERFIL, pra o desativar ter efeito visível ao
+            # cliente/fluxo — não só bloquear o login (o app do cliente filtra
+            # por restaurant_profiles.active; sem isto, o card continuava
+            # aparecendo mesmo com o acesso desativado).
+            if "status" in data:
+                _active = data["status"] == "active"
+                if user["user_type"] == "restaurant":
+                    cur.execute(
+                        "UPDATE restaurant_profiles SET active = %s WHERE user_id = %s",
+                        (_active, str(user_id)),
+                    )
+                    conn.commit()
+                    update_details.append(f"restaurante {'reativado' if _active else 'oculto do app'}")
+                elif user["user_type"] == "delivery":
+                    # Desativar entregador: fica offline e não recebe pedidos.
+                    if _active:
+                        cur.execute("UPDATE delivery_profiles SET active = TRUE WHERE user_id = %s", (str(user_id),))
+                    else:
+                        cur.execute("UPDATE delivery_profiles SET active = FALSE, is_available = FALSE WHERE user_id = %s", (str(user_id),))
+                    conn.commit()
+
             # Selo "Parceiro Fundador" (campanha) — vive em restaurant_profiles.
             # UPDATE por user_id; só afeta linha se o usuário for restaurante.
             if "fundador" in data:
