@@ -1404,6 +1404,107 @@ def get_pending_restaurant_review():
         if conn:
             conn.close()
 
+def _run_dispatch_tick(cur, settings):
+    """Motor de atribuição (lazy, roda no poll do entregador). Para cada pedido
+    SEM entregador e SEM oferta ativa: se a oferta anterior expirou, marca quem
+    'passou'; então oferta ao entregador ELEGÍVEL mais próximo (aprovado,
+    disponível, cadastro completo, fora de cooldown, dentro do raio do veículo
+    DELE), com timeout. Só roda quando dispatch_assign_enabled = 1.
+
+    Concorrência: FOR UPDATE SKIP LOCKED — polls simultâneos não brigam pelo
+    mesmo pedido. O chamador faz commit depois."""
+    try:
+        offer_seconds = int(settings.get("dispatch_offer_seconds") or 30)
+    except (TypeError, ValueError):
+        offer_seconds = 30
+
+    def _f(key, default=0.0):
+        try:
+            v = float(settings.get(key) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        return v
+    r_global = _f("platform_max_delivery_radius", 15) or 15.0
+    r_bike  = _f("delivery_radius_bike_km")  or r_global
+    r_moto  = _f("delivery_radius_moto_km")  or r_global
+    r_carro = _f("delivery_radius_carro_km") or r_global
+
+    cur.execute(
+        """
+        SELECT o.id, o.offer_courier_id, o.offer_expires_at, o.offer_passed_ids,
+               rp.latitude AS r_lat, rp.longitude AS r_lng
+          FROM orders o
+          JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
+         WHERE o.delivery_id IS NULL
+           AND o.status IN ('ready', 'accepted_by_delivery')
+           AND rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL
+           AND (o.offer_courier_id IS NULL OR o.offer_expires_at <= NOW())
+         ORDER BY o.created_at ASC
+         LIMIT 20
+         FOR UPDATE OF o SKIP LOCKED
+        """
+    )
+    pending = cur.fetchall()
+    for od in pending:
+        passed = list(od['offer_passed_ids'] or [])
+        # oferta expirou sem aceitar -> quem tinha a oferta "passou"
+        if od['offer_courier_id'] and od['offer_courier_id'] not in passed:
+            passed.append(od['offer_courier_id'])
+
+        cur.execute(
+            """
+            SELECT dp.user_id,
+                   earth_distance(
+                     ll_to_earth(%s, %s),
+                     ll_to_earth(COALESCE(dp.current_lat, dp.latitude), COALESCE(dp.current_lng, dp.longitude))
+                   ) AS dist
+              FROM delivery_profiles dp
+             WHERE dp.approved = TRUE
+               AND COALESCE(dp.is_available, FALSE) = TRUE
+               AND (dp.dispatch_cooldown_until IS NULL OR dp.dispatch_cooldown_until < NOW())
+               AND COALESCE(dp.current_lat, dp.latitude) IS NOT NULL
+               AND COALESCE(dp.current_lng, dp.longitude) IS NOT NULL
+               AND NULLIF(TRIM(dp.first_name), '') IS NOT NULL
+               AND NULLIF(TRIM(dp.cpf), '') IS NOT NULL
+               AND NULLIF(TRIM(dp.vehicle_type), '') IS NOT NULL
+               AND (dp.vehicle_type NOT IN ('moto','carro')
+                    OR (NULLIF(TRIM(dp.vehicle_plate),'') IS NOT NULL AND NULLIF(TRIM(dp.cnh),'') IS NOT NULL))
+               AND NOT (dp.user_id = ANY(%s::uuid[]))
+               AND earth_distance(
+                     ll_to_earth(%s, %s),
+                     ll_to_earth(COALESCE(dp.current_lat, dp.latitude), COALESCE(dp.current_lng, dp.longitude))
+                   ) <= (CASE dp.vehicle_type
+                            WHEN 'bicicleta' THEN %s WHEN 'moto' THEN %s WHEN 'carro' THEN %s ELSE %s END) * 1000.0
+             ORDER BY dist ASC
+             LIMIT 1
+            """,
+            (od['r_lat'], od['r_lng'], passed,
+             od['r_lat'], od['r_lng'],
+             r_bike, r_moto, r_carro, r_global),
+        )
+        cand = cur.fetchone()
+        if cand:
+            cur.execute(
+                """UPDATE orders
+                      SET offer_courier_id = %s,
+                          offer_expires_at = NOW() + make_interval(secs => %s),
+                          offer_passed_ids = %s::uuid[]
+                    WHERE id = %s""",
+                (cand['user_id'], offer_seconds, passed, od['id']),
+            )
+        else:
+            # Ninguém elegível agora. Limpa a oferta; se a lista de "passou"
+            # esgotou os disponíveis, zera pra tentar de novo (decliners seguem
+            # protegidos pelo cooldown, então não voltam antes da hora).
+            cur.execute(
+                """UPDATE orders
+                      SET offer_courier_id = NULL, offer_expires_at = NULL,
+                          offer_passed_ids = '{}'::uuid[]
+                    WHERE id = %s""",
+                (od['id'],),
+            )
+
+
 @orders_bp.route('/available', methods=['GET'])
 def get_available_orders():
     """Retorna pedidos disponíveis para o entregador:
@@ -1479,15 +1580,29 @@ def get_available_orders():
             drv_lat = _dp['lat'] if _dp else None
             drv_lng = _dp['lng'] if _dp else None
 
-            # Filtro por RAIO: o entregador só vê pedidos cujo RESTAURANTE está
-            # dentro de service_radius_km dele — é o que separa as cidades (cada
-            # entregador vê só o que é da sua região). Fail-open: sem coordenadas
-            # do entregador (ou restaurante sem coords), não filtra pra não sumir.
+            from ..utils.platform_settings import get_settings
+            _settings = get_settings()
+            # Motor de ATRIBUIÇÃO (flag dispatch_assign_enabled). Ligado: roda o
+            # tick (oferta ao mais próximo) e o entregador vê SÓ o pedido ofertado
+            # a ele. Desligado (padrão): broadcast por raio, como antes.
+            try:
+                assign_on = int(_settings.get('dispatch_assign_enabled') or 0) == 1
+            except (TypeError, ValueError):
+                assign_on = False
+            if assign_on:
+                try:
+                    _run_dispatch_tick(cur, _settings)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    logger.exception("dispatch tick falhou — seguindo sem ofertar")
+
+            # Filtro por RAIO (modo broadcast): entregador só vê pedidos cujo
+            # RESTAURANTE está no raio dele. Fail-open sem coords. No modo
+            # atribuição não é usado (a oferta já respeitou o raio).
             radius_clause = ""
             params = []
-            if drv_lat is not None and drv_lng is not None:
-                from ..utils.platform_settings import get_settings
-                _settings = get_settings()
+            if (not assign_on) and drv_lat is not None and drv_lng is not None:
                 # Raio POR TIPO DE VEÍCULO: bike alcança menos que moto/carro.
                 # Se o específico estiver 0/vazio (ou for 'outro'), usa o global.
                 _radius_key = {
@@ -1510,6 +1625,13 @@ def get_available_orders():
                 )
                 params += [float(drv_lat), float(drv_lng), radius_km * 1000.0]
 
+            # No modo atribuição, o entregador vê SÓ o pedido ofertado a ele e
+            # ainda dentro do prazo (o resto do WHERE segue igual).
+            offer_clause = ""
+            if assign_on:
+                offer_clause = " AND o.offer_courier_id = %s AND o.offer_expires_at > NOW()"
+                params.append(user_id)
+
             sql_query = f"""
                 SELECT
                     o.id,
@@ -1529,13 +1651,14 @@ def get_available_orders():
                     COALESCE(o.valor_repassado_entregador, 0) AS valor_repassado_entregador,
                     o.items,
                     o.status,
-                    o.created_at
+                    o.created_at,
+                    o.offer_expires_at
                 FROM orders o
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE
                     (o.status = 'ready' OR o.status = 'accepted_by_delivery')
                     AND o.delivery_id IS NULL
-                    {radius_clause}
+                    {radius_clause}{offer_clause}
                 ORDER BY o.created_at ASC;
             """
             cur.execute(sql_query, params)
@@ -1553,6 +1676,8 @@ def get_available_orders():
 
                 if order_dict.get('created_at'):
                     order_dict['created_at'] = order_dict['created_at'].isoformat()
+                if order_dict.get('offer_expires_at'):
+                    order_dict['offer_expires_at'] = order_dict['offer_expires_at'].isoformat()
                 if order_dict.get('id'):
                     order_dict['id'] = str(order_dict['id'])
                 if order_dict.get('restaurant_id'):
@@ -1578,6 +1703,58 @@ def get_available_orders():
         if conn:
             conn.close()
             logger.info("Conexão com banco fechada em get_available_orders")
+
+@orders_bp.route('/<uuid:order_id>/decline', methods=['POST'])
+def decline_order_by_delivery(order_id):
+    """Entregador RECUSA a oferta (motor de atribuição): entra em cooldown (fica
+    N min sem receber ofertas) e o pedido passa pro próximo mais próximo."""
+    conn = None
+    try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+        if error:
+            return error
+        if user_type != 'delivery':
+            return jsonify({'error': 'Apenas entregadores podem recusar ofertas'}), 403
+
+        from ..utils.platform_settings import get_settings as _gs_dec
+        try:
+            cooldown_min = int(_gs_dec().get('dispatch_decline_cooldown_min') or 15)
+        except (TypeError, ValueError):
+            cooldown_min = 15
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Penalidade: cooldown no entregador (não recebe ofertas por N min).
+            cur.execute(
+                "UPDATE delivery_profiles SET dispatch_cooldown_until = NOW() + make_interval(mins => %s) "
+                "WHERE user_id = %s",
+                (cooldown_min, user_id),
+            )
+            # Tira a oferta deste pedido (só se era dele) e marca que ele passou —
+            # o próximo tick oferta ao próximo mais próximo.
+            cur.execute(
+                """UPDATE orders
+                      SET offer_courier_id = NULL, offer_expires_at = NULL,
+                          offer_passed_ids = array_append(offer_passed_ids, %s::uuid)
+                    WHERE id = %s AND offer_courier_id = %s::uuid""",
+                (user_id, str(order_id), user_id),
+            )
+            conn.commit()
+        return jsonify({
+            'status': 'success',
+            'message': f'Oferta recusada. Você ficará {cooldown_min} min sem novas ofertas.',
+        }), 200
+    except Exception:
+        if conn:
+            conn.rollback()
+        logger.exception("decline_order_by_delivery falhou")
+        return jsonify({'error': 'Erro ao recusar a oferta'}), 500
+    finally:
+        if conn:
+            conn.close()
+
 
 @orders_bp.route('/<uuid:order_id>/accept', methods=['POST'])
 def accept_order_by_delivery(order_id):
@@ -1631,16 +1808,31 @@ def accept_order_by_delivery(order_id):
             # uma query desnecessaria) -- se dois entregadores chegarem aqui ao
             # mesmo tempo, so um UPDATE afeta uma linha; o outro recebe 0 linhas
             # e 409, em vez de os dois sobrescreverem o delivery_id silenciosamente.
-            cur.execute("""
+            # No MODO ATRIBUIÇÃO, só aceita quem tem a oferta ativa (fim do
+            # "primeiro no botão leva"). Em broadcast, condição extra vazia.
+            from ..utils.platform_settings import get_settings as _gs_accept
+            try:
+                _assign_accept = int(_gs_accept().get('dispatch_assign_enabled') or 0) == 1
+            except (TypeError, ValueError):
+                _assign_accept = False
+            _offer_cond = ""
+            _offer_params = []
+            if _assign_accept:
+                _offer_cond = " AND offer_courier_id = %s::uuid AND offer_expires_at > NOW()"
+                _offer_params = [user_id]
+            cur.execute(f"""
                 UPDATE orders
                 SET delivery_id = %s,
                     status = 'accepted_by_delivery',
+                    offer_courier_id = NULL,
+                    offer_expires_at = NULL,
                     updated_at = NOW()
                 WHERE id = %s
                   AND delivery_id IS NULL
                   AND status IN ('ready', 'accepted_by_delivery')
+                  {_offer_cond}
                 RETURNING *
-            """, (delivery_profile_id, str(order_id)))
+            """, (delivery_profile_id, str(order_id), *_offer_params))
 
             updated_row = cur.fetchone()
             if not updated_row:
