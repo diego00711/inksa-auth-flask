@@ -50,6 +50,39 @@ def public_support_info():
         conn.close()
 
 
+@public_bp.get("/app-config")
+def public_app_config():
+    """Config de comportamento dos apps (sem autenticacao).
+
+    Hoje expoe apenas `idle_logout_minutes` (logoff automatico por inatividade
+    nos apps Parceiro/Entregador). 0 = recurso desligado. Editavel no admin em
+    Configuracoes. Extensivel para outras flags de UX no futuro."""
+    default_idle = 60
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"idle_logout_minutes": default_idle}), 200
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                "SELECT value FROM platform_settings WHERE key = %s",
+                ("idle_logout_minutes",),
+            )
+            row = cur.fetchone()
+        try:
+            val = int(float((row["value"] if row else None) or default_idle))
+        except (TypeError, ValueError):
+            val = default_idle
+        # Sanidade: 0 = desligado; senao entre 5 min e 24h.
+        if val != 0:
+            val = max(5, min(val, 1440))
+        return jsonify({"idle_logout_minutes": val}), 200
+    except Exception:
+        logger.exception("Erro em public_app_config")
+        return jsonify({"idle_logout_minutes": default_idle}), 200
+    finally:
+        conn.close()
+
+
 @public_bp.get("/social-day")
 def public_social_day():
     """

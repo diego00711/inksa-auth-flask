@@ -58,6 +58,9 @@ _DEFAULTS: dict[str, Decimal] = {
     "dispatch_assign_enabled":      Decimal("0"),
     "dispatch_offer_seconds":       Decimal("30"),
     "dispatch_decline_cooldown_min": Decimal("15"),
+    # Logoff automático por inatividade (minutos) nos apps Parceiro e Entregador.
+    # 0/vazio = desliga o recurso. Editável no admin.
+    "idle_logout_minutes":          Decimal("60"),
 }
 
 
@@ -79,7 +82,8 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
     for k in ("fixed_delivery_fee", "per_km_delivery_fee", "free_delivery_threshold_km",
               "delivery_base_fee", "delivery_per_km_fee", "platform_max_delivery_radius",
               "delivery_radius_bike_km", "delivery_radius_moto_km", "delivery_radius_carro_km",
-              "dispatch_assign_enabled", "dispatch_offer_seconds", "dispatch_decline_cooldown_min"):
+              "dispatch_assign_enabled", "dispatch_offer_seconds", "dispatch_decline_cooldown_min",
+              "idle_logout_minutes"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 
     # commission_rate é guardado como percentual humano (10 = 10%);
