@@ -16,6 +16,7 @@ from functools import wraps
 from flask_cors import cross_origin
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.geocoding_utils import geocode_address
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ def handle_profile():
                     'address_city', 'address_state', 'address_zipcode', 'is_available',
                     'bank_name', 'bank_agency', 'bank_account_number', 'bank_account_type',
                     'pix_key', 'pix_key_type', 'payout_frequency', 'daily_goal',
+                    'latitude', 'longitude',
                 ]
 
                 update_data = {
@@ -144,6 +146,28 @@ def handle_profile():
                 # pra NULL em vez de deixar o Postgres rejeitar o UPDATE inteiro.
                 if update_data.get('vehicle_type') == '':
                     update_data['vehicle_type'] = None
+
+                # Geocodifica o endereço -> latitude/longitude (fallback server-side,
+                # igual ao restaurante). Sem coordenadas, o dispatch não consegue
+                # filtrar o entregador por raio (COALESCE(current_lat, latitude)) e
+                # ele fica "online" sem receber pedido nenhum. Só roda quando algum
+                # campo de endereço mudou E o app não mandou lat/lng explícitas.
+                _addr_fields = ('address_street', 'address_number', 'address_neighborhood',
+                                'address_city', 'address_state', 'address_zipcode')
+                _addr_changed = any(f in update_data for f in _addr_fields)
+                _has_new_coords = (update_data.get('latitude') is not None
+                                   and update_data.get('longitude') is not None)
+                if _addr_changed and not _has_new_coords:
+                    def _merged(field):
+                        return update_data.get(field) if field in update_data else profile.get(field)
+                    _lat, _lng = geocode_address(
+                        _merged('address_street'), _merged('address_number'),
+                        _merged('address_neighborhood'), _merged('address_city'),
+                        _merged('address_state'), _merged('address_zipcode'),
+                    )
+                    if _lat is not None and _lng is not None:
+                        update_data['latitude'] = _lat
+                        update_data['longitude'] = _lng
 
                 if not update_data:
                     return jsonify({"error": "Nenhum campo válido para atualização"}), 400
