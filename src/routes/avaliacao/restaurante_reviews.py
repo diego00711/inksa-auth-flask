@@ -127,24 +127,68 @@ def list_restaurant_reviews(restaurant_id):
     if isinstance(restaurant_id, uuid.UUID):
         restaurant_id = str(restaurant_id)
 
+    # Vitrine pública (o cliente lê ANTES de pedir), então:
+    #  - só avaliações de CLIENTE (a do entregador é operacional, não de compra);
+    #  - nome abreviado ("João S.") — nunca o nome completo de quem avaliou;
+    #  - distribuição por estrela, pra desenhar as barras como nos apps grandes.
+    try:
+        limit = min(max(int(request.args.get('limit', 20)), 1), 100)
+        offset = max(int(request.args.get('offset', 0)), 0)
+    except (TypeError, ValueError):
+        limit, offset = 20, 0
+
     conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
-                "SELECT rating, comment, tags, category_ratings, created_at FROM restaurant_reviews WHERE restaurant_id=%s ORDER BY created_at DESC",
+                """
+                SELECT rr.rating, rr.comment, rr.created_at,
+                       cp.first_name, cp.last_name
+                  FROM restaurant_reviews rr
+                  LEFT JOIN client_profiles cp ON cp.id = rr.client_id
+                 WHERE rr.restaurant_id = %s
+                   AND COALESCE(rr.reviewer_type, 'client') = 'client'
+                 ORDER BY rr.created_at DESC
+                 LIMIT %s OFFSET %s
+                """,
+                (restaurant_id, limit, offset)
+            )
+            reviews = []
+            for r in cur.fetchall():
+                nome = (r['first_name'] or '').strip()
+                sobren = (r['last_name'] or '').strip()
+                autor = f"{nome} {sobren[0]}." if nome and sobren else (nome or 'Cliente')
+                reviews.append({
+                    'rating': r['rating'],
+                    'comment': r['comment'],
+                    'created_at': r['created_at'].isoformat() if r['created_at'] else None,
+                    'author': autor,
+                })
+
+            cur.execute(
+                """
+                SELECT AVG(rating)::float AS media, COUNT(*)::int AS total,
+                       COUNT(*) FILTER (WHERE rating = 5)::int AS r5,
+                       COUNT(*) FILTER (WHERE rating = 4)::int AS r4,
+                       COUNT(*) FILTER (WHERE rating = 3)::int AS r3,
+                       COUNT(*) FILTER (WHERE rating = 2)::int AS r2,
+                       COUNT(*) FILTER (WHERE rating = 1)::int AS r1
+                  FROM restaurant_reviews
+                 WHERE restaurant_id = %s
+                   AND COALESCE(reviewer_type, 'client') = 'client'
+                """,
                 (restaurant_id,)
             )
-            reviews = [dict(zip(['rating', 'comment', 'tags', 'category_ratings', 'created_at'], row)) for row in cur.fetchall()]
-            # Também retorna média e contagem
-            cur.execute(
-                "SELECT AVG(rating)::float, COUNT(*) FROM restaurant_reviews WHERE restaurant_id=%s",
-                (restaurant_id,)
-            )
-            avg, count = cur.fetchone()
+            agg = cur.fetchone()
             return jsonify({
                 'reviews': reviews,
-                'average_rating': round(avg or 0, 1),
-                'total_reviews': count
+                'average_rating': round(agg['media'] or 0, 1),
+                'total_reviews': agg['total'],
+                'distribution': {
+                    '5': agg['r5'], '4': agg['r4'], '3': agg['r3'],
+                    '2': agg['r2'], '1': agg['r1'],
+                },
+                'has_more': (offset + len(reviews)) < agg['total'],
             }), 200
     finally:
         conn.close()

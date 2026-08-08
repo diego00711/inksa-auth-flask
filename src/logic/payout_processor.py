@@ -121,10 +121,23 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
         partner_col = "restaurant_id"
         amount_col = "valor_repassado_restaurante"
         payout_col = "restaurant_payout_id"
+        # PEDIDO EM DINHEIRO conta pro repasse do RESTAURANTE. O dinheiro foi
+        # recolhido pelo entregador (status_pagamento='pending_cash', nunca vira
+        # 'approved'), e a plataforma cobra dele via cash_debt — mas o
+        # restaurante segue com o valor a receber. Antes o filtro exigia
+        # 'approved', então NENHUM pedido em dinheiro gerava repasse e o
+        # parceiro simplesmente não recebia por essas vendas.
+        pagamento_clause = (
+            "(status_pagamento IN ('approved', 'pending_cash') OR status = 'delivery_failed')"
+        )
     else:
         partner_col = "delivery_id"
         amount_col = "valor_repassado_entregador"
         payout_col = "delivery_payout_id"
+        # ENTREGADOR: pedido em dinheiro NÃO entra. Ele já ficou com o frete em
+        # espécie no ato (cash_debt = total - frete dele). Gerar repasse aqui
+        # pagaria o frete duas vezes — em dinheiro e de novo abatendo a dívida.
+        pagamento_clause = "(status_pagamento = 'approved' OR status = 'delivery_failed')"
 
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         # NÃO filtrar por orders.payout_status aqui. Um pedido gera DOIS
@@ -145,7 +158,7 @@ def _get_eligible_orders(conn, partner_type: str, partner_id: str, period_start,
             FROM orders
             WHERE {partner_col} = %s
               AND status IN ('delivered', 'delivery_failed')
-              AND (status_pagamento = 'approved' OR status = 'delivery_failed')
+              AND {pagamento_clause}
               AND {payout_col} IS NULL
               AND COALESCE({amount_col}, 0) > 0
               AND updated_at >= %s AND updated_at <= %s
