@@ -1341,10 +1341,20 @@ def get_pending_delivery_review():
                 JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 JOIN client_profiles cp ON o.client_id = cp.id
                 WHERE o.delivery_id = %s AND o.status = 'delivered'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM client_reviews cr
-                    WHERE cr.order_id = o.id AND cr.reviewer_type = 'delivery'
-                  )
+                  AND (
+                        NOT EXISTS (
+                          SELECT 1 FROM client_reviews cr
+                          WHERE cr.order_id = o.id AND cr.reviewer_type = 'delivery'
+                        )
+                        -- O entregador avalia o CLIENTE e o PARCEIRO. Antes só
+                        -- olhávamos o cliente: assim que ele avaliava o cliente,
+                        -- o pedido sumia da lista e não dava mais pra avaliar o
+                        -- parceiro.
+                        OR NOT EXISTS (
+                          SELECT 1 FROM restaurant_reviews rr
+                          WHERE rr.order_id = o.id AND rr.reviewer_type = 'delivery'
+                        )
+                      )
                 ORDER BY o.updated_at DESC;
             """
             cur.execute(sql_query, (delivery_id,))
@@ -1394,10 +1404,21 @@ def get_pending_restaurant_review():
                 JOIN client_profiles cp ON o.client_id = cp.id
                 LEFT JOIN delivery_profiles dp ON o.delivery_id = dp.id
                 WHERE o.restaurant_id = %s AND o.status = 'delivered'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM client_reviews cr
-                    WHERE cr.order_id = o.id AND cr.reviewer_type = 'restaurant'
-                  )
+                  AND (
+                        NOT EXISTS (
+                          SELECT 1 FROM client_reviews cr
+                          WHERE cr.order_id = o.id AND cr.reviewer_type = 'restaurant'
+                        )
+                        -- O parceiro avalia o CLIENTE e o ENTREGADOR. Antes só
+                        -- olhávamos o cliente: avaliado o cliente, o pedido
+                        -- sumia da lista e o entregador ficava sem avaliação.
+                        OR (
+                          o.delivery_id IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM delivery_reviews dr
+                            WHERE dr.order_id = o.id AND dr.reviewer_type = 'restaurant'
+                          )
+                        )
+                      )
                 ORDER BY o.updated_at DESC;
             """
             cur.execute(sql_query, (restaurant_id,))

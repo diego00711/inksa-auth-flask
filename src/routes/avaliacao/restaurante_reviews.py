@@ -24,8 +24,11 @@ def create_restaurant_review(restaurant_id):
     if isinstance(user_id, uuid.UUID):
         user_id = str(user_id)
 
-    if user_type != 'client':
-        return jsonify({'error': 'Apenas clientes podem avaliar.'}), 403
+    # O ENTREGADOR também avalia o parceiro (espera na retirada, organização).
+    # Antes a rota era exclusiva de cliente: a avaliação que o app do entregador
+    # enviava no fim da entrega falhava calada (403) e nunca era registrada.
+    if user_type not in ('client', 'delivery'):
+        return jsonify({'error': 'Apenas clientes e entregadores podem avaliar parceiros.'}), 403
 
     data = request.get_json()
     rating = data.get('rating')
@@ -47,28 +50,49 @@ def create_restaurant_review(restaurant_id):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Só permite avaliar pedidos entregues
-            cur.execute(
-                "SELECT status FROM orders WHERE id=%s AND client_id=(SELECT id FROM client_profiles WHERE user_id=%s) AND restaurant_id=%s",
-                (order_id, user_id, restaurant_id)
-            )
+            # Quem avalia precisa ter participado do pedido: o cliente é o dono
+            # dele; o entregador é quem retirou nesse parceiro.
+            if user_type == 'client':
+                cur.execute(
+                    "SELECT o.status, cp.id FROM orders o JOIN client_profiles cp ON o.client_id = cp.id "
+                    "WHERE o.id=%s AND cp.user_id=%s AND o.restaurant_id=%s",
+                    (order_id, user_id, restaurant_id)
+                )
+            else:
+                cur.execute(
+                    "SELECT o.status, dp.id FROM orders o JOIN delivery_profiles dp ON o.delivery_id = dp.id "
+                    "WHERE o.id=%s AND dp.user_id=%s AND o.restaurant_id=%s",
+                    (order_id, user_id, restaurant_id)
+                )
             order = cur.fetchone()
-            if not order or order[0] != 'delivered':
-                return jsonify({'error': 'Pedido inválido ou ainda não entregue'}), 400
+            if not order:
+                return jsonify({'error': 'Pedido inválido ou não associado a este parceiro'}), 400
+            reviewer_profile_id = order[1]
 
-            # Evita avaliação duplicada
+            # Cliente só avalia depois de receber. O entregador já pode avaliar
+            # a partir da retirada (é quando ele passa pelo parceiro).
+            if user_type == 'client':
+                if order[0] != 'delivered':
+                    return jsonify({'error': 'Pedido inválido ou ainda não entregue'}), 400
+            elif order[0] not in ('delivering', 'Saiu para Entrega', 'Entregando', 'delivered', 'delivery_failed'):
+                return jsonify({'error': 'O pedido ainda não foi retirado.'}), 400
+
+            # Evita avaliação duplicada do MESMO avaliador
             cur.execute(
-                "SELECT 1 FROM restaurant_reviews WHERE order_id=%s AND client_id=(SELECT id FROM client_profiles WHERE user_id=%s)",
-                (order_id, user_id)
+                "SELECT 1 FROM restaurant_reviews WHERE order_id=%s AND reviewer_type=%s AND reviewer_id=%s",
+                (order_id, user_type, reviewer_profile_id)
             )
             if cur.fetchone():
                 return jsonify({'error': 'Você já avaliou esse pedido.'}), 400
 
             cur.execute("""
-                INSERT INTO restaurant_reviews (order_id, restaurant_id, client_id, rating, comment, tags, category_ratings)
-                VALUES (%s, %s, (SELECT id FROM client_profiles WHERE user_id=%s), %s, %s, %s, %s)
-                RETURNING id, client_id
-            """, (order_id, restaurant_id, user_id, rating, comment,
+                INSERT INTO restaurant_reviews
+                    (order_id, restaurant_id, client_id, reviewer_type, reviewer_id, rating, comment, tags, category_ratings)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, reviewer_id
+            """, (order_id, restaurant_id,
+                  reviewer_profile_id if user_type == 'client' else None,
+                  user_type, reviewer_profile_id, rating, comment,
                   psycopg2.extras.Json(tags) if tags else None,
                   psycopg2.extras.Json(category_ratings) if category_ratings else None))
             review_row = cur.fetchone()
@@ -76,12 +100,13 @@ def create_restaurant_review(restaurant_id):
 
             if _award_points_for_action:
                 try:
-                    _award_points_for_action(
-                        user_id=str(review_row[1]),
-                        action_key="review_given_client",
-                        order_id=str(order_id),
-                        description="Avaliação enviada",
-                    )
+                    if user_type == 'client':
+                        _award_points_for_action(
+                            user_id=str(review_row[1]),
+                            action_key="review_given_client",
+                            order_id=str(order_id),
+                            description="Avaliação enviada",
+                        )
                     if rating == 5:
                         _award_points_for_action(
                             user_id=str(restaurant_id),

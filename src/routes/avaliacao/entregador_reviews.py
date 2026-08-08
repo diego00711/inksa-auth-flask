@@ -16,15 +16,21 @@ entregador_reviews_bp = Blueprint('entregador_reviews_bp', __name__)
 
 @entregador_reviews_bp.route('/delivery/<uuid:delivery_id>/reviews', methods=['POST'])
 def create_delivery_review(delivery_id):
-    """Cliente avalia o entregador após entrega concluída."""
+    """Cliente OU parceiro avalia o entregador após a entrega.
+
+    O parceiro é quem entrega o pedido na mão do entregador, então também avalia
+    (pontualidade na retirada, cuidado com o pedido). Antes a rota era exclusiva
+    de cliente e o app do parceiro batia em 403 "Apenas clientes podem avaliar
+    entregadores". Quem avalia fica em reviewer_type/reviewer_id.
+    """
     if isinstance(delivery_id, uuid.UUID):
         delivery_id = str(delivery_id)
 
     user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
     if error:
         return error
-    if user_type != 'client':
-        return jsonify({'error': 'Apenas clientes podem avaliar entregadores.'}), 403
+    if user_type not in ('client', 'restaurant'):
+        return jsonify({'error': 'Apenas clientes e parceiros podem avaliar entregadores.'}), 403
 
     data = request.get_json(silent=True) or {}
     rating = data.get('rating')
@@ -46,39 +52,64 @@ def create_delivery_review(delivery_id):
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("""
-                SELECT o.status, cp.id AS client_profile_id
-                FROM orders o
-                JOIN client_profiles cp ON o.client_id = cp.id
-                WHERE o.id = %s AND cp.user_id = %s AND o.delivery_id = %s
-            """, (order_id, user_id, delivery_id))
+            if user_type == 'client':
+                # Cliente: o pedido precisa ser dele e ter sido levado por este entregador.
+                cur.execute("""
+                    SELECT o.status, cp.id AS reviewer_profile_id
+                    FROM orders o
+                    JOIN client_profiles cp ON o.client_id = cp.id
+                    WHERE o.id = %s AND cp.user_id = %s AND o.delivery_id = %s
+                """, (order_id, user_id, delivery_id))
+            else:
+                # Parceiro: o pedido precisa ser da loja dele e ter sido levado
+                # por este entregador. O parceiro avalia a partir da RETIRADA,
+                # então não exigimos 'delivered' aqui (ver checagem de status).
+                cur.execute("""
+                    SELECT o.status, rp.id AS reviewer_profile_id
+                    FROM orders o
+                    JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
+                    WHERE o.id = %s AND rp.user_id = %s AND o.delivery_id = %s
+                """, (order_id, user_id, delivery_id))
             row = cur.fetchone()
             if not row:
                 return jsonify({'error': 'Pedido inválido ou não associado a este entregador.'}), 400
-            if row['status'] != 'delivered':
-                return jsonify({'error': 'O pedido ainda não foi entregue.'}), 400
+
+            reviewer_profile_id = row['reviewer_profile_id']
+
+            # O cliente só avalia depois de receber. O parceiro já pode avaliar
+            # assim que o entregador retira (é o momento em que ele o encontra).
+            if user_type == 'client':
+                if row['status'] != 'delivered':
+                    return jsonify({'error': 'O pedido ainda não foi entregue.'}), 400
+            else:
+                if row['status'] not in ('delivering', 'Saiu para Entrega', 'Entregando', 'delivered', 'delivery_failed'):
+                    return jsonify({'error': 'O pedido ainda não foi retirado pelo entregador.'}), 400
 
             cur.execute(
-                "SELECT 1 FROM delivery_reviews WHERE order_id = %s AND client_id = %s",
-                (order_id, row['client_profile_id'])
+                "SELECT 1 FROM delivery_reviews WHERE order_id = %s AND reviewer_type = %s AND reviewer_id = %s",
+                (order_id, user_type, reviewer_profile_id)
             )
             if cur.fetchone():
                 return jsonify({'error': 'Você já avaliou este entregador para este pedido.'}), 400
 
             cur.execute("""
-                INSERT INTO delivery_reviews (order_id, delivery_id, client_id, rating, comment)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (order_id, delivery_id, row['client_profile_id'], rating, comment))
+                INSERT INTO delivery_reviews
+                    (order_id, delivery_id, client_id, reviewer_type, reviewer_id, rating, comment)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (order_id, delivery_id,
+                  reviewer_profile_id if user_type == 'client' else None,
+                  user_type, reviewer_profile_id, rating, comment))
             conn.commit()
 
             if _award_points_for_action:
                 try:
-                    _award_points_for_action(
-                        user_id=str(row['client_profile_id']),
-                        action_key="review_given_client",
-                        order_id=str(order_id),
-                        description="Avaliação enviada",
-                    )
+                    if user_type == 'client':
+                        _award_points_for_action(
+                            user_id=str(reviewer_profile_id),
+                            action_key="review_given_client",
+                            order_id=str(order_id),
+                            description="Avaliação enviada",
+                        )
                     if rating == 5:
                         _award_points_for_action(
                             user_id=str(delivery_id),
