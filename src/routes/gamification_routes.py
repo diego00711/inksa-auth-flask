@@ -1415,7 +1415,8 @@ def list_rewards():
 
             cur.execute(f"""
                 SELECT id, name, description, points_required, reward_type, benefit_value,
-                       target_audience, stock, valid_until, icon, is_active, created_at, updated_at
+                       target_audience, stock, valid_until, icon, image_url, is_active,
+                       created_at, updated_at
                 FROM public.rewards {where_sql} ORDER BY created_at DESC
             """, params)
 
@@ -1465,8 +1466,8 @@ def create_reward():
             cur.execute("""
                 INSERT INTO public.rewards
                     (name, description, points_required, reward_type, benefit_value,
-                     target_audience, stock, valid_until, icon, is_active)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     target_audience, stock, valid_until, icon, image_url, is_active)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id, created_at
             """, (
                 name,
@@ -1478,6 +1479,10 @@ def create_reward():
                 body.get("stock") or None,
                 body.get("valid_until") or None,
                 body.get("icon", "🎁"),
+                # A foto da recompensa: o admin faz upload em /rewards/upload-image
+                # e manda a URL aqui. Sem esta coluna no INSERT a imagem era
+                # descartada silenciosamente e a recompensa saía só com o emoji.
+                body.get("image_url") or None,
                 bool(body.get("is_active", True)),
             ))
             row = cur.fetchone()
@@ -1510,6 +1515,9 @@ def update_reward(reward_id):
             for col in ("name", "description", "reward_type", "icon"):
                 if col in body:
                     fields.append(f"{col} = %s"); params.append(body[col])
+            # image_url fora do laço: string vazia vira NULL (remover a foto).
+            if "image_url" in body:
+                fields.append("image_url = %s"); params.append(body["image_url"] or None)
             if "points_required" in body:
                 fields.append("points_required = %s"); params.append(int(body["points_required"]))
             if "benefit_value" in body:
@@ -1678,6 +1686,17 @@ def redeem_reward(reward_id):
                 return _err("Pontos insuficientes (race condition)", 400)
             new_balance = int(row["total_points"])
 
+            # Recalcula nível/progresso após o débito. Sem isto, o saldo caía mas
+            # current_level e points_to_next_level continuavam com o valor de
+            # antes do resgate — a tela mostrava a barra de progresso parada,
+            # dando a impressão de que nada tinha sido descontado.
+            lvl, to_next = _compute_level(cur, new_balance)
+            cur.execute("""
+                UPDATE public.user_points
+                   SET current_level = %s, points_to_next_level = %s
+                 WHERE user_id = %s
+            """, (lvl, to_next, user_id))
+
             # 5. Registra no histórico de pontos
             cur.execute("""
                 INSERT INTO public.points_history
@@ -1702,6 +1721,65 @@ def redeem_reward(reward_id):
             })
     except Exception as e:
         current_app.logger.exception("gamification.redeem_reward failed")
+        return _err("db_error", 500, detail=str(e))
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@gamification_bp.get("/rewards/my-redemptions")
+def my_redemptions():
+    """GET /api/gamification/rewards/my-redemptions — resgates do usuário logado.
+
+    Alimenta a seção "Meus resgates" na tela do Clube dos 3 apps: o que foi
+    resgatado, quantos pontos custou e em que pé está (pendente/entregue/
+    recusado). Sem isso o usuário resgatava e não tinha onde acompanhar.
+    O user_id vem SEMPRE do token — nunca da URL/body.
+    """
+    auth_uid, user_type, auth_err = get_user_id_from_token(request.headers.get("Authorization"))
+    if auth_err:
+        return auth_err
+    if user_type not in _PROFILE_TABLE_BY_TYPE:
+        return _err("Tipo de usuário sem resgates.", 403)
+
+    limit = min(max(int(request.args.get("limit", 20)), 1), 100)
+    conn = _db()
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if not _table_exists(cur, "reward_redemptions"):
+                return _ok({"items": [], "total": 0})
+
+            user_id = _own_profile_id(cur, auth_uid, user_type)
+            if not user_id:
+                return _err("Perfil não encontrado.", 404)
+
+            # LEFT JOIN: recompensa excluída (ON DELETE SET NULL) não pode sumir
+            # com o histórico do resgate — cai no nome guardado/"Recompensa".
+            cur.execute("""
+                SELECT rr.id, rr.points_used, rr.status, rr.created_at, rr.delivered_at,
+                       COALESCE(r.name, 'Recompensa') AS reward_name,
+                       r.description AS reward_description,
+                       r.icon, r.image_url
+                  FROM public.reward_redemptions rr
+                  LEFT JOIN public.rewards r ON r.id = rr.reward_id
+                 WHERE rr.user_id = %s
+                 ORDER BY rr.created_at DESC
+                 LIMIT %s
+            """, (user_id, limit))
+
+            items = []
+            for r in cur.fetchall():
+                d = dict(r)
+                d["id"] = str(d["id"])
+                d["points_used"] = int(d["points_used"] or 0)
+                for ts in ("created_at", "delivered_at"):
+                    if d.get(ts) and hasattr(d[ts], "isoformat"):
+                        d[ts] = d[ts].isoformat()
+                items.append(d)
+
+            return _ok({"items": items, "total": len(items)})
+    except Exception as e:
+        current_app.logger.exception("gamification.my_redemptions failed")
         return _err("db_error", 500, detail=str(e))
     finally:
         try: conn.close()
