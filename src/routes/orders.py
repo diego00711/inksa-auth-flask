@@ -656,15 +656,31 @@ def complete_order(order_id):
             # rodar depois, não duplica.
             cash_breakdown = None
             try:
-                if order['payment_method'] == 'cash' and completed_order and completed_order['delivery_id']:
-                    from ..utils.cash_settlement import settle_cash_order
-                    cash_breakdown, _was_new = settle_cash_order(
-                        cur, order_id,
-                        completed_order['delivery_id'], completed_order['restaurant_id'],
-                        order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'),
-                        # Cupom da própria loja sai do repasse dela.
-                        desconto_parceiro=order.get('desconto_parceiro') or 0)
-                    logger.info(f"💵 Pedido dinheiro {order_id} liquidado no fechamento (novo={_was_new})")
+                if order['payment_method'] == 'cash' and completed_order:
+                    _desc = order.get('desconto_parceiro') or 0
+                    if completed_order['delivery_id']:
+                        from ..utils.cash_settlement import settle_cash_order
+                        cash_breakdown, _was_new = settle_cash_order(
+                            cur, order_id,
+                            completed_order['delivery_id'], completed_order['restaurant_id'],
+                            order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'),
+                            # Cupom da própria loja sai do repasse dela.
+                            desconto_parceiro=_desc)
+                        logger.info(f"💵 Pedido dinheiro {order_id} liquidado no fechamento (novo={_was_new})")
+                    else:
+                        # ENTREGA PRÓPRIA: sem entregador Inksa, o dinheiro fica
+                        # todo com a loja e ela é que passa a dever a comissão.
+                        # Antes este ramo não existia: o pedido ficava sem
+                        # comissão e sem repasse, some do financeiro dos dois
+                        # lados.
+                        from ..utils.cash_settlement import settle_cash_own_delivery
+                        cash_breakdown, _was_new = settle_cash_own_delivery(
+                            cur, order_id, completed_order['restaurant_id'],
+                            order['total_amount'], order['delivery_fee'],
+                            order.get('comissao_plataforma'), desconto_parceiro=_desc)
+                        logger.info(
+                            f"💵 Pedido dinheiro {order_id} (entrega própria) — comissão "
+                            f"R${cash_breakdown['commission']} vira dívida da loja (novo={_was_new})")
             except Exception as _cash_e:
                 logger.error(f"Falha ao liquidar pedido em dinheiro {order_id}: {_cash_e}", exc_info=True)
 

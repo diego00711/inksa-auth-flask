@@ -622,6 +622,46 @@ def payment_config():
 
 
 # ─── PAGAMENTO TRANSPARENTE COM CARTÃO (in-app, sem redirecionar) ────────────
+def _entrega_propria(restaurant_id) -> bool:
+    """True quando a loja entrega com a própria moto (delivery_type='own').
+
+    Muda quem fica com o frete: na entrega própria não existe entregador Inksa,
+    então o frete inteiro é da LOJA. Antes nenhum cálculo financeiro olhava esse
+    campo — o frete virava "repasse de entregador" de um entregador inexistente
+    e o dinheiro ficava parado na plataforma.
+    """
+    if not restaurant_id:
+        return False
+    try:
+        r = (supabase_client.table('restaurant_profiles')
+             .select('delivery_type').eq('id', str(restaurant_id)).single().execute())
+        return (r.data or {}).get('delivery_type') == 'own'
+    except Exception as e:
+        # Falhou a consulta: mantém o comportamento antigo (plataforma) em vez
+        # de arriscar dar o frete pro lado errado.
+        logging.warning(f"Não deu pra ler delivery_type de {restaurant_id}: {e}")
+        return False
+
+
+def _split_online(valor_itens, delivery_fee, distancia_km, comissao, desconto_parceiro,
+                  entrega_propria):
+    """(repasse_restaurante, repasse_entregador, margem_frete) do pedido online."""
+    valor_itens = float(valor_itens or 0)
+    delivery_fee = float(delivery_fee or 0)
+    comissao = float(comissao or 0)
+    desconto_parceiro = float(desconto_parceiro or 0)
+
+    if entrega_propria:
+        # O frete é da loja e entra no repasse dela. Nenhum entregador Inksa
+        # participou → sem repasse de frete e sem margem pra plataforma.
+        return (round(valor_itens - comissao - desconto_parceiro + delivery_fee, 2), 0.0, 0.0)
+
+    entregador = float(calculate_courier_payout(distancia_km, delivery_fee=delivery_fee))
+    return (round(valor_itens - comissao - desconto_parceiro, 2),
+            round(entregador, 2),
+            round(delivery_fee - entregador, 2))
+
+
 def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items,
                            restaurant_id=None):
     """Revalida precos no banco e calcula o total no servidor (nao confia no front).
@@ -804,13 +844,12 @@ def processar_pagamento_cartao():
             # Comissão e repasse vêm de platform_settings (editáveis no admin)
             comissao = float(calculate_platform_commission(subtotal_validado, d.get('restaurant_id')))
             delivery_fee_charged = float(d.get('delivery_fee', 0) or 0)
-            courier_payout = float(calculate_courier_payout(
-                d.get('delivery_distance_km'),
-                delivery_fee=delivery_fee_charged,
-            ))
-            # Margem de frete = o que a plataforma retém do frete cobrado.
-            # Pode ser negativa (subsídio) em entregas curtas — é o valor real.
-            margem_frete = round(delivery_fee_charged - courier_payout, 2)
+            # Na entrega própria o frete inteiro volta pra loja; margem de frete
+            # (o que a plataforma retém) só existe com entregador Inksa e pode
+            # ser negativa em entregas curtas — é o valor real.
+            repasse_rest, courier_payout, margem_frete = _split_online(
+                subtotal_validado, delivery_fee_charged, d.get('delivery_distance_km'),
+                comissao, desc_parc_card, _entrega_propria(d.get('restaurant_id')))
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',
@@ -818,7 +857,7 @@ def processar_pagamento_cartao():
                 # Cupom da própria loja sai do repasse DELA — a comissão da
                 # plataforma fica intacta. Cupom da Inksa não entra aqui (é
                 # absorvido pela comissão, desconto_parceiro = 0).
-                'valor_repassado_restaurante': round(subtotal_validado - comissao - desc_parc_card, 2),
+                'valor_repassado_restaurante': repasse_rest,
                 'desconto_parceiro': desc_parc_card,
                 'valor_repassado_entregador': courier_payout,
                 'margem_frete': margem_frete,
@@ -953,17 +992,17 @@ def mercadopago_webhook():
                     # Cupom da própria loja já foi gravado no pedido: sai do
                     # repasse dela, não da comissão da plataforma.
                     _desc_parc = float(pedido_do_bd.get('desconto_parceiro') or 0)
-                    valor_para_restaurante = valor_total_itens - comissao_plataforma - _desc_parc
 
                     delivery_fee_charged = float(pedido_do_bd.get('delivery_fee', 0.0) or 0.0)
-                    valor_para_entregador = float(calculate_courier_payout(
-                        pedido_do_bd.get('delivery_distance_km'),
-                        delivery_fee=delivery_fee_charged,
-                    ))
                     # Margem de frete = frete cobrado − repasse ao entregador.
                     # Pode ser negativa (subsídio). Persistida para congelar o
-                    # valor histórico da época do pedido.
-                    margem_frete = round(delivery_fee_charged - valor_para_entregador, 2)
+                    # valor histórico da época do pedido. Na entrega própria o
+                    # frete é da loja: vai pro repasse dela, margem zero.
+                    valor_para_restaurante, valor_para_entregador, margem_frete = _split_online(
+                        valor_total_itens, delivery_fee_charged,
+                        pedido_do_bd.get('delivery_distance_km'),
+                        comissao_plataforma, _desc_parc,
+                        _entrega_propria(pedido_do_bd.get('restaurant_id')))
 
                     # ✅ DADOS QUE SERÃO ATUALIZADOS
                     update_data = {
@@ -1124,16 +1163,19 @@ def asaas_webhook():
             valor_itens = float(pedido.get('total_amount_items') or 0)
             comissao = float(calculate_platform_commission(valor_itens, pedido.get('restaurant_id')))
             fee = float(pedido.get('delivery_fee') or 0)
-            courier = float(calculate_courier_payout(pedido.get('delivery_distance_km'), delivery_fee=fee))
             # Cupom da própria loja sai do repasse dela (gravado no pedido).
             _desc_parc = float(pedido.get('desconto_parceiro') or 0)
+            # Entrega própria: o frete é da loja, não de entregador nenhum.
+            repasse_rest, courier, margem = _split_online(
+                valor_itens, fee, pedido.get('delivery_distance_km'), comissao, _desc_parc,
+                _entrega_propria(pedido.get('restaurant_id')))
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',
                 'comissao_plataforma': round(comissao, 2),
-                'valor_repassado_restaurante': round(valor_itens - comissao - _desc_parc, 2),
-                'valor_repassado_entregador': round(courier, 2),
-                'margem_frete': round(fee - courier, 2),
+                'valor_repassado_restaurante': repasse_rest,
+                'valor_repassado_entregador': courier,
+                'margem_frete': margem,
                 'id_transacao_mp': str(payment_id),
                 'payment_provider': 'asaas',
             }).eq('id', pedido_id).execute()

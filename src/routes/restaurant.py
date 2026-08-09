@@ -451,10 +451,22 @@ def get_my_payouts():
             """, (restaurant_id,))
             month_total = float(cur.fetchone()['month_total'] or 0)
 
+            # Dívida de comissão: só existe em loja de ENTREGA PRÓPRIA que
+            # aceita dinheiro. Nesses pedidos o motoboy dela recolhe tudo, então
+            # a comissão da Inksa vira dívida — abatida do próximo repasse
+            # online. Sem isso o parceiro veria "A Receber" cheio e levaria um
+            # susto quando o PIX viesse menor.
+            cur.execute(
+                "SELECT COALESCE(commission_debt, 0) AS divida FROM restaurant_profiles WHERE id = %s",
+                (restaurant_id,))
+            commission_debt = float((cur.fetchone() or {}).get('divida') or 0)
+
             return jsonify({
                 "status": "success",
                 "balance": round(a_receber, 2),
                 "a_receber": round(a_receber, 2),
+                "commission_debt": round(commission_debt, 2),
+                "a_receber_liquido": round(max(0.0, a_receber - commission_debt), 2),
                 "pendente_pedidos": round(pending_orders_total, 2),
                 "pendente_pedidos_count": pending_orders_count,
                 "next_payout_date": next_payout_date,

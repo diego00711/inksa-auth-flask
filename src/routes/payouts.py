@@ -777,7 +777,26 @@ def list_cash_debts():
                 ORDER BY cash_debt DESC
                 """
             )
-            rows = [dict(r) for r in cur.fetchall()]
+            rows = [dict(r, partner_type='delivery') for r in cur.fetchall()]
+
+            # LOJAS DE ENTREGA PRÓPRIA também podem dever: nos pedidos em
+            # dinheiro delas quem recolhe é o motoboy da casa, a loja fica com
+            # 100% e a comissão da Inksa vira dívida. Se ela nunca tiver repasse
+            # online, o abatimento automático não acha nada — o admin precisa
+            # ver e cobrar aqui.
+            cur.execute(
+                """
+                SELECT id, restaurant_name AS name, pix_key, pix_key_type,
+                       COALESCE(commission_debt, 0)     AS cash_debt,
+                       COALESCE(total_cash_received, 0) AS total_cash_received
+                FROM restaurant_profiles
+                WHERE COALESCE(commission_debt, 0) > 0
+                ORDER BY commission_debt DESC
+                """
+            )
+            rows += [dict(r, partner_type='restaurant') for r in cur.fetchall()]
+
+        rows.sort(key=lambda r: float(r.get('cash_debt') or 0), reverse=True)
         return jsonify({"status": "success", "items": rows, "total": len(rows)}), 200
 
     except Exception:
@@ -794,8 +813,13 @@ def list_cash_debts():
 
 @payouts_bp.route("/cash-debts/<uuid:delivery_id>/settle", methods=["POST", "OPTIONS"])
 def settle_cash_debt(delivery_id):
-    """Registra que o entregador quitou (total ou parcial) a dívida em dinheiro:
-    reduz delivery_profiles.cash_debt (nunca abaixo de zero) e grava o histórico."""
+    """Registra que o parceiro quitou (total ou parcial) a dívida em dinheiro:
+    reduz a dívida (nunca abaixo de zero) e grava o histórico.
+
+    Serve pros dois tipos — o body pode trazer partner_type='restaurant' quando
+    for uma LOJA de entrega própria quitando a comissão dos pedidos em dinheiro.
+    Sem isso, quem só faz dinheiro nunca teria como zerar a dívida (o abatimento
+    automático precisa de um repasse online pra descontar)."""
     conn = None
     try:
         user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
@@ -819,29 +843,36 @@ def settle_cash_debt(delivery_id):
 
         admin_ident = _get_admin_identifier(user_id, conn)
 
+        eh_loja = (body.get("partner_type") == "restaurant")
+        tabela, coluna, id_col, rotulo = (
+            ("restaurant_profiles", "commission_debt", "restaurant_id", "Esta loja")
+            if eh_loja else
+            ("delivery_profiles", "cash_debt", "delivery_id", "Este entregador")
+        )
+
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute(
-                "SELECT COALESCE(cash_debt, 0) AS cash_debt FROM delivery_profiles WHERE id = %s FOR UPDATE",
+                f"SELECT COALESCE({coluna}, 0) AS divida FROM {tabela} WHERE id = %s FOR UPDATE",
                 (str(delivery_id),),
             )
             row = cur.fetchone()
             if not row:
-                return jsonify({"error": "Entregador não encontrado"}), 404
-            debt_before = float(row["cash_debt"] or 0)
+                return jsonify({"error": "Parceiro não encontrado"}), 404
+            debt_before = float(row["divida"] or 0)
             if debt_before <= 0:
-                return jsonify({"error": "Este entregador não tem dívida em aberto"}), 400
+                return jsonify({"error": f"{rotulo} não tem dívida em aberto"}), 400
 
             applied = min(amount, debt_before)            # nunca deixa a dívida negativa
             debt_after = round(debt_before - applied, 2)
 
             cur.execute(
-                "UPDATE delivery_profiles SET cash_debt = %s, updated_at = NOW() WHERE id = %s",
+                f"UPDATE {tabela} SET {coluna} = %s, updated_at = NOW() WHERE id = %s",
                 (debt_after, str(delivery_id)),
             )
             cur.execute(
-                """
+                f"""
                 INSERT INTO cash_debt_settlements
-                    (delivery_id, amount, debt_before, debt_after, note, admin)
+                    ({id_col}, amount, debt_before, debt_after, note, admin)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (str(delivery_id), applied, debt_before, debt_after, note, admin_ident),
@@ -851,7 +882,8 @@ def settle_cash_debt(delivery_id):
         log_admin_action(
             admin_ident,
             "SettleCashDebt",
-            f"delivery={delivery_id} pago={applied:.2f} divida {debt_before:.2f}->{debt_after:.2f}",
+            f"{'restaurant' if eh_loja else 'delivery'}={delivery_id} pago={applied:.2f} "
+            f"divida {debt_before:.2f}->{debt_after:.2f}",
             request,
         )
         return jsonify({

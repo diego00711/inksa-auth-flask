@@ -118,3 +118,85 @@ def settle_cash_order(cur, order_id, delivery_id, restaurant_id,
     )
 
     return b, True
+
+
+def settle_cash_own_delivery(cur, order_id, restaurant_id, total_amount, delivery_fee,
+                             existing_commission=None, desconto_parceiro=0.0):
+    """DINHEIRO + ENTREGA PRÓPRIA: o fluxo invertido.
+
+    Aqui quem recolhe o dinheiro é o motoboy da própria loja — não existe
+    entregador Inksa. A loja fica com TUDO (itens + o frete dela), e é ela que
+    passa a dever a comissão à plataforma.
+
+    Antes este caso não gravava nada: `settle_cash_order` era chamado só quando
+    havia delivery_id, então o pedido ficava sem comissão e sem repasse. A Inksa
+    perdia a comissão e o pedido nem aparecia no financeiro do parceiro (a query
+    do saldo exige valor_repassado_restaurante NOT NULL).
+
+    Idempotente pelo cash_payment_records (delivery_id fica NULL).
+    Retorna (breakdown, was_new).
+    """
+    total_amount = float(total_amount or 0)
+    delivery_fee = float(delivery_fee or 0)
+    desconto_parceiro = float(desconto_parceiro or 0)
+
+    commission = float(existing_commission or 0)
+    if not commission:
+        # Comissão sobre os ITENS — o frete da entrega própria é da loja, a
+        # Inksa não entra nele.
+        commission = float(calculate_platform_commission(total_amount - delivery_fee, restaurant_id))
+
+    # Cupom da própria loja: ela já deu o desconto no caixa, então a dívida de
+    # comissão não muda — mas o valor recolhido em espécie, sim.
+    b = {
+        "total_amount": round(total_amount, 2),
+        "delivery_fee": round(delivery_fee, 2),
+        "commission": round(commission, 2),
+        # A Inksa não deve nada à loja: o dinheiro já está com ela.
+        "restaurant_share": 0.0,
+        "courier_freight": 0.0,
+        "freight_admin": 0.0,
+        # ...é a loja que deve a comissão.
+        "commission_debt": round(commission, 2),
+    }
+
+    cur.execute("SELECT id FROM cash_payment_records WHERE order_id = %s", (str(order_id),))
+    if cur.fetchone():
+        return b, False
+
+    cur.execute(
+        """
+        INSERT INTO cash_payment_records
+            (order_id, delivery_id, restaurant_id, total_amount, delivery_fee,
+             platform_commission, restaurant_share)
+        VALUES (%s, NULL, %s, %s, %s, %s, %s)
+        """,
+        (str(order_id), str(restaurant_id), b["total_amount"], b["delivery_fee"],
+         b["commission"], b["restaurant_share"]),
+    )
+
+    cur.execute(
+        """
+        UPDATE restaurant_profiles
+           SET commission_debt = COALESCE(commission_debt, 0) + %s,
+               total_cash_received = COALESCE(total_cash_received, 0) + %s,
+               updated_at = NOW()
+         WHERE id = %s
+        """,
+        (b["commission_debt"], b["total_amount"], str(restaurant_id)),
+    )
+
+    cur.execute(
+        """
+        UPDATE orders
+           SET comissao_plataforma = %s,
+               valor_repassado_restaurante = 0,
+               valor_repassado_entregador = 0,
+               margem_frete = 0,
+               updated_at = NOW()
+         WHERE id = %s
+        """,
+        (b["commission"], str(order_id)),
+    )
+
+    return b, True

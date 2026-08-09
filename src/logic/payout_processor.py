@@ -219,25 +219,42 @@ def _calculate_amounts(orders, partner_type: str, commission_rate: Decimal):
     return float(total_gross), float(commission_fee), float(total_net), per_order
 
 
-def _apply_cash_debt_netting(conn, partner_id, net_gross: float):
-    """Abate a dívida em dinheiro do entregador do valor a repassar.
+# Onde mora a dívida em dinheiro de cada tipo de parceiro.
+#   entregador  -> recolheu o pedido em espécie e deve a parte dos outros
+#   restaurante -> entrega PRÓPRIA em dinheiro: ficou com 100% e deve a comissão
+_DEBT_SOURCE = {
+    "delivery":   ("delivery_profiles",   "cash_debt"),
+    "restaurant": ("restaurant_profiles", "commission_debt"),
+}
 
-    O entregador recolhe os pedidos pagos em dinheiro EM ESPÉCIE e fica devendo
-    à plataforma a parte dela (delivery_profiles.cash_debt = comida do
-    restaurante + comissão + margem do frete). Aqui a gente desconta essa
-    dívida do repasse dos pedidos ONLINE dele: paga por PIX só a diferença. Se a
-    dívida for MAIOR que o repasse, zera o repasse e o resto da dívida continua
-    em cash_debt pra ser abatido no próximo ciclo.
 
-    Retorna (net_a_pagar, abatido). Reduz cash_debt no banco (mesma transação —
+def _apply_cash_debt_netting(conn, partner_type, partner_id, net_gross: float):
+    """Abate a dívida em dinheiro do parceiro do valor a repassar.
+
+    ENTREGADOR: recolhe os pedidos pagos em dinheiro EM ESPÉCIE e fica devendo à
+    plataforma a parte dela (comida do restaurante + comissão + margem do frete).
+
+    RESTAURANTE COM ENTREGA PRÓPRIA: nesses pedidos em dinheiro quem recolhe é o
+    motoboy DELE — a loja fica com tudo e passa a dever só a comissão.
+
+    Nos dois casos a dívida é descontada do repasse dos pedidos ONLINE: paga por
+    PIX só a diferença. Se a dívida for MAIOR que o repasse, zera o repasse e o
+    resto continua registrado pra ser abatido no próximo ciclo.
+
+    Retorna (net_a_pagar, abatido). Reduz a dívida no banco (mesma transação —
     respeita o dry_run/commit do process_automatic_payouts)."""
+    fonte = _DEBT_SOURCE.get(partner_type)
+    if not fonte:
+        return float(net_gross), 0.0
+    tabela, coluna = fonte
+
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         cur.execute(
-            "SELECT COALESCE(cash_debt, 0) AS cash_debt FROM delivery_profiles WHERE id = %s FOR UPDATE",
+            f"SELECT COALESCE({coluna}, 0) AS divida FROM {tabela} WHERE id = %s FOR UPDATE",
             (partner_id,),
         )
         row = cur.fetchone()
-        debt = Decimal(str((row or {}).get("cash_debt") or 0))
+        debt = Decimal(str((row or {}).get("divida") or 0))
         if debt <= 0:
             return float(net_gross), 0.0
 
@@ -245,7 +262,7 @@ def _apply_cash_debt_netting(conn, partner_id, net_gross: float):
         deducted = min(net_dec, debt)
         remaining = (debt - deducted).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         cur.execute(
-            "UPDATE delivery_profiles SET cash_debt = %s, updated_at = NOW() WHERE id = %s",
+            f"UPDATE {tabela} SET {coluna} = %s, updated_at = NOW() WHERE id = %s",
             (float(remaining), partner_id),
         )
         net_after = float((net_dec - deducted).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
@@ -446,13 +463,11 @@ def process_automatic_payouts(
                 if net <= 0:
                     continue
 
-                # Entregador: abate a dívida em dinheiro (pedidos que ele
-                # recolheu em espécie) do repasse online — paga por PIX só a
-                # diferença. Restaurante não tem esse abatimento.
-                deducted = 0.0
-                net_to_pay = net
-                if ptype == "delivery":
-                    net_to_pay, deducted = _apply_cash_debt_netting(conn, pid, net)
+                # Abate a dívida em dinheiro do repasse online — paga por PIX só
+                # a diferença. Vale pro entregador (recolheu em espécie) e pro
+                # restaurante de entrega própria (ficou com 100% do pedido em
+                # dinheiro e deve a comissão).
+                net_to_pay, deducted = _apply_cash_debt_netting(conn, ptype, pid, net)
 
                 record = _insert_payout(
                     conn, ptype, pid, period_start, period_end,
