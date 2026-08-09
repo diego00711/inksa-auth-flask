@@ -352,10 +352,18 @@ def update_order_status(order_id):
 
             # delivering/delivered com entregador Inksa passam pelos endpoints de
             # CÓDIGO (retirada/entrega). Na ENTREGA PRÓPRIA (delivery_type='own')
-            # não há entregador Inksa — o restaurante fecha ele mesmo, aqui.
+            # não há entregador Inksa, então "saiu para entrega" o restaurante
+            # marca aqui mesmo.
             _is_own = (order.get('delivery_type') == 'own')
-            if new_status_internal in ('delivering', 'delivered') and not _is_own:
+            if new_status_internal == 'delivering' and not _is_own:
                 return jsonify({"error": "Use o endpoint de código para esta transição."}), 400
+            # ENTREGUE nunca passa por aqui, nem na entrega própria. Antes o
+            # restaurante fechava o pedido sozinho e não sobrava prova nenhuma:
+            # o motoboy dele dizia "entreguei" e ninguém conseguia conferir.
+            # Agora vai pelo /complete, com o código do cliente (ou com um
+            # motivo registrado, quando não dá pra pegar o código).
+            if new_status_internal == 'delivered':
+                return jsonify({"error": "Use o endpoint de código para confirmar a entrega."}), 400
 
             current_status = order['status'].strip()
 
@@ -543,21 +551,28 @@ def complete_order(order_id):
         if user_type not in ['restaurant', 'delivery']:
             return jsonify({"error": "Acesso não autorizado para completar a entrega"}), 403
 
-        data = request.get_json()
-        if not data or 'delivery_code' not in data:
+        data = request.get_json() or {}
+        # Entrega própria: se o cliente não deu o código (não estava em casa,
+        # deixou com o porteiro...), o parceiro fecha informando o MOTIVO. Fica
+        # gravado como entrega sem prova, e o card mostra isso pra ele — que é
+        # justamente quem quer saber se o motoboy dele entregou mesmo.
+        motivo_sem_codigo = str(data.get('no_code_reason') or '').strip()
+        if not data.get('delivery_code') and not motivo_sem_codigo:
             return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
 
-        code = str(data['delivery_code']).strip().upper()
+        code = str(data.get('delivery_code') or '').strip().upper()
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
-                "SELECT status, delivery_code, restaurant_id, delivery_id, "
-                "payment_method, total_amount, delivery_fee, comissao_plataforma, "
+                "SELECT o.status, o.delivery_code, o.restaurant_id, o.delivery_id, "
+                "o.payment_method, o.total_amount, o.delivery_fee, o.comissao_plataforma, "
                 # Sem esta coluna a liquidação em dinheiro devolveria 0 e o
                 # cupom da própria loja acabaria pago pela Inksa.
-                "COALESCE(desconto_parceiro, 0) AS desconto_parceiro "
-                "FROM orders WHERE id = %s",
+                "COALESCE(o.desconto_parceiro, 0) AS desconto_parceiro, "
+                "rp.delivery_type "
+                "FROM orders o JOIN restaurant_profiles rp ON rp.id = o.restaurant_id "
+                "WHERE o.id = %s",
                 (str(order_id),))
             order = cur.fetchone()
             if not order:
@@ -581,12 +596,24 @@ def complete_order(order_id):
                     "error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"
                 }), 400
 
-            if order['delivery_code'] != code:
-                return jsonify({"error": "Código de entrega inválido"}), 403
+            # "Fechar sem código" existe SÓ na entrega própria: ali quem entrega
+            # é o motoboy da própria loja e não há outro caminho pra encerrar o
+            # pedido. Com entregador Inksa o código continua obrigatório — se o
+            # cliente não aparece, o caminho certo é a ocorrência, não marcar
+            # entregue sem prova.
+            if code:
+                if order['delivery_code'] != code:
+                    return jsonify({"error": "Código de entrega inválido"}), 403
+                confirmado_por, nota_confirmacao = 'code', None
+            else:
+                if not (user_type == 'restaurant' and order.get('delivery_type') == 'own'):
+                    return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
+                confirmado_por, nota_confirmacao = 'partner_no_code', motivo_sem_codigo[:300]
 
             cur.execute(
-                "UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = %s",
-                (str(order_id),)
+                "UPDATE orders SET status = 'delivered', delivery_confirmed_by = %s, "
+                "delivery_confirm_note = %s, updated_at = NOW() WHERE id = %s",
+                (confirmado_por, nota_confirmacao, str(order_id))
             )
             # Busca client_id, delivery_id e restaurant_id antes de fechar o cursor
             cur.execute(

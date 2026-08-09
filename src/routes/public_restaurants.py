@@ -50,6 +50,73 @@ def _close(conn):
         pass
 
 
+# ─── vitrine de cupons ───────────────────────────────────────────────────────
+# O cupom do parceiro só serve pra trazer pedido se o cliente souber que ele
+# existe. Estas funções montam a "etiqueta de promoção" que aparece no card da
+# loja e a lista de cupons da página dela.
+
+# Ticket de referência usado só pra ORDENAR cupons entre si (qual vira a
+# etiqueta do card). Não entra em nenhum cálculo de cobrança.
+_TICKET_REFERENCIA = 50.0
+
+
+def _rotulo_cupom(c, delivery_fee=0):
+    tipo = c.get("discount_type")
+    valor = float(c.get("discount_value") or 0)
+    if tipo == "free_delivery":
+        return "Frete grátis"
+    if tipo == "percentage":
+        return f"{valor:.0f}% OFF"
+    return f"R$ {valor:.2f}".replace(".", ",") + " OFF"
+
+
+def _peso_cupom(c, delivery_fee=0):
+    """Quanto o cupom valeria num pedido de referência — só pra escolher qual
+    aparece no card quando a loja tem mais de um."""
+    tipo = c.get("discount_type")
+    valor = float(c.get("discount_value") or 0)
+    if tipo == "percentage":
+        return _TICKET_REFERENCIA * valor / 100.0
+    if tipo == "free_delivery":
+        return float(delivery_fee or 0) or 6.0
+    return valor
+
+
+def _buscar_cupons_ativos(cur, restaurant_ids):
+    """{restaurant_id: [cupons ativos]} para as lojas passadas.
+
+    Uma consulta só pra lista inteira — um SELECT por card faria N+1 na home,
+    que é a tela mais acessada do app.
+    """
+    if not restaurant_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT id, restaurant_id, code, discount_type, discount_value,
+               min_order_value, description
+          FROM public.coupons
+         -- ::uuid[] é obrigatório: a lista chega como texto e "uuid = text"
+         -- não existe no Postgres — sem o cast a home inteira devolvia 500.
+         WHERE restaurant_id = ANY(%s::uuid[])
+           AND is_active IS TRUE
+           AND (valid_until IS NULL OR valid_until >= NOW())
+           AND (max_uses IS NULL OR COALESCE(uses_count, 0) < max_uses)
+         ORDER BY created_at DESC
+        """,
+        (list(restaurant_ids),),
+    )
+    por_loja = {}
+    for row in cur.fetchall():
+        c = dict(row)
+        c["id"] = str(c["id"])
+        rid = str(c.pop("restaurant_id"))
+        c["discount_value"] = float(c["discount_value"] or 0)
+        c["min_order_value"] = float(c["min_order_value"] or 0)
+        c["label"] = _rotulo_cupom(c)
+        por_loja.setdefault(rid, []).append(c)
+    return por_loja
+
+
 # ─── GET /api/restaurants/ ───────────────────────────────────────────────────
 
 @public_restaurants_bp.get("/")
@@ -182,6 +249,16 @@ def list_restaurants():
             rows = [_serialize(dict(r)) for r in cur.fetchall()]
             has_more = len(rows) > limit
             rows = rows[:limit]
+
+            # Etiqueta de promoção no card: o melhor cupom ativo da loja.
+            cupons_por_loja = _buscar_cupons_ativos(cur, [str(r["id"]) for r in rows])
+            for r in rows:
+                lista = cupons_por_loja.get(str(r["id"])) or []
+                r["has_coupon"] = bool(lista)
+                r["promo_label"] = (
+                    max(lista, key=lambda c: _peso_cupom(c, r.get("delivery_fee")))["label"]
+                    if lista else None
+                )
         return jsonify({
             "status": "success",
             "data": rows,
@@ -277,11 +354,21 @@ def get_restaurant(restaurant_id):
                 (str(restaurant_id),),
             )
             row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Restaurante não encontrado"}), 404
 
-        if not row:
-            return jsonify({"error": "Restaurante não encontrado"}), 404
+            data = _serialize(dict(row))
+            # Cupons desta loja: o cliente vê o código na própria página, sem
+            # precisar ter visto a divulgação do parceiro em outro lugar.
+            cupons = _buscar_cupons_ativos(cur, [str(restaurant_id)]).get(str(restaurant_id), [])
+            data["coupons"] = cupons
+            data["has_coupon"] = bool(cupons)
+            data["promo_label"] = (
+                max(cupons, key=lambda c: _peso_cupom(c, data.get("delivery_fee")))["label"]
+                if cupons else None
+            )
 
-        return jsonify({"status": "success", "data": _serialize(dict(row))}), 200
+        return jsonify({"status": "success", "data": data}), 200
 
     except Exception as e:
         logger.exception("Erro ao buscar restaurante %s: %s", restaurant_id, e)
