@@ -241,6 +241,7 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
                NULLIF(TRIM(CONCAT_WS(' ', cp.first_name, cp.last_name)), '') AS client_name,
                rp.restaurant_name AS restaurant_name,
                o.total_amount, o.status, o.created_at,
+               o.payment_method,
                o.comissao_plataforma, o.margem_frete
           FROM {ORDERS_TABLE} o
           LEFT JOIN client_profiles cp     ON o.client_id = cp.id
@@ -254,6 +255,7 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
         "client_name": r.get("client_name") or "Cliente",
         "restaurant_name": r.get("restaurant_name") or "Restaurante",
         "total_amount": _safe_float(r.get("total_amount")),
+        "payment_method": r.get("payment_method") or "—",
         "platform_commission": _safe_float(r.get("comissao_plataforma")),
         "delivery_margin": _safe_float(r.get("margem_frete")),
         "status": r.get("status") or "desconhecido",
