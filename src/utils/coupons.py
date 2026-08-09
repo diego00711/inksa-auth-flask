@@ -45,13 +45,19 @@ def _to_float(v, default=0.0):
         return default
 
 
-def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None):
+def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=None):
     """Valida um cupom já buscado (dict da linha) e calcula o desconto.
 
     `coupon` pode vir do psycopg2 (DictCursor) ou do supabase (select '*') —
     ambos têm as mesmas chaves. Retorna dict:
-      { valid: bool, discount_amount: float, discount_type: str|None, message: str }
+      { valid, discount_amount, discount_type, message,
+        paid_by, restaurant_discount, platform_discount }
     discount_amount é 0.0 quando inválido.
+
+    `restaurant_id` = loja do pedido. Cupom com restaurant_id preenchido é
+    EXCLUSIVO daquela loja; cupom com restaurant_id NULL é da plataforma e vale
+    em qualquer uma. Sem essa checagem, o cupom que o parceiro A criou daria
+    desconto num pedido do parceiro B — e sairia do repasse do B.
     """
     now = now or datetime.now(timezone.utc)
     subtotal = _to_float(subtotal)
@@ -66,6 +72,11 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None):
     if not coupon.get('is_active'):
         return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
                 "message": "Este cupom não está ativo"}
+
+    dono = coupon.get('restaurant_id')
+    if dono and restaurant_id and str(dono) != str(restaurant_id):
+        return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                "message": "Este cupom vale só em outra loja"}
 
     vu = _parse_dt(coupon.get('valid_until'))
     if vu and vu < now:
@@ -94,8 +105,23 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None):
         return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
                 "message": "Tipo de cupom inválido"}
 
-    return {"valid": True, "discount_amount": max(0.0, discount),
-            "discount_type": disc_type, "message": "Cupom válido!"}
+    discount = max(0.0, discount)
+
+    # QUEM PAGA. 'restaurant' = sai do repasse do parceiro (cupom criado por
+    # ele); 'platform' = sai da comissão da Inksa (campanha da plataforma).
+    # Sem essa separação o desconto saía sempre da comissão — e um cupom maior
+    # que a comissão fazia a plataforma fechar NEGATIVO naquele pedido.
+    paid_by = (coupon.get('paid_by') or 'platform').lower()
+    if paid_by == 'restaurant':
+        restaurant_discount, platform_discount = discount, 0.0
+    else:
+        restaurant_discount, platform_discount = 0.0, discount
+
+    return {"valid": True, "discount_amount": discount,
+            "discount_type": disc_type, "message": "Cupom válido!",
+            "paid_by": paid_by,
+            "restaurant_discount": round(restaurant_discount, 2),
+            "platform_discount": round(platform_discount, 2)}
 
 
 def consume_coupon(coupon_id):

@@ -553,7 +553,10 @@ def complete_order(order_id):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
                 "SELECT status, delivery_code, restaurant_id, delivery_id, "
-                "payment_method, total_amount, delivery_fee, comissao_plataforma "
+                "payment_method, total_amount, delivery_fee, comissao_plataforma, "
+                # Sem esta coluna a liquidação em dinheiro devolveria 0 e o
+                # cupom da própria loja acabaria pago pela Inksa.
+                "COALESCE(desconto_parceiro, 0) AS desconto_parceiro "
                 "FROM orders WHERE id = %s",
                 (str(order_id),))
             order = cur.fetchone()
@@ -631,7 +634,9 @@ def complete_order(order_id):
                     cash_breakdown, _was_new = settle_cash_order(
                         cur, order_id,
                         completed_order['delivery_id'], completed_order['restaurant_id'],
-                        order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'))
+                        order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'),
+                        # Cupom da própria loja sai do repasse dela.
+                        desconto_parceiro=order.get('desconto_parceiro') or 0)
                     logger.info(f"💵 Pedido dinheiro {order_id} liquidado no fechamento (novo={_was_new})")
             except Exception as _cash_e:
                 logger.error(f"Falha ao liquidar pedido em dinheiro {order_id}: {_cash_e}", exc_info=True)

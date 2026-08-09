@@ -45,6 +45,8 @@ def validate_coupon():
             delivery_fee = float(data.get('delivery_fee', 0))
         except (ValueError, TypeError):
             delivery_fee = 0.0
+        # Loja do carrinho — usada pra filtrar cupom de outra loja.
+        restaurant_id = data.get('restaurant_id') or None
 
         if not code:
             return jsonify({"valid": False, "message": "Codigo do cupom e obrigatorio"}), 400
@@ -58,16 +60,25 @@ def validate_coupon():
                 logger.warning("Tabela coupons nao existe. Execute create_coupons.sql")
                 return jsonify({"valid": False, "message": "Sistema de cupons nao configurado. Execute create_coupons.sql"}), 200
 
+            # A loja do carrinho decide quais cupons servem: os DELA e os da
+            # plataforma (restaurant_id NULL). O cupom de outra loja nem é
+            # buscado — senão o cliente veria "cupom válido" e o desconto seria
+            # recusado no fechamento.
             cur.execute("""
                 SELECT id, code, discount_type, discount_value, min_order_value,
-                       max_uses, uses_count, valid_until, is_active
+                       max_uses, uses_count, valid_until, is_active,
+                       restaurant_id, paid_by
                 FROM public.coupons
-                WHERE code = %s
-            """, (code,))
+                WHERE UPPER(code) = %s
+                  AND (restaurant_id IS NULL OR restaurant_id = %s)
+                ORDER BY restaurant_id NULLS LAST
+                LIMIT 1
+            """, (code, restaurant_id))
             coupon = cur.fetchone()
 
         # Validação/cálculo centralizado (mesma lógica do fechamento do pedido)
-        result = evaluate_coupon(dict(coupon) if coupon else None, order_total, delivery_fee)
+        result = evaluate_coupon(dict(coupon) if coupon else None, order_total, delivery_fee,
+                                 restaurant_id=restaurant_id)
         if not result["valid"]:
             return jsonify({"valid": False, "message": result["message"]}), 200
 
@@ -112,10 +123,13 @@ def list_coupons():
                 return jsonify({"error": "Tabela coupons nao existe. Execute create_coupons.sql"}), 503
 
             cur.execute("""
-                SELECT id, code, discount_type, discount_value, min_order_value,
-                       max_uses, uses_count, valid_until, is_active, created_at
-                FROM public.coupons
-                ORDER BY created_at DESC
+                SELECT c.id, c.code, c.discount_type, c.discount_value, c.min_order_value,
+                       c.max_uses, c.uses_count, c.valid_until, c.is_active, c.created_at,
+                       c.restaurant_id, c.paid_by, c.description,
+                       rp.restaurant_name
+                FROM public.coupons c
+                LEFT JOIN public.restaurant_profiles rp ON rp.id = c.restaurant_id
+                ORDER BY c.created_at DESC
             """)
             rows = cur.fetchall()
 
@@ -129,6 +143,10 @@ def list_coupons():
                 r['created_at'] = r['created_at'].isoformat()
             r['discount_value'] = float(r['discount_value'])
             r['min_order_value'] = float(r['min_order_value'] or 0)
+            if r.get('restaurant_id'):
+                r['restaurant_id'] = str(r['restaurant_id'])
+            # Rótulo pronto pro admin não ter que deduzir de quem é o cupom.
+            r['owner_label'] = r.get('restaurant_name') or 'Inksa (plataforma)'
             result.append(r)
 
         return jsonify({"coupons": result, "total": len(result)}), 200
@@ -213,3 +231,311 @@ def create_coupon():
     finally:
         if conn:
             conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CUPONS DO PARCEIRO
+# O parceiro cria cupom SÓ da própria loja, e o desconto sai do repasse DELE
+# (paid_by='restaurant'). As duas coisas são forçadas no servidor: nada que vem
+# no body decide dono nem quem paga — senão daria pra criar cupom em nome de
+# outra loja, ou jogar a conta na comissão da Inksa.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_COUPON_COLS = """id, code, discount_type, discount_value, min_order_value,
+                  max_uses, uses_count, valid_until, is_active, created_at,
+                  restaurant_id, paid_by, description"""
+
+
+def _own_restaurant_id(cur, user_id):
+    """id do restaurant_profiles do parceiro logado (None se não achar)."""
+    cur.execute("SELECT id FROM public.restaurant_profiles WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _partner_ctx():
+    """(user_id, erro_response). Só parceiro passa."""
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return None, error
+    if user_type != 'restaurant':
+        return None, (jsonify({"error": "Acesso restrito a parceiros"}), 403)
+    return user_id, None
+
+
+def _max_discount_pct():
+    """Teto de desconto que o parceiro pode criar (configurável no admin).
+    Evita que ele se afunde sem querer com um '90% OFF' digitado errado."""
+    try:
+        from ..utils.platform_settings import get_settings
+        return float(get_settings().get("coupon_max_discount_pct") or 30)
+    except Exception:
+        return 30.0
+
+
+def _serialize(row):
+    r = dict(row)
+    r['id'] = str(r['id'])
+    if r.get('restaurant_id'):
+        r['restaurant_id'] = str(r['restaurant_id'])
+    for k in ('valid_until', 'created_at'):
+        if r.get(k) and hasattr(r[k], 'isoformat'):
+            r[k] = r[k].isoformat()
+    if r.get('discount_value') is not None:
+        r['discount_value'] = float(r['discount_value'])
+    r['min_order_value'] = float(r.get('min_order_value') or 0)
+    return r
+
+
+@coupons_bp.route('/mine', methods=['GET'])
+def list_my_coupons():
+    """GET /api/coupons/mine — cupons da loja do parceiro logado."""
+    user_id, err = _partner_ctx()
+    if err:
+        return err
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if not _table_exists(cur):
+                return jsonify({"coupons": [], "total": 0}), 200
+            rid = _own_restaurant_id(cur, user_id)
+            if not rid:
+                return jsonify({"error": "Perfil de parceiro nao encontrado"}), 404
+            cur.execute(
+                f"SELECT {_COUPON_COLS} FROM public.coupons "
+                "WHERE restaurant_id = %s ORDER BY created_at DESC", (rid,))
+            rows = [_serialize(r) for r in cur.fetchall()]
+        return jsonify({"coupons": rows, "total": len(rows),
+                        "max_discount_pct": _max_discount_pct()}), 200
+    except Exception as e:
+        logger.error(f"Erro em list_my_coupons: {e}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
+
+@coupons_bp.route('/mine', methods=['POST'])
+def create_my_coupon():
+    """POST /api/coupons/mine — parceiro cria cupom da própria loja."""
+    user_id, err = _partner_ctx()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('code', '')).strip().upper()
+    dtype = str(data.get('discount_type', '')).strip().lower()
+    try:
+        dvalue = float(data['discount_value'])
+    except (KeyError, ValueError, TypeError):
+        return jsonify({"error": "Valor do desconto invalido"}), 400
+
+    if not code or len(code) < 3:
+        return jsonify({"error": "O codigo precisa ter ao menos 3 letras"}), 400
+    if dtype not in ('percentage', 'fixed', 'free_delivery'):
+        return jsonify({"error": "Tipo de desconto invalido"}), 400
+    if dtype != 'free_delivery' and dvalue <= 0:
+        return jsonify({"error": "O desconto precisa ser maior que zero"}), 400
+
+    teto = _max_discount_pct()
+    if dtype == 'percentage' and dvalue > teto:
+        return jsonify({"error": f"O desconto maximo permitido e {teto:.0f}%"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            rid = _own_restaurant_id(cur, user_id)
+            if not rid:
+                return jsonify({"error": "Perfil de parceiro nao encontrado"}), 404
+            try:
+                cur.execute(
+                    f"""INSERT INTO public.coupons
+                            (code, discount_type, discount_value, min_order_value, max_uses,
+                             valid_until, description, restaurant_id, paid_by)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'restaurant')
+                        RETURNING {_COUPON_COLS}""",
+                    (code, dtype, dvalue, float(data.get('min_order_value') or 0),
+                     data.get('max_uses') or None, data.get('valid_until') or None,
+                     (data.get('description') or None), rid))
+                novo = _serialize(cur.fetchone())
+                conn.commit()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                return jsonify({"error": f"Voce ja tem um cupom com o codigo {code}"}), 409
+        return jsonify({"success": True, "coupon": novo}), 201
+    except Exception as e:
+        logger.error(f"Erro em create_my_coupon: {e}", exc_info=True)
+        conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
+
+@coupons_bp.route('/mine/<coupon_id>', methods=['PUT'])
+def update_my_coupon(coupon_id):
+    """PUT /api/coupons/mine/<id> — edita cupom da própria loja.
+    O WHERE inclui restaurant_id: o parceiro não alcança cupom de outra loja
+    nem da plataforma, mesmo mandando o id certo."""
+    user_id, err = _partner_ctx()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    campos, valores = [], []
+    if 'is_active' in data:
+        campos.append("is_active = %s"); valores.append(bool(data['is_active']))
+    if 'min_order_value' in data:
+        campos.append("min_order_value = %s"); valores.append(float(data.get('min_order_value') or 0))
+    if 'max_uses' in data:
+        campos.append("max_uses = %s"); valores.append(data.get('max_uses') or None)
+    if 'valid_until' in data:
+        campos.append("valid_until = %s"); valores.append(data.get('valid_until') or None)
+    if 'description' in data:
+        campos.append("description = %s"); valores.append(data.get('description') or None)
+    if 'discount_value' in data:
+        try:
+            dv = float(data['discount_value'])
+        except (ValueError, TypeError):
+            return jsonify({"error": "Valor do desconto invalido"}), 400
+        teto = _max_discount_pct()
+        if str(data.get('discount_type', '')).lower() == 'percentage' and dv > teto:
+            return jsonify({"error": f"O desconto maximo permitido e {teto:.0f}%"}), 400
+        campos.append("discount_value = %s"); valores.append(dv)
+    if not campos:
+        return jsonify({"error": "Nada para atualizar"}), 400
+    campos.append("updated_at = NOW()")
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            rid = _own_restaurant_id(cur, user_id)
+            if not rid:
+                return jsonify({"error": "Perfil de parceiro nao encontrado"}), 404
+            cur.execute(
+                f"UPDATE public.coupons SET {', '.join(campos)} "
+                f"WHERE id = %s AND restaurant_id = %s RETURNING {_COUPON_COLS}",
+                (*valores, coupon_id, rid))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Cupom nao encontrado"}), 404
+            conn.commit()
+        return jsonify({"success": True, "coupon": _serialize(row)}), 200
+    except Exception as e:
+        logger.error(f"Erro em update_my_coupon: {e}", exc_info=True)
+        conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
+
+@coupons_bp.route('/mine/<coupon_id>', methods=['DELETE'])
+def delete_my_coupon(coupon_id):
+    """DELETE /api/coupons/mine/<id> — apaga cupom da própria loja."""
+    user_id, err = _partner_ctx()
+    if err:
+        return err
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
+    try:
+        with conn.cursor() as cur:
+            rid = _own_restaurant_id(cur, user_id)
+            if not rid:
+                return jsonify({"error": "Perfil de parceiro nao encontrado"}), 404
+            cur.execute("DELETE FROM public.coupons WHERE id = %s AND restaurant_id = %s",
+                        (coupon_id, rid))
+            apagou = cur.rowcount
+            conn.commit()
+        if not apagou:
+            return jsonify({"error": "Cupom nao encontrado"}), 404
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logger.error(f"Erro em delete_my_coupon: {e}", exc_info=True)
+        conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
+
+# ─── Admin: editar e excluir (faltavam — errou o valor, tinha que ir no banco) ─
+
+@coupons_bp.route('/admin/<coupon_id>', methods=['PUT', 'PATCH'])
+def admin_update_coupon(coupon_id):
+    # PATCH também: o admin já chamava PATCH pra ativar/desativar e caía em 404.
+    _, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'admin':
+        return jsonify({"error": "Acesso restrito a administradores"}), 403
+
+    data = request.get_json(silent=True) or {}
+    campos, valores = [], []
+    for campo in ('discount_type', 'description'):
+        if campo in data:
+            campos.append(f"{campo} = %s"); valores.append(data[campo] or None)
+    for campo in ('discount_value', 'min_order_value'):
+        if campo in data:
+            try:
+                valores.append(float(data[campo] or 0))
+            except (ValueError, TypeError):
+                return jsonify({"error": f"{campo} invalido"}), 400
+            campos.append(f"{campo} = %s")
+    if 'max_uses' in data:
+        campos.append("max_uses = %s"); valores.append(data.get('max_uses') or None)
+    if 'valid_until' in data:
+        campos.append("valid_until = %s"); valores.append(data.get('valid_until') or None)
+    if 'is_active' in data:
+        campos.append("is_active = %s"); valores.append(bool(data['is_active']))
+    if 'paid_by' in data and data['paid_by'] in ('platform', 'restaurant'):
+        campos.append("paid_by = %s"); valores.append(data['paid_by'])
+    if not campos:
+        return jsonify({"error": "Nada para atualizar"}), 400
+    campos.append("updated_at = NOW()")
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(f"UPDATE public.coupons SET {', '.join(campos)} "
+                        f"WHERE id = %s RETURNING {_COUPON_COLS}", (*valores, coupon_id))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Cupom nao encontrado"}), 404
+            conn.commit()
+        return jsonify({"success": True, "coupon": _serialize(row)}), 200
+    except Exception as e:
+        logger.error(f"Erro em admin_update_coupon: {e}", exc_info=True)
+        conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()
+
+
+@coupons_bp.route('/admin/<coupon_id>', methods=['DELETE'])
+def admin_delete_coupon(coupon_id):
+    _, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'admin':
+        return jsonify({"error": "Acesso restrito a administradores"}), 403
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexao com o banco de dados"}), 500
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public.coupons WHERE id = %s", (coupon_id,))
+            apagou = cur.rowcount
+            conn.commit()
+        if not apagou:
+            return jsonify({"error": "Cupom nao encontrado"}), 404
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logger.error(f"Erro em admin_delete_coupon: {e}", exc_info=True)
+        conn.rollback()
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        conn.close()

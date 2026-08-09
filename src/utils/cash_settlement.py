@@ -21,10 +21,16 @@ from ..utils.platform_settings import (
 )
 
 
-def compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_commission=None):
-    """Só calcula os números (não toca no banco). Mesmas fórmulas do online."""
+def compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_commission=None,
+                           desconto_parceiro=0.0):
+    """Só calcula os números (não toca no banco). Mesmas fórmulas do online.
+
+    desconto_parceiro = cupom da própria loja, que sai do repasse DELA (a
+    comissão da plataforma fica intacta). Cupom da Inksa não entra aqui.
+    """
     total_amount = float(total_amount or 0)
     delivery_fee = float(delivery_fee or 0)
+    desconto_parceiro = float(desconto_parceiro or 0)
     commission = float(existing_commission or 0)
     if not commission:
         # Mesma fonte/taxa dos pedidos online (Configurações > Taxas do admin).
@@ -34,7 +40,7 @@ def compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_c
     # frete (margem_frete da plataforma). O resto do dinheiro vira dívida dele.
     courier_freight = float(calculate_courier_payout(None, delivery_fee=delivery_fee))
     freight_admin = round(delivery_fee - courier_freight, 2)
-    restaurant_share = round(total_amount - delivery_fee - commission, 2)
+    restaurant_share = round(total_amount - delivery_fee - commission - desconto_parceiro, 2)
     cash_debt = round(total_amount - courier_freight, 2)
 
     return {
@@ -49,7 +55,8 @@ def compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_c
 
 
 def settle_cash_order(cur, order_id, delivery_id, restaurant_id,
-                      total_amount, delivery_fee, existing_commission=None):
+                      total_amount, delivery_fee, existing_commission=None,
+                      desconto_parceiro=0.0):
     """Liquida o pedido em dinheiro de forma IDEMPOTENTE usando o cursor `cur`
     (não faz commit — quem chama controla a transação).
 
@@ -63,7 +70,8 @@ def settle_cash_order(cur, order_id, delivery_id, restaurant_id,
     Retorna (breakdown, was_new): breakdown é o resumo pro app mostrar; was_new
     indica se a dívida foi registrada agora (False = já estava liquidado).
     """
-    b = compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_commission)
+    b = compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_commission,
+                               desconto_parceiro)
 
     # Idempotência: já liquidado? Não duplica a dívida nem o registro.
     cur.execute("SELECT id FROM cash_payment_records WHERE order_id = %s", (str(order_id),))

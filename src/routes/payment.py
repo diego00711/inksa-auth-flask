@@ -315,17 +315,25 @@ def criar_preferencia_mercado_pago():
         coupon_code = dados_pedido.get('coupon_code', '').strip()
         backend_discount = 0.0
         applied_coupon_id = None
+        desconto_parceiro = 0.0  # parte do desconto que sai do repasse da loja
         if coupon_code and payment_method != 'cash':
             try:
                 order_subtotal = float(dados_pedido.get('total_amount_items', 0))
                 delivery_fee_c = float(dados_pedido.get('delivery_fee', 0) or 0)
-                cr = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).execute()
+                _rid = dados_pedido.get('restaurant_id')
+                # Cupom da loja só vale nela; cupom da plataforma vale em qualquer.
+                cr = supabase_client.table('coupons').select('*') \
+                    .eq('code', coupon_code.upper()) \
+                    .or_(f'restaurant_id.is.null,restaurant_id.eq.{_rid}').execute()
                 coupon = cr.data[0] if cr.data else None
-                evalr = evaluate_coupon(coupon, order_subtotal, delivery_fee_c)
+                evalr = evaluate_coupon(coupon, order_subtotal, delivery_fee_c, restaurant_id=_rid)
                 if evalr['valid'] and evalr['discount_amount'] > 0:
                     backend_discount = evalr['discount_amount']
+                    desconto_parceiro = float(evalr.get('restaurant_discount') or 0)
                     applied_coupon_id = coupon.get('id')
-                    logging.info(f"✅ Cupom '{coupon_code}' válido — desconto: R${backend_discount:.2f}")
+                    logging.info(
+                        f"✅ Cupom '{coupon_code}' válido — desconto R${backend_discount:.2f} "
+                        f"(pago por: {evalr.get('paid_by')})")
                 else:
                     logging.warning(f"⚠️ Cupom '{coupon_code}' não aplicado: {evalr['message']}")
             except Exception as _coupon_err:
@@ -360,7 +368,12 @@ def criar_preferencia_mercado_pago():
             raw_total = float(dados_pedido.get('total_amount_items', 0)) + float(dados_pedido.get('delivery_fee', 0))
             corrected_total = max(0.0, raw_total - total_discount)
             order_data['total_amount'] = round(corrected_total, 2)
-            supabase_client.table('orders').update({'total_amount': order_data['total_amount']}).eq('id', pedido_id).execute()
+            # desconto_parceiro fica gravado no pedido: é dele que os cálculos de
+            # repasse descontam (cupom da loja sai do bolso dela, não da comissão).
+            supabase_client.table('orders').update({
+                'total_amount': order_data['total_amount'],
+                'desconto_parceiro': round(desconto_parceiro, 2),
+            }).eq('id', pedido_id).execute()
             if applied_coupon_id:
                 consume_coupon(applied_coupon_id)
             logging.info(f"✅ total_amount corrigido para R${corrected_total:.2f} (cupom R${backend_discount:.2f} + clube R${club_discount:.2f})")
@@ -374,11 +387,12 @@ def criar_preferencia_mercado_pago():
         # que o app enviou.
         if payment_method == 'cash':
             try:
-                total_seguro, subtotal_validado, _desconto_cash, _coupon_id_cash = _validar_itens_e_total(
+                total_seguro, subtotal_validado, _desconto_cash, _coupon_id_cash, _desc_parc_cash = _validar_itens_e_total(
                     dados_pedido.get('itens', []),
                     dados_pedido.get('delivery_fee', 0),
                     coupon_code,
                     dados_pedido.get('total_amount_items', 0),
+                    restaurant_id=dados_pedido.get('restaurant_id'),
                 )
             except ValueError as ve:
                 logging.error(f"❌ Pedido em dinheiro {pedido_id} rejeitado: {ve}")
@@ -393,6 +407,8 @@ def criar_preferencia_mercado_pago():
             supabase_client.table('orders').update({
                 'total_amount_items': subtotal_validado,
                 'total_amount': total_seguro,
+                # Cupom da própria loja sai do repasse dela (não da comissão).
+                'desconto_parceiro': _desc_parc_cash,
             }).eq('id', pedido_id).execute()
 
             if _coupon_id_cash:
@@ -606,10 +622,12 @@ def payment_config():
 
 
 # ─── PAGAMENTO TRANSPARENTE COM CARTÃO (in-app, sem redirecionar) ────────────
-def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items):
+def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items,
+                           restaurant_id=None):
     """Revalida precos no banco e calcula o total no servidor (nao confia no front).
-    Retorna (total_seguro, subtotal_validado, desconto, coupon_id). O coupon_id
-    (quando != None) deve ser 'consumido' pelo chamador apos criar o pedido.
+    Retorna (total_seguro, subtotal_validado, desconto, coupon_id, desconto_parceiro).
+    O coupon_id (quando != None) deve ser 'consumido' pelo chamador apos criar o
+    pedido. desconto_parceiro = parte do desconto que sai do repasse da loja.
     Lanca ValueError se invalido.
     """
     subtotal = 0.0
@@ -630,16 +648,22 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
     # Desconto de cupom — mesma lógica única do preview e do fluxo online
     desconto = 0.0
     coupon_id = None
+    desconto_parceiro = 0.0
     if coupon_code:
-        cr = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper()).execute()
+        # Cupom da loja só vale nela; cupom da plataforma vale em qualquer uma.
+        q = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper())
+        if restaurant_id:
+            q = q.or_(f'restaurant_id.is.null,restaurant_id.eq.{restaurant_id}')
+        cr = q.execute()
         coupon = cr.data[0] if cr.data else None
-        evalr = evaluate_coupon(coupon, subtotal, delivery_fee)
+        evalr = evaluate_coupon(coupon, subtotal, delivery_fee, restaurant_id=restaurant_id)
         if evalr['valid'] and evalr['discount_amount'] > 0:
             desconto = evalr['discount_amount']
             coupon_id = coupon.get('id')
+            desconto_parceiro = float(evalr.get('restaurant_discount') or 0)
 
     total = max(0.0, round(subtotal + float(delivery_fee or 0) - desconto, 2))
-    return total, round(subtotal, 2), desconto, coupon_id
+    return total, round(subtotal, 2), desconto, coupon_id, round(desconto_parceiro, 2)
 
 
 @mp_payment_bp.route('/pagamentos/processar_cartao', methods=['POST'])
@@ -679,8 +703,9 @@ def processar_pagamento_cartao():
 
         items_req = d.get('itens', [])
         try:
-            total_seguro, subtotal_validado, desconto, coupon_id_card = _validar_itens_e_total(
-                items_req, d.get('delivery_fee', 0), (d.get('coupon_code') or '').strip(), d.get('total_amount_items', 0)
+            total_seguro, subtotal_validado, desconto, coupon_id_card, desc_parc_card = _validar_itens_e_total(
+                items_req, d.get('delivery_fee', 0), (d.get('coupon_code') or '').strip(),
+                d.get('total_amount_items', 0), restaurant_id=d.get('restaurant_id')
             )
         except ValueError as ve:
             return jsonify({"erro": str(ve)}), 400
@@ -790,7 +815,11 @@ def processar_pagamento_cartao():
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',
                 'comissao_plataforma': comissao,
-                'valor_repassado_restaurante': round(subtotal_validado - comissao, 2),
+                # Cupom da própria loja sai do repasse DELA — a comissão da
+                # plataforma fica intacta. Cupom da Inksa não entra aqui (é
+                # absorvido pela comissão, desconto_parceiro = 0).
+                'valor_repassado_restaurante': round(subtotal_validado - comissao - desc_parc_card, 2),
+                'desconto_parceiro': desc_parc_card,
                 'valor_repassado_entregador': courier_payout,
                 'margem_frete': margem_frete,
                 'id_transacao_mp': str(payment_id),
@@ -921,7 +950,10 @@ def mercadopago_webhook():
 
                     # Comissão e repasse vêm de platform_settings (editáveis no admin)
                     comissao_plataforma = float(calculate_platform_commission(valor_total_itens, pedido_do_bd.get('restaurant_id')))
-                    valor_para_restaurante = valor_total_itens - comissao_plataforma
+                    # Cupom da própria loja já foi gravado no pedido: sai do
+                    # repasse dela, não da comissão da plataforma.
+                    _desc_parc = float(pedido_do_bd.get('desconto_parceiro') or 0)
+                    valor_para_restaurante = valor_total_itens - comissao_plataforma - _desc_parc
 
                     delivery_fee_charged = float(pedido_do_bd.get('delivery_fee', 0.0) or 0.0)
                     valor_para_entregador = float(calculate_courier_payout(
@@ -1093,11 +1125,13 @@ def asaas_webhook():
             comissao = float(calculate_platform_commission(valor_itens, pedido.get('restaurant_id')))
             fee = float(pedido.get('delivery_fee') or 0)
             courier = float(calculate_courier_payout(pedido.get('delivery_distance_km'), delivery_fee=fee))
+            # Cupom da própria loja sai do repasse dela (gravado no pedido).
+            _desc_parc = float(pedido.get('desconto_parceiro') or 0)
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',
                 'comissao_plataforma': round(comissao, 2),
-                'valor_repassado_restaurante': round(valor_itens - comissao, 2),
+                'valor_repassado_restaurante': round(valor_itens - comissao - _desc_parc, 2),
                 'valor_repassado_entregador': round(courier, 2),
                 'margem_frete': round(fee - courier, 2),
                 'id_transacao_mp': str(payment_id),

@@ -262,7 +262,8 @@ def confirm_cash_payment(order_id):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("""
                 SELECT o.id, o.status, o.payment_method, o.total_amount,
-                       o.delivery_fee, o.change_for, o.comissao_plataforma, o.restaurant_id
+                       o.delivery_fee, o.change_for, o.comissao_plataforma, o.restaurant_id,
+                       COALESCE(o.desconto_parceiro, 0) AS desconto_parceiro
                 FROM orders o
                 WHERE o.id = %s AND o.delivery_id = %s
             """, (order_id, profile_id))
@@ -282,7 +283,8 @@ def confirm_cash_payment(order_id):
             from ..utils.cash_settlement import settle_cash_order
             breakdown, _was_new = settle_cash_order(
                 cur, order_id, profile_id, order['restaurant_id'],
-                order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'))
+                order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'),
+                desconto_parceiro=order.get('desconto_parceiro') or 0)
             conn.commit()
 
         return jsonify({

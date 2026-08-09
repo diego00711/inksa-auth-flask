@@ -79,6 +79,10 @@ _DEFAULTS: dict[str, Decimal] = {
     # Nota atribuída a quem ainda NÃO tem avaliação. Sem isso o novato entraria
     # com nota 0 e nunca receberia pedido pra ser avaliado.
     "dispatch_default_rating":      Decimal("4"),
+    # Teto de desconto (%) que o PARCEIRO pode criar no cupom dele. Trava de
+    # segurança: o desconto sai do repasse dele, então um "90" digitado por
+    # engano viraria prejuízo. Não limita os cupons criados pela Inksa.
+    "coupon_max_discount_pct":      Decimal("30"),
     # Logoff automático por inatividade (minutos) nos apps Parceiro e Entregador.
     # 0/vazio = desliga o recurso. Editável no admin.
     "idle_logout_minutes":          Decimal("60"),
