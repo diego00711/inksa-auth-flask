@@ -322,10 +322,7 @@ def criar_preferencia_mercado_pago():
                 delivery_fee_c = float(dados_pedido.get('delivery_fee', 0) or 0)
                 _rid = dados_pedido.get('restaurant_id')
                 # Cupom da loja só vale nela; cupom da plataforma vale em qualquer.
-                cr = supabase_client.table('coupons').select('*') \
-                    .eq('code', coupon_code.upper()) \
-                    .or_(f'restaurant_id.is.null,restaurant_id.eq.{_rid}').execute()
-                coupon = cr.data[0] if cr.data else None
+                coupon = _buscar_cupom(coupon_code, _rid)
                 evalr = evaluate_coupon(coupon, order_subtotal, delivery_fee_c, restaurant_id=_rid)
                 if evalr['valid'] and evalr['discount_amount'] > 0:
                     backend_discount = evalr['discount_amount']
@@ -398,6 +395,19 @@ def criar_preferencia_mercado_pago():
                 logging.error(f"❌ Pedido em dinheiro {pedido_id} rejeitado: {ve}")
                 supabase_client.table('orders').delete().eq('id', pedido_id).execute()
                 return jsonify({"erro": str(ve)}), 400
+            except Exception as e:
+                # Qualquer erro INESPERADO aqui era fatal do jeito errado: o
+                # pedido já tinha sido inserido, então o cliente levava um 500
+                # com um pedido criado e com os valores que o APP mandou — sem a
+                # revalidação do servidor. Agora limpa o pedido, avisa o Sentry e
+                # devolve um erro que o app sabe mostrar.
+                logging.error(f"❌ Falha ao validar pedido em dinheiro {pedido_id}: {e}", exc_info=True)
+                sentry_sdk.capture_exception(e)
+                try:
+                    supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                except Exception:
+                    logging.error(f"❌ Não deu pra remover o pedido órfão {pedido_id}")
+                return jsonify({"erro": "Não foi possível confirmar o valor do pedido. Tente novamente."}), 400
 
             if total_seguro <= 0:
                 logging.error(f"❌ Pedido em dinheiro {pedido_id} com total inválido: {total_seguro}")
@@ -622,6 +632,37 @@ def payment_config():
 
 
 # ─── PAGAMENTO TRANSPARENTE COM CARTÃO (in-app, sem redirecionar) ────────────
+def _buscar_cupom(coupon_code, restaurant_id):
+    """Acha o cupom que vale nesta loja: o DELA ou o da plataforma.
+
+    Duas consultas simples em vez de um `.or_()` no PostgREST: o filtro
+    combinado dependia de sintaxe do cliente e, se estourasse, derrubava a
+    criação do pedido inteira (o pedido já estava inserido → o cliente via 500
+    com o pedido criado e sem o total recalculado pelo servidor).
+
+    Nunca lança: qualquer falha vira "sem cupom", que no pior caso cobra o valor
+    cheio — o oposto de perder o pedido.
+    """
+    if not coupon_code:
+        return None
+    code = str(coupon_code).strip().upper()
+    if not code:
+        return None
+    try:
+        # O cupom da própria loja tem prioridade sobre o da plataforma.
+        if restaurant_id:
+            r = (supabase_client.table('coupons').select('*')
+                 .eq('code', code).eq('restaurant_id', str(restaurant_id)).execute())
+            if r.data:
+                return r.data[0]
+        r = (supabase_client.table('coupons').select('*')
+             .eq('code', code).is_('restaurant_id', 'null').execute())
+        return r.data[0] if r.data else None
+    except Exception as e:
+        logging.warning(f"⚠️ Falha ao buscar cupom '{code}': {e} — seguindo sem desconto")
+        return None
+
+
 def _entrega_propria(restaurant_id) -> bool:
     """True quando a loja entrega com a própria moto (delivery_type='own').
 
@@ -691,11 +732,7 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
     desconto_parceiro = 0.0
     if coupon_code:
         # Cupom da loja só vale nela; cupom da plataforma vale em qualquer uma.
-        q = supabase_client.table('coupons').select('*').eq('code', coupon_code.upper())
-        if restaurant_id:
-            q = q.or_(f'restaurant_id.is.null,restaurant_id.eq.{restaurant_id}')
-        cr = q.execute()
-        coupon = cr.data[0] if cr.data else None
+        coupon = _buscar_cupom(coupon_code, restaurant_id)
         evalr = evaluate_coupon(coupon, subtotal, delivery_fee, restaurant_id=restaurant_id)
         if evalr['valid'] and evalr['discount_amount'] > 0:
             desconto = evalr['discount_amount']
