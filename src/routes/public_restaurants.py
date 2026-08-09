@@ -190,10 +190,19 @@ def list_restaurants():
             if has_coords and not city:
                 from ..utils.platform_settings import get_settings as _get_settings
                 radius_km = float(_get_settings()["platform_max_delivery_radius"])
+                # A loja de ENTREGA PRÓPRIA pode encurtar esse raio: ela cobra
+                # taxa fixa em qualquer distância, então um pedido a 30 km sairia
+                # do bolso dela. Quem não configurou (NULL) segue no raio da
+                # plataforma — o de menor valor entre os dois é o que vale.
+                # O CASE amarra o raio próprio ao delivery_type='own': se a loja
+                # voltar pra entrega da plataforma, um valor antigo na coluna
+                # não fica limitando ela em silêncio.
                 where.append(
-                    "earth_distance(ll_to_earth(rp.latitude, rp.longitude), ll_to_earth(%s, %s)) <= %s"
+                    "earth_distance(ll_to_earth(rp.latitude, rp.longitude), ll_to_earth(%s, %s)) <= "
+                    "LEAST(%s, COALESCE(CASE WHEN rp.delivery_type = 'own' "
+                    "THEN rp.own_delivery_radius_km END, %s) * 1000.0)"
                 )
-                params += [user_lat, user_lon, radius_km * 1000.0]
+                params += [user_lat, user_lon, radius_km * 1000.0, radius_km]
 
             if category:
                 where.append("(rp.category ILIKE %s OR rp.cuisine_type ILIKE %s)")

@@ -75,7 +75,8 @@ def calculate_delivery_fee():
         logger.info(f"Buscando restaurante: {restaurant_id}")
         
         response = supabase.table('restaurant_profiles').select(
-            'latitude, longitude, delivery_type, delivery_fee, restaurant_name'
+            'latitude, longitude, delivery_type, delivery_fee, restaurant_name, '
+            'own_delivery_radius_km'
         ).eq('id', restaurant_id).execute()
         
         if not response.data or len(response.data) == 0:
@@ -95,7 +96,32 @@ def calculate_delivery_fee():
 
         # Calcular taxa baseada no tipo de entrega
         if delivery_type == 'own':
-            # Restaurante faz própria entrega
+            # Restaurante faz própria entrega: taxa FIXA, não muda com a
+            # distância. Justamente por isso o raio dele é uma trava de dinheiro
+            # — sem ela, um pedido a 30 km continuaria custando o mesmo pra ele.
+            # A listagem já esconde a loja fora do raio, mas link direto pro
+            # cardápio pula a listagem; aqui é a barreira que vale.
+            raio = restaurant_data.get('own_delivery_radius_km')
+            r_lat = restaurant_data.get('latitude')
+            r_lon = restaurant_data.get('longitude')
+            if raio and r_lat and r_lon:
+                distance_km = haversine_distance(
+                    float(r_lat), float(r_lon),
+                    float(client_latitude), float(client_longitude)
+                )
+                if distance_km > float(raio):
+                    logger.info(
+                        f"Fora do raio próprio: {distance_km:.2f} km > {float(raio):.2f} km")
+                    return jsonify({
+                        "status": "error",
+                        "error": "fora_da_area",
+                        "message": (
+                            f"{restaurant_data.get('restaurant_name') or 'Esta loja'} entrega "
+                            f"até {float(raio):.0f} km e seu endereço está a "
+                            f"{distance_km:.1f} km."
+                        ),
+                    }), 200
+
             delivery_fee = float(restaurant_data.get('delivery_fee', 0.0))
             calculation_method = "Taxa fixa do restaurante"
             logger.info(f"Entrega própria: R$ {delivery_fee}")

@@ -188,10 +188,21 @@ def handle_profile():
                 'delivery_time', 'cuisine_type', 'description', 'is_open', 'delivery_fee',
                 'minimum_order', 'payout_frequency', 'bank_name', 'bank_agency',
                 'bank_account_number', 'bank_account_type', 'pix_key', 'pix_key_type',
-                'mp_account_id', 'delivery_type',
+                'mp_account_id', 'delivery_type', 'own_delivery_radius_km',
                 'opening_hours', 'hours_auto'
             ]
             updates = {k: v for k, v in data.items() if k in allowed_fields}
+
+            # Raio da entrega própria: campo em branco = sem limite próprio
+            # (vale o raio da plataforma). String vazia iria pro banco como ''
+            # e quebraria o NUMERIC.
+            if 'own_delivery_radius_km' in updates:
+                _r = updates['own_delivery_radius_km']
+                try:
+                    updates['own_delivery_radius_km'] = (
+                        float(_r) if _r not in (None, '', 0, '0') and float(_r) > 0 else None)
+                except (TypeError, ValueError):
+                    updates['own_delivery_radius_km'] = None
             if not updates:
                 return jsonify({"status": "error", "error": "No valid fields to update"}), 400
 
