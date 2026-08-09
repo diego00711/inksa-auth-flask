@@ -55,9 +55,30 @@ _DEFAULTS: dict[str, Decimal] = {
     # (todos no raio veem, padrão atual), 1 = atribuição (oferta ao mais
     # próximo com timeout). offer_seconds: tempo da oferta. decline_cooldown_min:
     # minutos sem receber ofertas após RECUSAR.
-    "dispatch_assign_enabled":      Decimal("0"),
+    "dispatch_assign_enabled":      Decimal("1"),
     "dispatch_offer_seconds":       Decimal("30"),
     "dispatch_decline_cooldown_min": Decimal("15"),
+    # PESOS da escolha do entregador (só ordenam quem JÁ passou nos filtros de
+    # raio/cooldown/cadastro). Somam 100 por convenção, mas qualquer proporção
+    # funciona — o que vale é o peso relativo. Editáveis no admin.
+    #   distance = perto do restaurante (eficiência: cliente espera menos)
+    #   idle     = há quanto tempo está sem entregar (justiça: quem está parado)
+    #   rating   = nota das avaliações (qualidade do serviço)
+    #   balance  = poucas entregas hoje (espalha a renda entre os entregadores)
+    # Deixar distance=100 e o resto 0 reproduz o comportamento antigo
+    # ("sempre o mais próximo").
+    "dispatch_weight_distance":     Decimal("50"),
+    "dispatch_weight_idle":         Decimal("20"),
+    "dispatch_weight_rating":       Decimal("15"),
+    "dispatch_weight_balance":      Decimal("15"),
+    # Referências de normalização:
+    # idle_target_minutes: parado por este tempo já vale nota máxima em "idle".
+    # daily_target: nº de entregas no dia em que o bônus de "balance" zera.
+    "dispatch_idle_target_minutes": Decimal("60"),
+    "dispatch_daily_target":        Decimal("10"),
+    # Nota atribuída a quem ainda NÃO tem avaliação. Sem isso o novato entraria
+    # com nota 0 e nunca receberia pedido pra ser avaliado.
+    "dispatch_default_rating":      Decimal("4"),
     # Logoff automático por inatividade (minutos) nos apps Parceiro e Entregador.
     # 0/vazio = desliga o recurso. Editável no admin.
     "idle_logout_minutes":          Decimal("60"),
@@ -83,6 +104,9 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               "delivery_base_fee", "delivery_per_km_fee", "platform_max_delivery_radius",
               "delivery_radius_bike_km", "delivery_radius_moto_km", "delivery_radius_carro_km",
               "dispatch_assign_enabled", "dispatch_offer_seconds", "dispatch_decline_cooldown_min",
+              "dispatch_weight_distance", "dispatch_weight_idle", "dispatch_weight_rating",
+              "dispatch_weight_balance", "dispatch_idle_target_minutes", "dispatch_daily_target",
+              "dispatch_default_rating",
               "idle_logout_minutes"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 

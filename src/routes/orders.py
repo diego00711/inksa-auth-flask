@@ -1457,6 +1457,19 @@ def _run_dispatch_tick(cur, settings):
     r_moto  = _f("delivery_radius_moto_km")  or r_global
     r_carro = _f("delivery_radius_carro_km") or r_global
 
+    # Pesos da nota composta (admin). Se todos vierem 0, cai em "só distância"
+    # — assim uma configuração zerada por engano não trava o dispatch.
+    w_dist   = _f("dispatch_weight_distance")
+    w_idle   = _f("dispatch_weight_idle")
+    w_rating = _f("dispatch_weight_rating")
+    w_balance = _f("dispatch_weight_balance")
+    if (w_dist + w_idle + w_rating + w_balance) <= 0:
+        w_dist, w_idle, w_rating, w_balance = 1.0, 0.0, 0.0, 0.0
+    # Divisores da normalização — nunca zero (evita divisão por zero no SQL).
+    idle_target  = _f("dispatch_idle_target_minutes") or 60.0
+    daily_target = _f("dispatch_daily_target") or 10.0
+    default_rating = _f("dispatch_default_rating") or 4.0
+
     cur.execute(
         """
         SELECT o.id, o.offer_courier_id, o.offer_expires_at, o.offer_passed_ids,
@@ -1479,36 +1492,69 @@ def _run_dispatch_tick(cur, settings):
         if od['offer_courier_id'] and od['offer_courier_id'] not in passed:
             passed.append(od['offer_courier_id'])
 
+        # ESCOLHA DO ENTREGADOR — nota composta.
+        # Os filtros do WHERE são DUROS (raio, cooldown, cadastro): quem não
+        # passa neles não recebe oferta, ponto. A nota só ORDENA os elegíveis —
+        # é isso que impede mandar alguém de 9 km só porque estava ocioso.
+        # Cada fator é normalizado 0..1 (1 = melhor) e multiplicado pelo seu
+        # peso, todos configuráveis no admin:
+        #   proximidade  → cliente espera menos
+        #   tempo parado → quem está há mais tempo sem entregar sobe
+        #   nota         → qualidade do serviço (novato entra com a nota padrão)
+        #   equilíbrio   → quem fez menos entregas hoje sobe (espalha a renda)
         cur.execute(
             """
-            SELECT dp.user_id,
-                   earth_distance(
-                     ll_to_earth(%s, %s),
-                     ll_to_earth(COALESCE(dp.current_lat, dp.latitude), COALESCE(dp.current_lng, dp.longitude))
-                   ) AS dist
-              FROM delivery_profiles dp
-             WHERE dp.approved = TRUE
-               AND COALESCE(dp.is_available, FALSE) = TRUE
-               AND (dp.dispatch_cooldown_until IS NULL OR dp.dispatch_cooldown_until < NOW())
-               AND COALESCE(dp.current_lat, dp.latitude) IS NOT NULL
-               AND COALESCE(dp.current_lng, dp.longitude) IS NOT NULL
-               AND NULLIF(TRIM(dp.first_name), '') IS NOT NULL
-               AND NULLIF(TRIM(dp.cpf), '') IS NOT NULL
-               AND NULLIF(TRIM(dp.vehicle_type), '') IS NOT NULL
-               AND (dp.vehicle_type NOT IN ('moto','carro')
-                    OR (NULLIF(TRIM(dp.vehicle_plate),'') IS NOT NULL AND NULLIF(TRIM(dp.cnh),'') IS NOT NULL))
-               AND NOT (dp.user_id = ANY(%s::uuid[]))
-               AND earth_distance(
-                     ll_to_earth(%s, %s),
-                     ll_to_earth(COALESCE(dp.current_lat, dp.latitude), COALESCE(dp.current_lng, dp.longitude))
-                   ) <= (CASE dp.vehicle_type
-                            WHEN 'bicicleta' THEN %s WHEN 'moto' THEN %s WHEN 'carro' THEN %s ELSE %s END) * 1000.0
-             ORDER BY dist ASC
+            WITH elegiveis AS (
+              SELECT dp.user_id,
+                     earth_distance(
+                       ll_to_earth(%s, %s),
+                       ll_to_earth(COALESCE(dp.current_lat, dp.latitude), COALESCE(dp.current_lng, dp.longitude))
+                     ) AS dist,
+                     (CASE dp.vehicle_type
+                        WHEN 'bicicleta' THEN %s WHEN 'moto' THEN %s
+                        WHEN 'carro' THEN %s ELSE %s END) * 1000.0 AS raio_m,
+                     COALESCE((SELECT AVG(dr.rating)::numeric
+                                 FROM delivery_reviews dr
+                                WHERE dr.delivery_id = dp.id), %s) AS nota,
+                     (SELECT COUNT(*)
+                        FROM orders o2
+                       WHERE o2.delivery_id = dp.id
+                         AND o2.status = 'delivered'
+                         AND (o2.updated_at AT TIME ZONE 'America/Sao_Paulo')::date
+                             = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) AS entregas_hoje,
+                     COALESCE((SELECT EXTRACT(EPOCH FROM (NOW() - MAX(o3.updated_at))) / 60.0
+                                 FROM orders o3
+                                WHERE o3.delivery_id = dp.id
+                                  AND o3.status = 'delivered'), 100000) AS min_parado
+                FROM delivery_profiles dp
+               WHERE dp.approved = TRUE
+                 AND COALESCE(dp.is_available, FALSE) = TRUE
+                 AND (dp.dispatch_cooldown_until IS NULL OR dp.dispatch_cooldown_until < NOW())
+                 AND COALESCE(dp.current_lat, dp.latitude) IS NOT NULL
+                 AND COALESCE(dp.current_lng, dp.longitude) IS NOT NULL
+                 AND NULLIF(TRIM(dp.first_name), '') IS NOT NULL
+                 AND NULLIF(TRIM(dp.cpf), '') IS NOT NULL
+                 AND NULLIF(TRIM(dp.vehicle_type), '') IS NOT NULL
+                 AND (dp.vehicle_type NOT IN ('moto','carro')
+                      OR (NULLIF(TRIM(dp.vehicle_plate),'') IS NOT NULL AND NULLIF(TRIM(dp.cnh),'') IS NOT NULL))
+                 AND NOT (dp.user_id = ANY(%s::uuid[]))
+            )
+            SELECT user_id, dist,
+                   ( %s * (1 - LEAST(dist / NULLIF(raio_m, 0), 1))
+                   + %s * LEAST(min_parado / %s, 1)
+                   + %s * ((LEAST(GREATEST(nota, 1), 5) - 1) / 4.0)
+                   + %s * (1 - LEAST(entregas_hoje::numeric / %s, 1))
+                   ) AS nota_final
+              FROM elegiveis
+             WHERE dist <= raio_m
+             ORDER BY nota_final DESC, dist ASC
              LIMIT 1
             """,
-            (od['r_lat'], od['r_lng'], passed,
-             od['r_lat'], od['r_lng'],
-             r_bike, r_moto, r_carro, r_global),
+            (od['r_lat'], od['r_lng'],
+             r_bike, r_moto, r_carro, r_global,
+             default_rating,
+             passed,
+             w_dist, w_idle, idle_target, w_rating, w_balance, daily_target),
         )
         cand = cur.fetchone()
         if cand:
