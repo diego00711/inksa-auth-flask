@@ -1554,3 +1554,34 @@ def refund_delivery_incident(incident_id):
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         conn.close()
+
+
+@admin_bp.route("/integrations/asaas/check", methods=["GET"])
+@admin_required
+def check_asaas_integration():
+    """Testa a conexão REAL com o Asaas (não só se a variável existe).
+
+    Existe por causa de uma armadilha concreta: o /api/health responde
+    "asaas: configured" olhando apenas se ASAAS_API_KEY está setada. Quando a
+    conta muda (PF→PJ, chave regerada, ambiente trocado), a variável continua lá
+    e o painel segue verde — o erro só aparece pro cliente no primeiro pedido.
+
+    Aqui a gente bate no Asaas de verdade e devolve de qual conta a chave é,
+    junto com o saldo (sem saldo o PIX de repasse falha na hora de pagar).
+    A chave nunca é devolvida na resposta.
+    """
+    from ..utils import asaas
+
+    ok, info = asaas.check_account()
+    if not ok:
+        return jsonify({"status": "error", "conectado": False, **info}), 200
+
+    saldo_ok, saldo = asaas.get_balance()
+    return jsonify({
+        "status": "success",
+        "conectado": True,
+        "conta": info,
+        "saldo": saldo if saldo_ok else None,
+        "payout_provider": (os.environ.get("PAYOUT_PROVIDER") or "mock").strip().lower(),
+        "webhook_token_configurado": bool(os.environ.get("ASAAS_WEBHOOK_TOKEN")),
+    }), 200

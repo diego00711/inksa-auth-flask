@@ -218,6 +218,48 @@ def refund_payment(payment_id: str):
     return False, _error_message(data)
 
 
+def check_account():
+    """Bate no Asaas de verdade pra saber se a chave AINDA vale e de quem é a conta.
+
+    `is_configured()` só diz que a variável de ambiente existe — não que a chave
+    funciona. Numa troca de conta (PF→PJ, chave regerada, ambiente errado) o
+    sistema continuaria "configurado" e só quebraria no primeiro pedido real.
+
+    Retorna (ok, info). `info` nunca contém a chave.
+    """
+    if not is_configured():
+        return False, {"motivo": "ASAAS_API_KEY não configurada"}
+
+    ok, data = _request("GET", "/myAccount")
+    if not ok:
+        return False, {
+            "motivo": _error_message(data),
+            # 401 aqui é o sintoma clássico de chave trocada/revogada.
+            "dica": "Chave inválida ou de outro ambiente. Confira ASAAS_API_KEY e "
+                    "ASAAS_ENV no Render (a chave de produção começa com $aact_prod_).",
+        }
+
+    comercial = (data.get("commercialInfo") or {}) if isinstance(data, dict) else {}
+    return True, {
+        "conta": data.get("name") or comercial.get("name"),
+        "email": data.get("email"),
+        "cpf_cnpj": data.get("cpfCnpj") or comercial.get("cpfCnpj"),
+        "tipo_pessoa": data.get("personType") or comercial.get("personType"),
+        "ambiente": (os.environ.get("ASAAS_ENV") or "sandbox").strip().lower(),
+    }
+
+
+def get_balance():
+    """(ok, saldo_em_reais). Sem saldo o PIX de repasse falha na hora de pagar."""
+    ok, data = _request("GET", "/finance/balance")
+    if not ok:
+        return False, None
+    try:
+        return True, float(data.get("balance") or 0)
+    except (TypeError, ValueError):
+        return False, None
+
+
 def verify_webhook_token(req) -> bool:
     """Valida o header 'asaas-access-token' contra ASAAS_WEBHOOK_TOKEN (fail-closed)."""
     expected = os.environ.get("ASAAS_WEBHOOK_TOKEN")
