@@ -91,7 +91,12 @@ def list_restaurants():
             # Só restaurantes aprovados/ativos (e cujo usuário não foi
             # desativado pelo admin) aparecem publicamente.
             where = ["COALESCE(rp.approved, TRUE) = TRUE", "COALESCE(rp.active, TRUE) = TRUE",
-                     "COALESCE(u.is_active, TRUE) = TRUE"]
+                     "COALESCE(u.is_active, TRUE) = TRUE",
+                     # SEM COORDENADAS A LOJA NÃO APARECE. Sem lat/lng não dá pra
+                     # calcular frete nem distância, e ela escapava do filtro de
+                     # raio — uma loja de outra cidade aparecia pra qualquer
+                     # cliente. Fica escondida até geocodificar o endereço.
+                     "rp.latitude IS NOT NULL", "rp.longitude IS NOT NULL"]
             params = []
 
             # Clube: destaque = restaurantes cujo volume do mês alcança um nível
@@ -111,18 +116,15 @@ def list_restaurants():
             params += [featured_threshold, featured_threshold]
 
             # Filtro por RAIO de atendimento: quando temos as coordenadas do
-            # cliente, só mostra restaurantes dentro de service_radius_km dele —
-            # é o que separa as cidades (cliente vê só o que dá pra atender).
-            # Restaurantes sem coordenadas continuam aparecendo (fail-open) pra
-            # não sumirem por falta de geocode.
+            # cliente, só mostra lojas dentro do raio da plataforma — é o que
+            # separa as cidades (o cliente vê só o que dá pra atender).
             # Quando o cliente ESCOLHE uma cidade no seletor, ignora o raio (ele
             # quer ver aquela cidade, mesmo estando longe/em outro lugar).
             if has_coords and not city:
                 from ..utils.platform_settings import get_settings as _get_settings
                 radius_km = float(_get_settings()["platform_max_delivery_radius"])
                 where.append(
-                    "(rp.latitude IS NULL OR rp.longitude IS NULL OR "
-                    "earth_distance(ll_to_earth(rp.latitude, rp.longitude), ll_to_earth(%s, %s)) <= %s)"
+                    "earth_distance(ll_to_earth(rp.latitude, rp.longitude), ll_to_earth(%s, %s)) <= %s"
                 )
                 params += [user_lat, user_lon, radius_km * 1000.0]
 

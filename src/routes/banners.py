@@ -27,6 +27,17 @@ def _coerce_int(value):
     except (TypeError, ValueError):
         return None
 
+
+def _coerce_float(value):
+    """Converte para float; '' / None / inválido -> None (sem valor).
+    Usado nas coordenadas do alcance geográfico do banner."""
+    if value in (None, ''):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 # --- Handler para requisições OPTIONS ---
 @banners_bp.before_request
 def handle_options():
@@ -69,7 +80,8 @@ def get_banners():
                     SELECT id, title, subtitle, image_url, link_url, is_active,
                            display_order, created_at, updated_at, text_position,
                            starts_at, ends_at, duration_seconds,
-                           audience, is_sponsored, sponsor_name
+                           audience, is_sponsored, sponsor_name,
+                           geo_latitude, geo_longitude, geo_radius_km, geo_city
                     FROM banners
                     ORDER BY display_order ASC, created_at DESC
                 """
@@ -81,7 +93,37 @@ def get_banners():
                 # ou >= agora). audience padrão = 'cliente' (compatível com o app
                 # do cliente, que não manda o parâmetro).
                 audience = request.args.get('audience', 'cliente')
-                query = """
+
+                # ALCANCE GEOGRÁFICO: banner com geo_latitude/longitude só
+                # aparece pra quem está dentro do raio dele. Um parceiro de
+                # Lages que compra espaço não é mostrado em São Paulo.
+                # Banner SEM coordenada = nacional (aparece pra todo mundo).
+                # Cliente sem GPS/endereço: recebe só os nacionais — melhor não
+                # mostrar do que cobrar do anunciante uma exibição fora da área.
+                try:
+                    user_lat = float(request.args.get('lat'))
+                    user_lon = float(request.args.get('lng') or request.args.get('lon'))
+                    tem_local = True
+                except (TypeError, ValueError):
+                    user_lat = user_lon = None
+                    tem_local = False
+
+                if tem_local:
+                    geo_clause = """
+                      AND (
+                            geo_latitude IS NULL OR geo_longitude IS NULL
+                            OR earth_distance(
+                                 ll_to_earth(geo_latitude, geo_longitude),
+                                 ll_to_earth(%s, %s)
+                               ) <= COALESCE(geo_radius_km, 50) * 1000.0
+                          )
+                    """
+                    geo_params = (user_lat, user_lon)
+                else:
+                    geo_clause = " AND geo_latitude IS NULL "
+                    geo_params = ()
+
+                query = f"""
                     SELECT id, title, subtitle, image_url, link_url, display_order, text_position,
                            duration_seconds, audience, is_sponsored, sponsor_name
                     FROM banners
@@ -89,9 +131,10 @@ def get_banners():
                       AND audience = %s
                       AND (starts_at IS NULL OR starts_at <= NOW())
                       AND (ends_at   IS NULL OR ends_at   >= NOW())
+                      {geo_clause}
                     ORDER BY display_order ASC, created_at DESC
                 """
-                cur.execute(query, (audience,))
+                cur.execute(query, (audience, *geo_params))
             
             banners = [dict(row) for row in cur.fetchall()]
             
@@ -155,6 +198,11 @@ def create_banner():
                 # Patrocínio (mostra o selo "Patrocinado" + nome do anunciante).
                 'is_sponsored': bool(data.get('is_sponsored', False)),
                 'sponsor_name': (data.get('sponsor_name') or None),
+                # Alcance geográfico. Sem coordenada = banner nacional.
+                'geo_latitude': _coerce_float(data.get('geo_latitude')),
+                'geo_longitude': _coerce_float(data.get('geo_longitude')),
+                'geo_radius_km': _coerce_float(data.get('geo_radius_km')),
+                'geo_city': (data.get('geo_city') or None),
                 'created_at': datetime.now(),
                 'updated_at': datetime.now()
             }
@@ -253,7 +301,7 @@ def update_banner(banner_id):
             update_fields = []
             update_values = []
             
-            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position', 'starts_at', 'ends_at', 'duration_seconds', 'audience', 'is_sponsored', 'sponsor_name']
+            updatable_fields = ['title', 'subtitle', 'image_url', 'link_url', 'is_active', 'display_order', 'text_position', 'starts_at', 'ends_at', 'duration_seconds', 'audience', 'is_sponsored', 'sponsor_name', 'geo_latitude', 'geo_longitude', 'geo_radius_km', 'geo_city']
 
             for field in updatable_fields:
                 if field in data:
@@ -273,6 +321,11 @@ def update_banner(banner_id):
                         value = bool(value)
                     # Nome do anunciante: '' vira NULL.
                     if field == 'sponsor_name' and value in ('', None):
+                        value = None
+                    # Alcance geográfico: números; '' vira NULL (= nacional).
+                    if field in ('geo_latitude', 'geo_longitude', 'geo_radius_km'):
+                        value = _coerce_float(value)
+                    if field == 'geo_city' and value in ('', None):
                         value = None
                     update_values.append(value)
             
