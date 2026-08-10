@@ -754,15 +754,22 @@ def complete_order(order_id):
 
             _resp = {"status": "success", "message": "Pedido entregue com sucesso!"}
             if cash_breakdown:
-                # Resumo do dinheiro pro app mostrar direto (o entregador recebeu
-                # X, a taxa dele é Y, e ele deve Z à plataforma).
+                # Resumo do dinheiro pro app mostrar direto. Tudo com .get():
+                # este bloco roda DEPOIS do commit, então uma chave faltando
+                # derruba a resposta de um pedido que já foi fechado com
+                # sucesso — foi exatamente o que aconteceu na entrega própria.
                 _resp["cash"] = {
-                    "voce_recebeu": cash_breakdown["total_amount"],
-                    "sua_taxa": cash_breakdown["courier_freight"],
-                    "deve_a_plataforma": cash_breakdown["cash_debt"],
-                    "comissao": cash_breakdown["commission"],
-                    "repasse_restaurante": cash_breakdown["restaurant_share"],
+                    "voce_recebeu": cash_breakdown.get("total_amount", 0),
+                    "sua_taxa": cash_breakdown.get("courier_freight", 0),
+                    "deve_a_plataforma": cash_breakdown.get("cash_debt", 0),
+                    "comissao": cash_breakdown.get("commission", 0),
+                    "repasse_restaurante": cash_breakdown.get("restaurant_share", 0),
                 }
+                # Entrega própria: quem fechou foi a LOJA, e o que importa pra
+                # ela é a comissão que ficou devendo (o resto do dinheiro é dela).
+                if cash_breakdown.get("commission_debt"):
+                    _resp["cash"]["comissao_a_pagar"] = cash_breakdown["commission_debt"]
+                    _resp["cash"]["entrega_propria"] = True
             return jsonify(_resp), 200
 
     except Exception as e:

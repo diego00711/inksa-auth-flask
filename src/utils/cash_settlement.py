@@ -156,7 +156,12 @@ def settle_cash_own_delivery(cur, order_id, restaurant_id, total_amount, deliver
         "restaurant_share": 0.0,
         "courier_freight": 0.0,
         "freight_admin": 0.0,
-        # ...é a loja que deve a comissão.
+        # Não há entregador Inksa, então dívida de entregador é zero. A chave
+        # PRECISA existir: quem monta a resposta do /complete lê cash_debt, e
+        # sem ela dava KeyError DEPOIS do commit — o pedido fechava certinho e
+        # o app mostrava "Erro interno do servidor".
+        "cash_debt": 0.0,
+        # ...é a LOJA que deve a comissão.
         "commission_debt": round(commission, 2),
     }
 

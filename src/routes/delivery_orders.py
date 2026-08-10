@@ -291,11 +291,14 @@ def confirm_cash_payment(order_id):
             "status": "success",
             "message": "Recebimento em dinheiro confirmado!",
             "data": {
-                "voce_recebeu": breakdown["total_amount"],
-                "sua_taxa": breakdown["courier_freight"],
-                "deve_a_plataforma": breakdown["cash_debt"],
-                "comissao": breakdown["commission"],
-                "repasse_restaurante": breakdown["restaurant_share"],
+                # .get() por segurança: este resumo é montado DEPOIS do commit,
+                # então chave faltando quebraria a resposta de um pedido que já
+                # foi liquidado com sucesso.
+                "voce_recebeu": breakdown.get("total_amount", 0),
+                "sua_taxa": breakdown.get("courier_freight", 0),
+                "deve_a_plataforma": breakdown.get("cash_debt", 0),
+                "comissao": breakdown.get("commission", 0),
+                "repasse_restaurante": breakdown.get("restaurant_share", 0),
             }
         }), 200
 
