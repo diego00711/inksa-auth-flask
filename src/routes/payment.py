@@ -155,6 +155,39 @@ def _restaurant_is_closed(restaurant_id) -> bool:
         return False
 
 
+def _excede_limite_de_itens(restaurant_id, itens):
+    """(True, mensagem) quando o pedido passa do limite de unidades da loja.
+
+    Pensado pra mercado/supermercado: uma compra grande não cabe numa moto, e
+    quem conhece o próprio catálogo é a loja. `max_order_items` NULL = sem
+    limite, que é o caso de todo mundo hoje.
+
+    Fail-open igual à trava de loja fechada: se não der pra checar, deixa
+    passar — melhor a loja recusar um pedido do que derrubar o checkout de
+    todo mundo por um hiccup de banco.
+    """
+    if not restaurant_id:
+        return False, None
+    try:
+        unidades = sum(int(i.get('quantity') or 0) for i in (itens or []))
+        if unidades <= 0:
+            return False, None
+        r = (supabase_client.table('restaurant_profiles')
+             .select('max_order_items, restaurant_name')
+             .eq('id', str(restaurant_id)).single().execute())
+        limite = (r.data or {}).get('max_order_items')
+        if limite and unidades > int(limite):
+            nome = (r.data or {}).get('restaurant_name') or 'Esta loja'
+            return True, (
+                f"{nome} entrega até {int(limite)} itens por pedido "
+                f"(o seu tem {unidades}). Divida em dois pedidos, por favor."
+            )
+        return False, None
+    except Exception as e:
+        logging.warning(f"⚠️ Não deu pra checar o limite de itens de {restaurant_id}: {e}")
+        return False, None
+
+
 _RESTAURANT_CLOSED_RESPONSE = (
     # "erro" (padrão do payment.py) + "error" (o que o processResponse do app
     # cliente lê) — assim a mensagem amigável aparece de fato no toast.
@@ -211,6 +244,14 @@ def criar_preferencia_mercado_pago():
             logging.info(f"⛔ Pedido barrado: restaurante {dados_pedido.get('restaurant_id')} está fechado.")
             _body, _code = _RESTAURANT_CLOSED_RESPONSE
             return jsonify(_body), _code
+
+        # 🔒 Trava: pedido grande demais pro que a loja consegue entregar.
+        _excede, _msg = _excede_limite_de_itens(
+            dados_pedido.get('restaurant_id'), dados_pedido.get('itens', []))
+        if _excede:
+            logging.info(f"⛔ Pedido barrado por limite de itens: {_msg}")
+            return jsonify({"erro": _msg, "error": _msg,
+                            "error_code": "MAX_ITEMS_EXCEEDED"}), 409
 
         # 🆕 PASSO 1: CRIAR O PEDIDO NO BANCO PRIMEIRO!
         import uuid
@@ -815,6 +856,12 @@ def processar_pagamento_cartao():
             logging.info(f"⛔ Pedido (cartão) barrado: restaurante {d.get('restaurant_id')} está fechado.")
             _body, _code = _RESTAURANT_CLOSED_RESPONSE
             return jsonify(_body), _code
+
+        _excede, _msg = _excede_limite_de_itens(d.get('restaurant_id'), items_req)
+        if _excede:
+            logging.info(f"⛔ Pedido (cartão) barrado por limite de itens: {_msg}")
+            return jsonify({"erro": _msg, "error": _msg,
+                            "error_code": "MAX_ITEMS_EXCEEDED"}), 409
 
         # 1) Cria o pedido (aguardando pagamento)
         import uuid

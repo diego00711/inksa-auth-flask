@@ -56,6 +56,36 @@ logger = logging.getLogger(__name__)
 
 orders_bp = Blueprint('orders', __name__)
 
+
+def _contar_unidades(items):
+    """Total de unidades do pedido, tolerando os 3 formatos de `orders.items`.
+
+    O campo aparece como lista, como string JSON e como objeto aninhado
+    ({"items": [...]}) dependendo de por onde o pedido entrou. Qualquer parse
+    que assuma um formato só devolve 0 nos outros dois — por isso a tolerância
+    fica aqui, num lugar só.
+    """
+    if not items:
+        return 0
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except (json.JSONDecodeError, TypeError):
+            return 0
+    if isinstance(items, dict):
+        items = items.get('items') or []
+    if not isinstance(items, list):
+        return 0
+    total = 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            total += int(it.get('quantity') or it.get('qty') or 1)
+        except (TypeError, ValueError):
+            total += 1
+    return total
+
 DEFAULT_DELIVERY_FEE = 5.0
 
 # Status internos aceitos
@@ -1817,6 +1847,13 @@ def get_available_orders():
                     order_dict['delivery_fee'] = float(order_dict['delivery_fee'])
                 if order_dict.get('valor_repassado_entregador') is not None:
                     order_dict['valor_repassado_entregador'] = float(order_dict['valor_repassado_entregador'])
+
+                # PORTE do pedido: quantas unidades o entregador vai carregar.
+                # Hoje ele aceita às cegas e só descobre o tamanho na porta da
+                # loja — numa compra de mercado isso é viagem perdida. O cálculo
+                # é aqui porque `items` vem em 3 formatos diferentes (lista,
+                # string JSON e {items:[...]}), e o app não deve lidar com isso.
+                order_dict['items_count'] = _contar_unidades(order_dict.get('items'))
 
                 available_orders.append(order_dict)
 

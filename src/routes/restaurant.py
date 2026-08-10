@@ -189,6 +189,7 @@ def handle_profile():
                 'minimum_order', 'payout_frequency', 'bank_name', 'bank_agency',
                 'bank_account_number', 'bank_account_type', 'pix_key', 'pix_key_type',
                 'mp_account_id', 'delivery_type', 'own_delivery_radius_km',
+                'max_order_items',
                 'opening_hours', 'hours_auto'
             ]
             updates = {k: v for k, v in data.items() if k in allowed_fields}
@@ -203,6 +204,16 @@ def handle_profile():
                         float(_r) if _r not in (None, '', 0, '0') and float(_r) > 0 else None)
                 except (TypeError, ValueError):
                     updates['own_delivery_radius_km'] = None
+
+            # Limite de itens: em branco/zero = sem limite. Sem isso, '' iria
+            # pro banco e quebraria o INTEGER.
+            if 'max_order_items' in updates:
+                _m = updates['max_order_items']
+                try:
+                    updates['max_order_items'] = (
+                        int(_m) if _m not in (None, '', 0, '0') and int(_m) > 0 else None)
+                except (TypeError, ValueError):
+                    updates['max_order_items'] = None
             if not updates:
                 return jsonify({"status": "error", "error": "No valid fields to update"}), 400
 
