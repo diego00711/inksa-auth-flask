@@ -170,6 +170,57 @@ def get_analytics_summary(conn):
             "pedidos_cancelados": pedidos_cancelados,
         }
 
+        # 7. Insights acionáveis — o que alimenta a parte de baixo da tela.
+        #    Tudo sai dos pedidos JÁ carregados acima: nenhuma query nova.
+        ticket_medio = round(total_vendas / pedidos_concluidos, 2) if pedidos_concluidos else 0.0
+
+        _total_periodo = pedidos_concluidos + pedidos_cancelados
+        taxa_cancelamento = (
+            round(pedidos_cancelados * 100.0 / _total_periodo, 1) if _total_periodo else 0.0
+        )
+
+        # Top 5 (o card de cima mostra só o 1º; o parceiro precisa da lista pra
+        # decidir compra de insumo e o que empurrar no cardápio).
+        top_itens = [
+            {"nome": nome, "quantidade": qtd}
+            for nome, qtd in Counter(all_item_names).most_common(5)
+        ]
+
+        # Faturamento por hora e por dia da semana: diz quando reforçar a equipe
+        # e quando vale promover.
+        por_hora, por_dow = {}, {}
+        for order in orders:
+            dt = order['created_at']
+            valor = float(order['total_amount'] or 0)
+            por_hora[dt.hour] = por_hora.get(dt.hour, 0.0) + valor
+            por_dow[dt.weekday()] = por_dow.get(dt.weekday(), 0.0) + valor
+
+        vendas_por_hora = [
+            {"hora": h, "total": round(por_hora.get(h, 0.0), 2)} for h in range(24)
+        ]
+        _DIAS = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
+        vendas_por_dia_semana = [
+            {"dia": _DIAS[d], "total": round(por_dow.get(d, 0.0), 2)} for d in range(7)
+        ]
+
+        # Recorrência: clientes com 2+ pedidos no período. Num delivery é a
+        # métrica que mais importa — cliente que volta custa zero pra adquirir.
+        _por_cliente = Counter(o['client_id'] for o in orders if o.get('client_id'))
+        clientes_recorrentes = sum(1 for n in _por_cliente.values() if n >= 2)
+        taxa_recorrencia = (
+            round(clientes_recorrentes * 100.0 / len(_por_cliente), 1) if _por_cliente else 0.0
+        )
+
+        insights = {
+            "ticket_medio": ticket_medio,
+            "taxa_cancelamento": taxa_cancelamento,
+            "top_itens": top_itens,
+            "vendas_por_hora": vendas_por_hora,
+            "vendas_por_dia_semana": vendas_por_dia_semana,
+            "clientes_recorrentes": clientes_recorrentes,
+            "taxa_recorrencia": taxa_recorrencia,
+        }
+
         # Monta resposta final
         summary = {
             "total_vendas": total_vendas,
@@ -177,6 +228,7 @@ def get_analytics_summary(conn):
             "item_mais_vendido": item_mais_vendido,
             "vendas_por_dia": vendas_por_dia,
             "metricas_extras": metricas_extras,
+            "insights": insights,
             "periodo_dias": days_param  # ✅ Retorna o período filtrado
         }
 
