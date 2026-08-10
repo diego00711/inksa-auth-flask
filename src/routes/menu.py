@@ -169,3 +169,142 @@ def upload_menu_item_image():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTAÇÃO DE CATÁLOGO POR PLANILHA
+# Existe por causa de farmácia/mercado/pet: 3 mil a 8 mil itens não se cadastram
+# um a um — o dono desiste no item 40 e o parceiro se perde. O app manda a
+# planilha já parseada (JSON), então aqui só valida e grava.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Teto por chamada. O app fatia em lotes: evita request gigante, timeout do
+# Render e transação longa segurando a tabela.
+_MAX_POR_LOTE = 500
+
+
+def _preco_para_float(valor):
+    """Aceita '12,50', '12.50', 'R$ 12,50' e 1250 (centavos não é suportado
+    de propósito — ambíguo demais). Devolve None se não der pra entender."""
+    if valor is None:
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    t = str(valor).strip().replace("R$", "").replace(" ", "")
+    if not t:
+        return None
+    # "1.234,56" (BR) vs "1234.56" (US): se tem vírgula, ela é o decimal.
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+@menu_bp.route('/import', methods=['POST'])
+@handle_db_errors
+def importar_catalogo(conn):
+    """POST /api/menu/import
+    Body: { "items": [ {name, price, category?, ean?, stock?, description?} ], "dry_run": bool }
+
+    Reconciliação por EAN quando existir; senão por NOME (dentro da loja).
+    Sem isso, reimportar a mesma planilha duplicaria o catálogo inteiro.
+    """
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'restaurant':
+        return jsonify({"status": "error", "error": "Apenas parceiros podem importar catálogo"}), 403
+
+    corpo = request.get_json(silent=True) or {}
+    itens = corpo.get('items') or []
+    dry_run = bool(corpo.get('dry_run'))
+
+    if not isinstance(itens, list) or not itens:
+        return jsonify({"status": "error", "error": "Nenhum item recebido"}), 400
+    if len(itens) > _MAX_POR_LOTE:
+        return jsonify({"status": "error",
+                        "error": f"Máximo {_MAX_POR_LOTE} itens por lote"}), 400
+
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("SELECT id FROM restaurant_profiles WHERE user_id = %s", (user_id,))
+        perfil = cur.fetchone()
+        if not perfil:
+            return jsonify({"status": "error", "error": "Perfil de parceiro não encontrado"}), 404
+        restaurant_id = perfil['id']
+
+        criados = atualizados = 0
+        ignorados = []
+
+        for i, it in enumerate(itens):
+            nome = str(it.get('name') or '').strip()
+            preco = _preco_para_float(it.get('price'))
+            if not nome:
+                ignorados.append({"linha": i + 1, "motivo": "sem nome"})
+                continue
+            if preco is None or preco < 0:
+                ignorados.append({"linha": i + 1, "nome": nome[:40],
+                                  "motivo": f"preço inválido ({it.get('price')!r})"})
+                continue
+
+            ean = (str(it.get('ean') or '').strip() or None)
+            categoria = (str(it.get('category') or '').strip() or 'Geral')
+            descricao = (str(it.get('description') or '').strip() or '')
+            try:
+                estoque = int(it['stock']) if str(it.get('stock', '')).strip() != '' else None
+            except (TypeError, ValueError):
+                estoque = None
+            # Estoque zerado NÃO some do cardápio: fica visível e indisponível,
+            # senão o cliente nunca sabe que a loja trabalha com o produto.
+            disponivel = True if estoque is None else estoque > 0
+
+            if dry_run:
+                continue
+
+            existente = None
+            if ean:
+                cur.execute("SELECT id FROM menu_items WHERE restaurant_id = %s AND ean = %s",
+                            (restaurant_id, ean))
+                existente = cur.fetchone()
+            if not existente:
+                cur.execute("""SELECT id FROM menu_items
+                                WHERE restaurant_id = %s AND LOWER(TRIM(name)) = LOWER(%s)
+                                LIMIT 1""", (restaurant_id, nome))
+                existente = cur.fetchone()
+
+            if existente:
+                # Não sobrescreve a descrição nem a imagem com vazio: o parceiro
+                # pode ter caprichado nelas no app, e a planilha do ERP não tem.
+                cur.execute("""
+                    UPDATE menu_items
+                       SET name = %s, price = %s, category = %s,
+                           description = CASE WHEN %s <> '' THEN %s ELSE description END,
+                           ean = COALESCE(%s, ean), stock = %s,
+                           is_available = %s, updated_at = NOW()
+                     WHERE id = %s
+                """, (nome, preco, categoria, descricao, descricao, ean, estoque,
+                      disponivel, existente['id']))
+                atualizados += 1
+            else:
+                cur.execute("""
+                    INSERT INTO menu_items
+                        (user_id, restaurant_id, name, description, price, category,
+                         is_available, ean, stock)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (user_id, restaurant_id, nome, descricao, preco, categoria,
+                      disponivel, ean, estoque))
+                criados += 1
+
+        if not dry_run:
+            conn.commit()
+
+    return jsonify({
+        "status": "success",
+        "dry_run": dry_run,
+        "recebidos": len(itens),
+        "criados": criados,
+        "atualizados": atualizados,
+        "ignorados": ignorados[:50],
+        "total_ignorados": len(ignorados),
+    }), 200
