@@ -87,6 +87,7 @@ try:
     from src.routes.fcm_routes import fcm_bp
     from src.routes.tracking_routes import tracking_bp
     from src.routes.coupons_routes import coupons_bp
+    from src.routes.whatsapp_bot import whatsapp_bp
     from src.routes.chat_routes import chat_bp
     from src.routes.club_routes import club_bp
     from src.scheduler import start_scheduler
@@ -289,6 +290,9 @@ app.register_blueprint(delivery_bp)
 app.register_blueprint(fcm_bp, url_prefix='/api/profile')
 app.register_blueprint(tracking_bp, url_prefix='/api/deliveries')
 app.register_blueprint(coupons_bp, url_prefix='/api/coupons')
+# Bot do WhatsApp (Cloud API da Meta). Fica inerte enquanto WHATSAPP_TOKEN
+# nao existir, entao pode subir antes da conta da Meta estar pronta.
+app.register_blueprint(whatsapp_bp, url_prefix='/api/whatsapp')
 app.register_blueprint(chat_bp, url_prefix='/api/chat')
 app.register_blueprint(club_bp, url_prefix='/api/club')
 
