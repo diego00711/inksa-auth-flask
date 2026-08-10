@@ -1623,6 +1623,15 @@ def _run_dispatch_tick(cur, settings):
                  AND (dp.vehicle_type NOT IN ('moto','carro')
                       OR (NULLIF(TRIM(dp.vehicle_plate),'') IS NOT NULL AND NULLIF(TRIM(dp.cnh),'') IS NOT NULL))
                  AND NOT (dp.user_id = ANY(%s::uuid[]))
+                 -- Quem já está com uma entrega na rua sai dos candidatos.
+                 -- Sem isso o motor oferecia pedido pra quem estava no meio de
+                 -- outro: ou ele ignorava (e o pedido perdia 30s de oferta à
+                 -- toa) ou aceitava, e o app não dava conta de mostrar as duas.
+                 AND NOT EXISTS (
+                       SELECT 1 FROM orders oa
+                        WHERE oa.delivery_id = dp.id
+                          AND oa.status IN ('accepted_by_delivery', 'delivering')
+                     )
             )
             SELECT user_id, dist,
                    ( %s * (1 - LEAST(dist / NULLIF(raio_m, 0), 1))
@@ -1955,6 +1964,26 @@ def accept_order_by_delivery(order_id):
                 return jsonify({'error': 'Perfil de entregador não encontrado'}), 404
 
             delivery_profile_id = delivery_profile['id']
+
+            # UMA ENTREGA POR VEZ. Nada impedia aceitar um segundo pedido, mas o
+            # app do entregador só sabe mostrar UMA entrega ativa: o segundo
+            # ficava sem rota e sem botão de confirmar, invisível na prática.
+            # Entrega em sequência (2 pedidos numa viagem) é um recurso à parte,
+            # que precisa de fila de paradas no app e de regra de pagamento pro
+            # segundo — enquanto não existe, a trava fica aqui.
+            cur.execute(
+                """SELECT id FROM orders
+                    WHERE delivery_id = %s
+                      AND status IN ('accepted_by_delivery', 'delivering')
+                    LIMIT 1""",
+                (delivery_profile_id,),
+            )
+            if cur.fetchone():
+                logger.info(f"Entregador {delivery_profile_id} já tem entrega ativa — recusando {order_id}")
+                return jsonify({
+                    'error': 'Você já tem uma entrega em andamento. '
+                             'Conclua ela antes de aceitar outra.'
+                }), 409
 
             cur.execute("""
                 SELECT id, status, delivery_id
