@@ -392,7 +392,14 @@ def criar_preferencia_mercado_pago():
                     club_discount += _fee
                 _pct = float(_cb.get('subtotal_discount_pct') or 0)
                 if _pct > 0:
-                    club_discount += round(_sub * _pct / 100.0, 2)
+                    # TETO em reais: a % cresce com o ticket, a comissão não.
+                    # Sem ele, 5% num pedido de R$300 custa R$15 — mais que o
+                    # dobro da receita daquele pedido. 0 = sem teto.
+                    _desc_pct = round(_sub * _pct / 100.0, 2)
+                    _teto = float(_cb.get('max_discount_brl') or 0)
+                    if _teto > 0:
+                        _desc_pct = min(_desc_pct, _teto)
+                    club_discount += _desc_pct
                 club_discount = round(club_discount, 2)
                 club_level_name = _cb.get('level_name')
                 if club_discount > 0:
@@ -840,7 +847,11 @@ def processar_pagamento_cartao():
                 _club_card += float(d.get('delivery_fee', 0) or 0)
             _pct = float(_cb.get('subtotal_discount_pct') or 0)
             if _pct > 0:
-                _club_card += round(float(subtotal_validado or 0) * _pct / 100.0, 2)
+                _desc_pct = round(float(subtotal_validado or 0) * _pct / 100.0, 2)
+                _teto = float(_cb.get('max_discount_brl') or 0)
+                if _teto > 0:
+                    _desc_pct = min(_desc_pct, _teto)
+                _club_card += _desc_pct
             _club_card = round(_club_card, 2)
             if _club_card > 0:
                 total_seguro = round(max(0.0, total_seguro - _club_card), 2)

@@ -128,6 +128,12 @@ def client_checkout_benefits(client_id):
     return {
         "free_delivery": free,
         "subtotal_discount_pct": _bnum(b, "subtotal_discount_pct", 0.0, 100.0),
+        # TETO EM REAIS do desconto percentual. A margem da Inksa é fixa por
+        # pedido (comissão), mas a % cresce junto com o ticket: 5% num pedido de
+        # R$300 custa R$15 de uma vez, mais que o dobro da receita dele. Com o
+        # teto, a pior configuração possível fica limitada.
+        # 0 ou ausente = sem teto (comportamento anterior).
+        "max_discount_brl": _bnum(b, "max_discount_brl", 0.0, None),
         "level_name": st["current"]["name"],
     }
 
