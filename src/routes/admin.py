@@ -123,6 +123,35 @@ def _HOJE_SP(coluna):
             f"= (now() AT TIME ZONE '{tz}')::date")
 
 
+# Espelha a trava do motor de despacho (orders.py `_run_dispatch_tick`, CTE
+# `elegiveis`). Estar "online" NÃO é o mesmo que estar apto a receber pedido:
+# o entregador liga o botão, o app diz que ele está trabalhando, e ele fica
+# fora de todas as ofertas porque falta coordenada ou dado do cadastro. Ele
+# espera a tarde inteira sem entender por quê.
+#
+# ⚠️ A coluna de "está online" é `is_available`. `is_online` existe na tabela
+# mas é ESCRITA UMA VEZ no cadastro (auth.py, sempre False) e nunca mais —
+# contar por ela dá zero pra sempre.
+_GATE_COORD = ("COALESCE(current_lat, latitude) IS NOT NULL "
+               "AND COALESCE(current_lng, longitude) IS NOT NULL")
+_GATE_CADASTRO = ("NULLIF(TRIM(first_name),'') IS NOT NULL "
+                  "AND NULLIF(TRIM(cpf),'') IS NOT NULL "
+                  "AND NULLIF(TRIM(vehicle_type),'') IS NOT NULL "
+                  "AND (vehicle_type NOT IN ('moto','carro') "
+                  "     OR (NULLIF(TRIM(vehicle_plate),'') IS NOT NULL "
+                  "         AND NULLIF(TRIM(cnh),'') IS NOT NULL))")
+_SQL_ENTREGADORES = f"""
+    SELECT
+      COUNT(*) FILTER (WHERE _on)::int                                   AS online,
+      COUNT(*) FILTER (WHERE _on AND {_GATE_COORD} AND {_GATE_CADASTRO})::int AS aptos,
+      COUNT(*) FILTER (WHERE _on AND NOT ({_GATE_COORD}))::int           AS sem_coord,
+      COUNT(*) FILTER (WHERE _on AND {_GATE_COORD}
+                             AND NOT ({_GATE_CADASTRO}))::int            AS incompletos
+      FROM (SELECT *, (is_available IS TRUE AND approved IS TRUE) AS _on
+              FROM delivery_profiles) d
+"""
+
+
 def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     # leitura apenas -> autocommit evita “aborted transaction”
     try: conn.autocommit = True
@@ -308,13 +337,11 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
         conn, f"SELECT COALESCE(SUM(cash_debt),0) FROM {DELIVERY_TABLE} "
               "WHERE COALESCE(cash_debt,0) > 0", default=0.0))
 
-    op["entregadoresOnline"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} WHERE is_online IS TRUE", default=0))
-    # Entregador online SEM coordenada é invisível pro motor de despacho: fica
-    # esperando pedido que nunca chega, e ninguém percebe. Silencioso e caro.
-    op["entregadoresSemCoordenada"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} "
-              "WHERE is_online IS TRUE AND (latitude IS NULL OR longitude IS NULL)", default=0))
+    ent = _fetchrow(conn, _SQL_ENTREGADORES) or {}
+    op["entregadoresOnline"] = _safe_int(ent.get("online"))
+    op["entregadoresAptos"] = _safe_int(ent.get("aptos"))
+    op["entregadoresSemCoordenada"] = _safe_int(ent.get("sem_coord"))
+    op["entregadoresIncompletos"] = _safe_int(ent.get("incompletos"))
 
     # Loja aberta agora: se for zero em horário de pico, não entra pedido
     # nenhum e o motivo não aparece em lugar nenhum.
@@ -864,15 +891,22 @@ def admin_tv_stats():
             _safe_float(today.get("commission")) + _safe_float(today.get("margin")), 2
         )
 
-        deliverymen_online = _safe_int(_fetchval(
-            conn,
-            f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} "
-            f"WHERE is_available IS TRUE AND active IS TRUE",
-            default=0))
+        # "Online" não quer dizer que recebe pedido. `aptos` aplica a mesma
+        # trava do motor de despacho; a diferença entre os dois é gente que
+        # ligou o app e está invisível sem saber.
+        ent = _fetchrow(conn, _SQL_ENTREGADORES) or {}
+        deliverymen_online = _safe_int(ent.get("online"))
+        deliverymen_eligible = _safe_int(ent.get("aptos"))
+
         restaurants_open = _safe_int(_fetchval(
             conn,
             f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} "
             f"WHERE is_open IS TRUE AND active IS TRUE AND approved IS TRUE",
+            default=0))
+        restaurants_live = _safe_int(_fetchval(
+            conn,
+            f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} "
+            f"WHERE active IS TRUE AND approved IS TRUE",
             default=0))
 
         # Placar da base. Antes do lancamento e o unico numero que se move: e o
@@ -896,7 +930,15 @@ def admin_tv_stats():
             "revenueTotal":         k.get("totalRevenue", 0.0),
             "platformRevenueTotal": k.get("platformRevenue", 0.0),
             "deliverymenOnline":    deliverymen_online,
+            "deliverymenEligible":  deliverymen_eligible,
+            "deliverymenNoCoord":   _safe_int(ent.get("sem_coord")),
+            "deliverymenIncomplete": _safe_int(ent.get("incompletos")),
             "restaurantsOpen":      restaurants_open,
+            "restaurantsLive":      restaurants_live,
+
+            # Pendências — o mesmo bloco do dashboard, pra TV virar painel de
+            # status e não só placar. Reaproveita o `operacao` já calculado.
+            "pendencias":           base.get("operacao", {}),
 
             # Base cadastrada (o placar do pre-lancamento)
             "restaurantsTotal":     _safe_int(base_row.get("rest_total")),
