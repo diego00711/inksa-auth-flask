@@ -152,7 +152,7 @@ _SQL_ENTREGADORES = f"""
 """
 
 
-def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
+def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10, with_operacao=False):
     # leitura apenas -> autocommit evita “aborted transaction”
     try: conn.autocommit = True
     except Exception: pass
@@ -314,45 +314,53 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
     # clicável no dashboard que leva direto pra página onde se resolve.
     # Os helpers _fetch* já engolem erro e devolvem default, então uma tabela
     # que mude de schema derruba só o próprio número, não o dashboard.
-    op = {}
+    # `with_operacao=False` por padrão: /metrics, /revenue-series e
+    # /transactions NÃO usam este bloco, e o backend tem 1 worker com o banco
+    # do outro lado do continente — cada query é uma ida-e-volta cara. Só
+    # /overview e /tv/stats (que a TV do escritório chama a cada 30s, 24/7)
+    # pedem o bloco.
+    if with_operacao:
+        # TUDO num round-trip só. Antes eram 9 queries separadas; multiplicado
+        # pelo polling da TV, virava carga constante no worker único.
+        row = _fetchrow(conn, f"""
+            SELECT
+              (SELECT COUNT(*)::int FROM payouts
+                WHERE status IN ('pending','processing'))                    AS repasses,
+              (SELECT COALESCE(SUM(COALESCE(total_net, amount)),0) FROM payouts
+                WHERE status IN ('pending','processing'))                    AS repasses_valor,
+              (SELECT COUNT(*)::int FROM delivery_incidents
+                WHERE resolved_at IS NULL)                                   AS ocorrencias,
+              (SELECT COUNT(*)::int FROM support_tickets
+                WHERE status IN ('open','pending','in_progress'))            AS tickets,
+              -- Dinheiro que a plataforma tem A RECEBER (pedido em dinheiro).
+              (SELECT COALESCE(SUM(commission_debt),0) FROM {RESTAURANTS_TABLE}
+                WHERE COALESCE(commission_debt,0) > 0)                       AS divida_parceiros,
+              (SELECT COALESCE(SUM(cash_debt),0) FROM {DELIVERY_TABLE}
+                WHERE COALESCE(cash_debt,0) > 0)                             AS divida_entregadores,
+              -- Loja aberta agora: zero em horário de pico = nada entra, e o
+              -- motivo não aparecia em lugar nenhum.
+              (SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE}
+                WHERE is_open IS TRUE AND approved IS TRUE AND active IS TRUE) AS lojas_abertas,
+              (SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE}
+                WHERE approved IS TRUE AND active IS TRUE)                   AS lojas_aprovadas
+        """) or {}
+        ent = _fetchrow(conn, _SQL_ENTREGADORES) or {}
 
-    op["parceirosPendentes"] = payload["kpis"]["restaurantsPending"]
-
-    op["repassesPendentes"] = _safe_int(_fetchval(
-        conn, "SELECT COUNT(*)::int FROM payouts WHERE status IN ('pending','processing')", default=0))
-    op["repassesValor"] = _safe_float(_fetchval(
-        conn, "SELECT COALESCE(SUM(COALESCE(total_net, amount)),0) FROM payouts "
-              "WHERE status IN ('pending','processing')", default=0.0))
-
-    op["ocorrenciasAbertas"] = _safe_int(_fetchval(
-        conn, "SELECT COUNT(*)::int FROM delivery_incidents WHERE resolved_at IS NULL", default=0))
-    op["ticketsAbertos"] = _safe_int(_fetchval(
-        conn, "SELECT COUNT(*)::int FROM support_tickets WHERE status IN ('open','pending','in_progress')", default=0))
-
-    # Dinheiro que a plataforma tem A RECEBER (comissão de pedido em dinheiro).
-    op["dividaParceiros"] = _safe_float(_fetchval(
-        conn, f"SELECT COALESCE(SUM(commission_debt),0) FROM {RESTAURANTS_TABLE} "
-              "WHERE COALESCE(commission_debt,0) > 0", default=0.0))
-    op["dividaEntregadores"] = _safe_float(_fetchval(
-        conn, f"SELECT COALESCE(SUM(cash_debt),0) FROM {DELIVERY_TABLE} "
-              "WHERE COALESCE(cash_debt,0) > 0", default=0.0))
-
-    ent = _fetchrow(conn, _SQL_ENTREGADORES) or {}
-    op["entregadoresOnline"] = _safe_int(ent.get("online"))
-    op["entregadoresAptos"] = _safe_int(ent.get("aptos"))
-    op["entregadoresSemCoordenada"] = _safe_int(ent.get("sem_coord"))
-    op["entregadoresIncompletos"] = _safe_int(ent.get("incompletos"))
-
-    # Loja aberta agora: se for zero em horário de pico, não entra pedido
-    # nenhum e o motivo não aparece em lugar nenhum.
-    op["lojasAbertas"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} "
-              "WHERE is_open IS TRUE AND approved IS TRUE AND active IS TRUE", default=0))
-    op["lojasAprovadas"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} "
-              "WHERE approved IS TRUE AND active IS TRUE", default=0))
-
-    payload["operacao"] = op
+        payload["operacao"] = {
+            "parceirosPendentes":        payload["kpis"]["restaurantsPending"],
+            "repassesPendentes":         _safe_int(row.get("repasses")),
+            "repassesValor":             _safe_float(row.get("repasses_valor")),
+            "ocorrenciasAbertas":        _safe_int(row.get("ocorrencias")),
+            "ticketsAbertos":            _safe_int(row.get("tickets")),
+            "dividaParceiros":           _safe_float(row.get("divida_parceiros")),
+            "dividaEntregadores":        _safe_float(row.get("divida_entregadores")),
+            "lojasAbertas":              _safe_int(row.get("lojas_abertas")),
+            "lojasAprovadas":            _safe_int(row.get("lojas_aprovadas")),
+            "entregadoresOnline":        _safe_int(ent.get("online")),
+            "entregadoresAptos":         _safe_int(ent.get("aptos")),
+            "entregadoresSemCoordenada": _safe_int(ent.get("sem_coord")),
+            "entregadoresIncompletos":   _safe_int(ent.get("incompletos")),
+        }
 
     return payload
 
@@ -875,7 +883,7 @@ def admin_tv_stats():
     if not conn:
         return jsonify({"status": "error", "message": "DB connection error"}), 500
     try:
-        base = _build_dashboard_payload(conn, limit=8)
+        base = _build_dashboard_payload(conn, limit=8, with_operacao=True)
         k = base.get("kpis", {})
 
         today = _fetchrow(conn, f"""
@@ -981,7 +989,7 @@ def admin_overview():
     if not conn:
         return jsonify({"status": "error", "message": "DB connection error"}), 500
     try:
-        p = _build_dashboard_payload(conn, date_from, date_to, limit)
+        p = _build_dashboard_payload(conn, date_from, date_to, limit, with_operacao=True)
         return jsonify({"status": "success", "data": {
             "kpis": p["kpis"],
             "chartData": p["chartData"],

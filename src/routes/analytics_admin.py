@@ -64,7 +64,7 @@ def overview():
         return jsonify({"status": "error", "message": "Erro de conexão com banco"}), 500
 
     try:
-        p = _build_dashboard_payload(conn, date_from, date_to, limit)
+        p = _build_dashboard_payload(conn, date_from, date_to, limit, with_operacao=True)
         return jsonify({"status": "success", "data": {
             "kpis": p["kpis"],
             "chartData": p["chartData"],
