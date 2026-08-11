@@ -4,6 +4,7 @@ from flask import Blueprint, request, jsonify, current_app
 import mercadopago
 from supabase import create_client, Client
 import os
+import re
 import logging
 import hmac
 import hashlib
@@ -580,8 +581,28 @@ def criar_preferencia_mercado_pago():
             pdata = prof.data[0] if prof.data else {}
             nome_cliente = f"{pdata.get('first_name') or ''} {pdata.get('last_name') or ''}".strip() or 'Cliente Inksa'
 
+            # CPF é EXIGÊNCIA REGULATÓRIA do PIX, não escolha do Asaas — mas o
+            # cadastro do cliente não pede. Resultado: a maioria dos clientes
+            # não conseguia pagar online e recebia a mensagem crua do Asaas,
+            # que não diz o que fazer. Agora o app pode mandar o CPF no
+            # checkout; se vier, guarda no perfil pra não perguntar de novo.
+            cpf_cliente = re.sub(r'\D', '', str(dados_pedido.get('cpf') or '')) or (pdata.get('cpf') or '')
+            if not cpf_cliente:
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                return jsonify({
+                    "erro": "Para pagar online precisamos do seu CPF. "
+                            "Você pode informá-lo agora ou pagar em dinheiro na entrega.",
+                    "codigo": "cpf_obrigatorio",
+                }), 400
+            if cpf_cliente and cpf_cliente != (pdata.get('cpf') or ''):
+                try:
+                    supabase_client.table('client_profiles').update(
+                        {'cpf': cpf_cliente}).eq('id', client_profile_id).execute()
+                except Exception:
+                    logging.warning("Não deu pra salvar o CPF no perfil — segue o pagamento")
+
             ok_c, customer_or_msg = asaas.get_or_create_customer(
-                nome_cliente, pdata.get('cpf') or '', email=cliente_email,
+                nome_cliente, cpf_cliente, email=cliente_email,
                 external_reference=client_profile_id,
             )
             if not ok_c:
