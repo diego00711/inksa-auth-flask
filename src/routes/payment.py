@@ -40,6 +40,10 @@ if supabase_client is None:
 
 _SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
+# Piso de cobrança do Asaas. É regra DELES, não nossa — vale pra PIX, débito e
+# crédito igualmente. Fica em env var caso mudem: ASAAS_VALOR_MINIMO.
+ASAAS_VALOR_MINIMO = float(os.environ.get("ASAAS_VALOR_MINIMO", "5.00"))
+
 
 def _force_service_role():
     """Re-fixa a service_role no PostgREST do cliente admin antes de escrever.
@@ -555,6 +559,21 @@ def criar_preferencia_mercado_pago():
             if valor_online <= 0:
                 supabase_client.table('orders').delete().eq('id', pedido_id).execute()
                 return jsonify({"erro": "Valor do pedido inválido."}), 400
+
+            # O Asaas recusa cobrança abaixo de R$ 5,00 — PIX, débito e crédito
+            # igualmente. Sem esta checagem o cliente recebia "O provedor de
+            # pagamento recusou a cobrança", que não diz nada e não dá saída.
+            # Pior: o create_checkout_payment ainda tenta CREDIT_CARD quando o
+            # PIX é recusado, então parecia falha dos três meios de pagamento.
+            if valor_online < ASAAS_VALOR_MINIMO:
+                supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                logging.warning(
+                    f"⚠️ Pedido {pedido_id} abaixo do mínimo do Asaas: R${valor_online:.2f}")
+                return jsonify({"erro": (
+                    f"Pagamento online exige pedido de pelo menos "
+                    f"R$ {ASAAS_VALOR_MINIMO:.2f}. Adicione mais itens ou "
+                    f"escolha pagar em dinheiro na entrega."
+                )}), 400
 
             # Dados do cliente (nome + CPF obrigatório no Asaas)
             prof = supabase_client.table('client_profiles').select('first_name,last_name,cpf').eq('id', client_profile_id).execute()
