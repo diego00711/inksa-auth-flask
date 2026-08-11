@@ -252,6 +252,16 @@ def handle_profile():
 
                 set_clauses = [f'"{field}" = %s' for field in update_data.keys()]
                 params = list(update_data.values())
+
+                # Ligar o botão de online É um sinal de vida — precisa carimbar
+                # o heartbeat junto. Sem isto o entregador entrava online com o
+                # último ping antigo e o job de varredura (que desliga quem está
+                # sem sinal há 30 min) o derrubava na primeira passada, poucos
+                # minutos depois. Foi exatamente o que aconteceu no primeiro
+                # teste em produção.
+                if update_data.get('is_available') is True:
+                    set_clauses.append('"last_heartbeat" = NOW()')
+
                 params.append(profile_id)
 
                 query = f"UPDATE delivery_profiles SET {', '.join(set_clauses)}, updated_at = NOW() WHERE id = %s RETURNING *"
