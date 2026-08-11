@@ -280,6 +280,53 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10):
           FROM days ORDER BY d
     """)
 
+    # --------- Operação: o que precisa de AÇÃO agora ---------
+    # KPI é retrovisor; isto é a lista de pendências. Cada item vira um card
+    # clicável no dashboard que leva direto pra página onde se resolve.
+    # Os helpers _fetch* já engolem erro e devolvem default, então uma tabela
+    # que mude de schema derruba só o próprio número, não o dashboard.
+    op = {}
+
+    op["parceirosPendentes"] = payload["kpis"]["restaurantsPending"]
+
+    op["repassesPendentes"] = _safe_int(_fetchval(
+        conn, "SELECT COUNT(*)::int FROM payouts WHERE status IN ('pending','processing')", default=0))
+    op["repassesValor"] = _safe_float(_fetchval(
+        conn, "SELECT COALESCE(SUM(COALESCE(total_net, amount)),0) FROM payouts "
+              "WHERE status IN ('pending','processing')", default=0.0))
+
+    op["ocorrenciasAbertas"] = _safe_int(_fetchval(
+        conn, "SELECT COUNT(*)::int FROM delivery_incidents WHERE resolved_at IS NULL", default=0))
+    op["ticketsAbertos"] = _safe_int(_fetchval(
+        conn, "SELECT COUNT(*)::int FROM support_tickets WHERE status IN ('open','pending','in_progress')", default=0))
+
+    # Dinheiro que a plataforma tem A RECEBER (comissão de pedido em dinheiro).
+    op["dividaParceiros"] = _safe_float(_fetchval(
+        conn, f"SELECT COALESCE(SUM(commission_debt),0) FROM {RESTAURANTS_TABLE} "
+              "WHERE COALESCE(commission_debt,0) > 0", default=0.0))
+    op["dividaEntregadores"] = _safe_float(_fetchval(
+        conn, f"SELECT COALESCE(SUM(cash_debt),0) FROM {DELIVERY_TABLE} "
+              "WHERE COALESCE(cash_debt,0) > 0", default=0.0))
+
+    op["entregadoresOnline"] = _safe_int(_fetchval(
+        conn, f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} WHERE is_online IS TRUE", default=0))
+    # Entregador online SEM coordenada é invisível pro motor de despacho: fica
+    # esperando pedido que nunca chega, e ninguém percebe. Silencioso e caro.
+    op["entregadoresSemCoordenada"] = _safe_int(_fetchval(
+        conn, f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} "
+              "WHERE is_online IS TRUE AND (latitude IS NULL OR longitude IS NULL)", default=0))
+
+    # Loja aberta agora: se for zero em horário de pico, não entra pedido
+    # nenhum e o motivo não aparece em lugar nenhum.
+    op["lojasAbertas"] = _safe_int(_fetchval(
+        conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} "
+              "WHERE is_open IS TRUE AND approved IS TRUE AND active IS TRUE", default=0))
+    op["lojasAprovadas"] = _safe_int(_fetchval(
+        conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} "
+              "WHERE approved IS TRUE AND active IS TRUE", default=0))
+
+    payload["operacao"] = op
+
     return payload
 
 # --------- Auth ---------
