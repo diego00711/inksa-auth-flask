@@ -342,7 +342,23 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10, with_
               (SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE}
                 WHERE is_open IS TRUE AND approved IS TRUE AND active IS TRUE) AS lojas_abertas,
               (SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE}
-                WHERE approved IS TRUE AND active IS TRUE)                   AS lojas_aprovadas
+                WHERE approved IS TRUE AND active IS TRUE)                   AS lojas_aprovadas,
+              -- CLIENTE: "online" aqui não é um botão que ele aperta (não
+              -- existe); é presença — app aberto batendo heartbeat.
+              (SELECT COUNT(*)::int FROM {CLIENTS_TABLE}
+                WHERE last_seen > NOW() - INTERVAL '5 minutes')              AS clientes_online,
+              (SELECT COUNT(*)::int FROM {CLIENTS_TABLE}
+                WHERE (last_seen AT TIME ZONE 'America/Sao_Paulo')::date
+                      = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)      AS clientes_hoje,
+              -- CARRINHO PARADO: montou o pedido e não finalizou. É o número
+              -- que denuncia atrito no checkout ANTES de alguém reclamar —
+              -- cliente que desiste não abre ticket, só some.
+              (SELECT COUNT(*)::int FROM {CLIENTS_TABLE}
+                WHERE COALESCE(cart_items_count, 0) > 0
+                  AND cart_updated_at < NOW() - INTERVAL '15 minutes')       AS carrinhos_parados,
+              (SELECT COALESCE(SUM(cart_value), 0) FROM {CLIENTS_TABLE}
+                WHERE COALESCE(cart_items_count, 0) > 0
+                  AND cart_updated_at < NOW() - INTERVAL '15 minutes')       AS carrinhos_valor
         """) or {}
         ent = _fetchrow(conn, _SQL_ENTREGADORES) or {}
 
@@ -360,6 +376,10 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10, with_
             "entregadoresAptos":         _safe_int(ent.get("aptos")),
             "entregadoresSemCoordenada": _safe_int(ent.get("sem_coord")),
             "entregadoresIncompletos":   _safe_int(ent.get("incompletos")),
+            "clientesOnline":            _safe_int(row.get("clientes_online")),
+            "clientesHoje":              _safe_int(row.get("clientes_hoje")),
+            "carrinhosParados":          _safe_int(row.get("carrinhos_parados")),
+            "carrinhosValor":            _safe_float(row.get("carrinhos_valor")),
         }
 
     return payload

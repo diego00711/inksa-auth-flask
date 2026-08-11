@@ -12,6 +12,70 @@ client_bp = Blueprint('client_bp', __name__)
 logging.basicConfig(level=logging.INFO)
 
 
+@client_bp.route('/heartbeat', methods=['POST', 'OPTIONS'])
+def client_heartbeat():
+    """Sinal de vida do app do cliente + FOTO do carrinho dele.
+
+    O carrinho vive no localStorage do aparelho, então até agora o servidor
+    nunca soube que alguém montou um pedido e desistiu. É o pior tipo de falha:
+    a que o cliente NÃO reclama — ele fecha o app e some.
+
+    Foi exatamente o que aconteceu com o bug do frete (coordenada 0 → "não foi
+    possível calcular"): pro Diego só apareceu porque ele testou na mão. Pro
+    cliente era invisível.
+
+    Com a foto do carrinho, carrinho parado sem pedido novo vira alarme.
+    Best-effort: falhar aqui NUNCA pode atrapalhar o app do cliente.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'client':
+        return jsonify({"error": "Apenas clientes"}), 403
+
+    body = request.get_json(silent=True) or {}
+    try:
+        itens = max(0, min(int(body.get('cart_items') or 0), 999))
+    except (TypeError, ValueError):
+        itens = 0
+    try:
+        valor = round(float(body.get('cart_value') or 0), 2)
+        if valor < 0 or valor > 1_000_000:
+            valor = 0.0
+    except (TypeError, ValueError):
+        valor = 0.0
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "ok"}), 200  # nunca atrapalha o app
+    try:
+        with conn.cursor() as cur:
+            # cart_updated_at só avança quando o carrinho MUDA — assim o "parado
+            # há X min" mede o abandono de verdade, não o último ping.
+            cur.execute("""
+                UPDATE client_profiles
+                   SET last_seen = NOW(),
+                       cart_updated_at = CASE
+                           WHEN COALESCE(cart_items_count, 0) IS DISTINCT FROM %s
+                             OR COALESCE(cart_value, 0) IS DISTINCT FROM %s
+                           THEN NOW() ELSE cart_updated_at END,
+                       cart_items_count = %s,
+                       cart_value = %s
+                 WHERE user_id = %s
+            """, (itens, valor, itens, valor, str(user_id)))
+            conn.commit()
+    except Exception:
+        logging.warning("heartbeat do cliente falhou", exc_info=True)
+        try: conn.rollback()
+        except Exception: pass
+    finally:
+        conn.close()
+    return jsonify({"status": "ok"}), 200
+
+
 def _geocode_client_address(street, neighborhood, city, state):
     """Geocodifica um endereço (Nominatim) com fallback rua+bairro -> bairro+cidade
     -> cidade. Retorna (lat, lng) ou (None, None). Best-effort — nunca lança."""
