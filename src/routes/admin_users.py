@@ -65,6 +65,23 @@ def admin_required(f):
     return decorated_function
 
 
+def _founding_months(cur) -> int:
+    """Meses de duração do selo Fundador (platform_settings, default 6).
+
+    Lido do banco pra você poder mudar a campanha sem deploy — ex.: uma leva
+    de 3 meses no fim do ano. Valor inválido cai no padrão em vez de quebrar
+    a marcação do parceiro.
+    """
+    try:
+        cur.execute(
+            "SELECT value FROM platform_settings WHERE key = 'founding_partner_months'")
+        row = cur.fetchone()
+        meses = int(str(row[0]).strip()) if row and row[0] is not None else 6
+        return meses if 1 <= meses <= 60 else 6
+    except Exception:
+        return 6
+
+
 def get_user_status(user_data):
     """
     Determine user status based on profile data and user_type.
@@ -612,12 +629,41 @@ def update_user(user_id):
             # Selo "Parceiro Fundador" (campanha) — vive em restaurant_profiles.
             # UPDATE por user_id; só afeta linha se o usuário for restaurante.
             if "fundador" in data:
-                cur.execute(
-                    "UPDATE restaurant_profiles SET fundador = %s WHERE user_id = %s",
-                    (bool(data["fundador"]), str(user_id)),
-                )
+                virou_fundador = bool(data["fundador"])
+                if virou_fundador:
+                    # A janela começa AGORA, para este parceiro. Antes era uma
+                    # data fixa global: quem fosse marcado perto do fim ficava
+                    # com sobra de prazo em vez dos meses cheios prometidos.
+                    # Só carimba se ainda não tiver janela — remarcar alguém que
+                    # já é fundador não estende o benefício de novo.
+                    cur.execute("SELECT %s::int AS meses", (_founding_months(cur),))
+                    _meses = cur.fetchone()[0]
+                    cur.execute(
+                        """UPDATE restaurant_profiles
+                              SET fundador = TRUE,
+                                  fundador_desde = COALESCE(fundador_desde, now()),
+                                  fundador_ate   = COALESCE(
+                                      fundador_ate,
+                                      ((now() AT TIME ZONE 'America/Sao_Paulo')
+                                       + (%s || ' months')::interval)::date)
+                            WHERE user_id = %s
+                        RETURNING fundador_ate""",
+                        (_meses, str(user_id)),
+                    )
+                    _row = cur.fetchone()
+                    update_details.append(
+                        f"fundador: -> True (até {_row[0] if _row else '?'})")
+                else:
+                    # Tirar o selo limpa a janela: se for remarcado depois,
+                    # começa uma contagem nova em vez de herdar a antiga.
+                    cur.execute(
+                        """UPDATE restaurant_profiles
+                              SET fundador = FALSE, fundador_desde = NULL, fundador_ate = NULL
+                            WHERE user_id = %s""",
+                        (str(user_id),),
+                    )
+                    update_details.append("fundador: -> False")
                 conn.commit()
-                update_details.append(f"fundador: -> {bool(data['fundador'])}")
 
             # Edição dos dados de perfil pelo admin (modal na tela de Usuários).
             # As COLUNAS vêm de um whitelist fixo por tipo — nunca do input — então

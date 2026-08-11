@@ -253,8 +253,15 @@ def founding_commission_factor(restaurant_id) -> Decimal:
         return Decimal("1")
     try:
         with conn.cursor() as cur:
+            # A janela é POR PARCEIRO (fundador_ate, carimbada na marcação).
+            # A data global `founding_partner_until` fica só como retaguarda
+            # pra quem foi marcado antes de a coluna existir.
             cur.execute(
-                "SELECT COALESCE(fundador, false) FROM restaurant_profiles WHERE id = %s",
+                """SELECT COALESCE(fundador, false),
+                          fundador_ate,
+                          (fundador_ate IS NOT NULL
+                           AND (now() AT TIME ZONE 'America/Sao_Paulo')::date <= fundador_ate)
+                     FROM restaurant_profiles WHERE id = %s""",
                 (str(restaurant_id),),
             )
             row = cur.fetchone()
@@ -267,15 +274,22 @@ def founding_commission_factor(restaurant_id) -> Decimal:
             )
             cfg = {k: v for k, v in cur.fetchall()}
 
-            until = (cfg.get("founding_partner_until") or "").strip()
-            if not until:
-                return Decimal("1")  # sem data = sem promo (fail-safe)
-            cur.execute(
-                "SELECT (now() AT TIME ZONE 'America/Sao_Paulo')::date <= %s::date",
-                (until,),
-            )
-            if not cur.fetchone()[0]:
-                return Decimal("1")  # campanha já encerrada
+            if row[1] is not None:
+                # Tem janela própria: ela manda, e ponto.
+                if not row[2]:
+                    return Decimal("1")  # janela do parceiro encerrada
+            else:
+                # Sem janela própria (marcado antes da migration): cai na data
+                # global. Sem ela, sem promo — fail-safe.
+                until = (cfg.get("founding_partner_until") or "").strip()
+                if not until:
+                    return Decimal("1")
+                cur.execute(
+                    "SELECT (now() AT TIME ZONE 'America/Sao_Paulo')::date <= %s::date",
+                    (until,),
+                )
+                if not cur.fetchone()[0]:
+                    return Decimal("1")  # campanha já encerrada
 
         factor = _to_decimal(cfg.get("founding_partner_factor"), Decimal("0.5"))
         if factor < 0:
