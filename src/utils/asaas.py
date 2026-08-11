@@ -90,7 +90,19 @@ def get_or_create_customer(name: str, cpf: str, email: str | None = None,
     if ok and data.get("data"):
         return True, data["data"][0]["id"]
 
-    body = {"name": (name or "Cliente Inksa").strip()[:100], "cpfCnpj": cpf_digits}
+    body = {
+        "name": (name or "Cliente Inksa").strip()[:100],
+        "cpfCnpj": cpf_digits,
+        # Silencia as notificações do Asaas NO CLIENTE, não só na cobrança.
+        # O `notificationDisabled` que já existia em create_checkout_payment
+        # vale por cobrança; o cadastro do cliente tem o SEU, e sem ele o
+        # Asaas continua mandando "uma cobrança foi gerada para você" e
+        # "seu pagamento foi confirmado" pro e-mail do CLIENTE.
+        # Isso importa por dois motivos: mensagem do Asaas custa taxa de
+        # mensageria, e o app já avisa o cliente por conta própria (push +
+        # tela de acompanhamento) — dois avisos diferentes confundem.
+        "notificationDisabled": True,
+    }
     if email:
         body["email"] = email
     if external_reference:
