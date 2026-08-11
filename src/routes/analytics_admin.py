@@ -38,6 +38,12 @@ def _admin_required():
 def overview():
     """Tudo do dashboard numa chamada só.
 
+    ⚠️ ESTE blueprint é registrado em **/api/analytics** (main.py), NÃO em
+    /api/admin. O painel admin chama /api/admin/* , que é servido pelo
+    `admin.py` — que tem sua própria cópia destas mesmas rotas. Rota nova
+    para o dashboard do admin vai LÁ, não aqui.
+
+
     /metrics, /revenue-series e /transactions chamam _build_dashboard_payload
     cada um por sua conta — ou seja, o dashboard rodava o conjunto INTEIRO de
     queries 3 vezes a cada carregamento. No plano free do Render isso é a maior

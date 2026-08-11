@@ -918,6 +918,43 @@ def admin_tv_stats():
         conn.close()
 
 
+@admin_bp.route("/overview", methods=["GET", "OPTIONS"])
+@admin_required
+def admin_overview():
+    """Dashboard inteiro numa chamada só.
+
+    /metrics, /revenue-series e /transactions montam o MESMO payload cada um
+    por sua conta — o conjunto inteiro de queries rodava 3x por carregamento.
+
+    ATENÇÃO ao mexer aqui: existe um `analytics_admin.py` com uma cópia
+    paralela destas rotas, mas ele é registrado em **/api/analytics**, não em
+    /api/admin. O front do admin fala com ESTE arquivo.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    date_from = request.args.get("from")
+    date_to   = request.args.get("to")
+    limit     = int(request.args.get("limit", 20))
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "DB connection error"}), 500
+    try:
+        p = _build_dashboard_payload(conn, date_from, date_to, limit)
+        return jsonify({"status": "success", "data": {
+            "kpis": p["kpis"],
+            "chartData": p["chartData"],
+            "recentOrders": p["recentOrders"],
+            # ordersStatus mora FORA de kpis. O front lia kpis.ordersStatus, que
+            # nunca existiu — era por isso que a rosca "Pedidos por Status"
+            # jamais aparecia. Aqui vai no nível certo.
+            "ordersStatus": p["ordersStatus"],
+            "clientsGrowth": p["clientsGrowth"],
+            "operacao": p.get("operacao", {}),
+        }}), 200
+    finally:
+        conn.close()
+
+
 @admin_bp.route("/metrics", methods=["GET", "OPTIONS"])
 @admin_required
 def admin_metrics():
