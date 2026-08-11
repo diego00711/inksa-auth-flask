@@ -46,6 +46,51 @@ def _init_firebase() -> bool:
         return False
 
 
+def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> dict:
+    """Envia a MESMA notificação pra vários clientes de uma vez.
+
+    `destinos` = lista de (client_profile_id, fcm_token).
+
+    Devolve {enviados, falhas, invalidos:[client_ids]} — os inválidos são
+    tokens que o FCM recusou (app desinstalado); quem chama deve limpá-los,
+    senão a base de tokens só cresce com lixo.
+
+    Diferente do envio individual, aqui vale a REGRA DE FREQUÊNCIA: quem
+    chama já filtrou quem pode receber hoje. Notificação de campanha é a
+    única coisa que faz o cliente desinstalar o app — e cliente que
+    desinstala não volta.
+    """
+    resultado = {"enviados": 0, "falhas": 0, "invalidos": []}
+    if not destinos:
+        return resultado
+    if not _init_firebase():
+        logger.warning("FCM: campanha ignorada — firebase não inicializado")
+        resultado["falhas"] = len(destinos)
+        return resultado
+
+    payload = {k: str(v) for k, v in (data or {}).items()}
+    for client_id, token in destinos:
+        if not token:
+            continue
+        try:
+            messaging.send(messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                data=payload,
+                token=token,
+            ))
+            resultado["enviados"] += 1
+        except messaging.UnregisteredError:
+            # App desinstalado ou token trocado: marca pra limpeza.
+            resultado["invalidos"].append(client_id)
+        except Exception as e:
+            logger.warning("FCM campanha: falha em %s: %s", str(client_id)[:8], e)
+            resultado["falhas"] += 1
+
+    logger.info("FCM campanha: %d enviados, %d falhas, %d inválidos",
+                resultado["enviados"], resultado["falhas"], len(resultado["invalidos"]))
+    return resultado
+
+
 def send_push_notification(token: str, title: str, body: str, data: dict = None) -> bool:
     """Envia push notification via FCM usando firebase_admin. Retorna True se sucesso."""
     if not token:

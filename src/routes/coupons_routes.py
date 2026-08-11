@@ -14,6 +14,134 @@ logger = logging.getLogger(__name__)
 coupons_bp = Blueprint('coupons', __name__)
 
 
+def _texto_do_cupom(cupom, loja):
+    """Título e corpo do push. Fala do BENEFÍCIO, não do cupom.
+
+    "cupom criado" não diz nada pro cliente; "R$ 10 off na Higas Japan" diz.
+    E o nome da loja no título é o que faz ele reconhecer que é um lugar
+    onde ele já comeu — sem isso vira propaganda de desconhecido.
+    """
+    tipo = (cupom.get('discount_type') or '').lower()
+    try:
+        valor = float(cupom.get('discount_value') or 0)
+    except (TypeError, ValueError):
+        valor = 0.0
+
+    if tipo == 'free_delivery':
+        beneficio = 'frete grátis'
+    elif tipo == 'percentage':
+        beneficio = f'{valor:.0f}% de desconto'.replace('.0%', '%')
+    else:
+        beneficio = f'R$ {valor:.2f} de desconto'.replace('.', ',')
+
+    minimo = ''
+    try:
+        mv = float(cupom.get('min_order_value') or 0)
+        if mv > 0:
+            minimo = f' em pedidos acima de R$ {mv:.2f}'.replace('.', ',')
+    except (TypeError, ValueError):
+        pass
+
+    return (
+        f'{beneficio} na {loja}',
+        f'Use o código {cupom.get("code")}{minimo}. Aproveitar agora?',
+    )
+
+
+def _anunciar_cupom(cupom, restaurant_id):
+    """Avisa por push os clientes que JÁ PEDIRAM nesta loja.
+
+    Três travas, e cada uma existe por um motivo:
+
+    1. SÓ QUEM JÁ PEDIU AQUI. Push de loja desconhecida é propaganda; push da
+       hamburgueria onde a pessoa já comeu é serviço. Essa diferença decide
+       se ela mantém ou silencia o app.
+    2. TETO DIÁRIO (push_campaign_daily_cap, padrão 1). O concorrente manda 6
+       em 96 minutos — funciona com milhões de usuários, onde perder uma
+       fatia é aceitável. Com 19 clientes, cada um que silencia é 5% da base,
+       e quem desliga não religa.
+    3. UMA VEZ POR CUPOM. Índice único no banco: reenviar o mesmo cupom é
+       impossível, mesmo que a rota seja chamada duas vezes.
+
+    Nunca lança: falha aqui não pode desfazer a criação do cupom.
+    """
+    from ..services.notification_service import send_campaign
+
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT restaurant_name FROM restaurant_profiles WHERE id = %s",
+                        (str(restaurant_id),))
+            row = cur.fetchone()
+            loja = (row and row['restaurant_name']) or 'sua loja favorita'
+
+            try:
+                cur.execute("SELECT value FROM platform_settings WHERE key = 'push_campaign_daily_cap'")
+                r = cur.fetchone()
+                teto = int(str(r['value']).strip()) if r else 1
+            except Exception:
+                teto = 1
+            if teto <= 0:
+                return  # campanhas desligadas
+
+            campanha = f"coupon:{cupom.get('id')}"
+            cur.execute("""
+                SELECT cp.id, cp.fcm_token
+                  FROM client_profiles cp
+                 WHERE NULLIF(TRIM(cp.fcm_token), '') IS NOT NULL
+                   -- já pediu NESTA loja
+                   AND EXISTS (SELECT 1 FROM orders o
+                                WHERE o.client_id = cp.id
+                                  AND o.restaurant_id = %s
+                                  AND o.status NOT IN ('cancelled','canceled','awaiting_payment'))
+                   -- não estourou o teto de campanhas de hoje
+                   AND (SELECT COUNT(*) FROM push_campaign_log l
+                         WHERE l.client_id = cp.id
+                           AND (l.sent_at AT TIME ZONE 'America/Sao_Paulo')::date
+                               = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) < %s
+                   -- ainda não recebeu ESTE cupom
+                   AND NOT EXISTS (SELECT 1 FROM push_campaign_log l2
+                                    WHERE l2.client_id = cp.id AND l2.campanha = %s)
+            """, (str(restaurant_id), teto, campanha))
+            destinos = [(r['id'], r['fcm_token']) for r in cur.fetchall()]
+
+            if not destinos:
+                logger.info("Cupom %s: nenhum cliente elegível pra push", cupom.get('code'))
+                return
+
+            titulo, corpo = _texto_do_cupom(cupom, loja)
+            res = send_campaign(destinos, titulo, corpo, {
+                'type': 'coupon', 'coupon_code': cupom.get('code'),
+                'restaurant_id': str(restaurant_id), 'url': '/',
+            })
+
+            # Registra só quem REALMENTE recebeu — senão o teto do dia seria
+            # consumido por envio que falhou.
+            invalidos = set(res.get('invalidos') or [])
+            enviados = [cid for cid, _ in destinos if cid not in invalidos]
+            if enviados:
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO push_campaign_log (client_id, campanha, tipo) VALUES %s "
+                    "ON CONFLICT (client_id, campanha) DO NOTHING",
+                    [(cid, campanha, 'coupon') for cid in enviados])
+            # Token que o FCM recusou = app desinstalado. Limpa pra base não
+            # encher de lixo e pro contador de "clientes com push" ser honesto.
+            if invalidos:
+                cur.execute("UPDATE client_profiles SET fcm_token = NULL WHERE id = ANY(%s::uuid[])",
+                            ([str(c) for c in invalidos],))
+            conn.commit()
+            logger.info("Cupom %s anunciado: %d enviados de %d elegíveis",
+                        cupom.get('code'), res.get('enviados', 0), len(destinos))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _table_exists(cur) -> bool:
     """Verifica se a tabela coupons existe."""
     try:
@@ -364,6 +492,13 @@ def create_my_coupon():
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
                 return jsonify({"error": f"Voce ja tem um cupom com o codigo {code}"}), 409
+        # Avisa quem já é cliente DESTA loja. Fora da transação de propósito:
+        # falha de push jamais pode desfazer a criação do cupom.
+        try:
+            _anunciar_cupom(novo, rid)
+        except Exception:
+            logger.warning("Falha ao anunciar cupom por push", exc_info=True)
+
         return jsonify({"success": True, "coupon": novo}), 201
     except Exception as e:
         logger.error(f"Erro em create_my_coupon: {e}", exc_info=True)
