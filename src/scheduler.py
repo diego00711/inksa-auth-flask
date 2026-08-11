@@ -247,6 +247,61 @@ def _close_stale_restaurants_job() -> None:
                 pass
 
 
+def _offline_stale_couriers_job() -> None:
+    """Desliga entregadores 'online' que pararam de dar sinal de vida.
+
+    `is_available` era pegajosa: só voltava a false pelo botão de sair ou pelo
+    timer de inatividade do app — que morre junto com o app. Resultado prático
+    medido em 2026-08-10: entregador marcado online havia 25 horas. O painel
+    contava gente que não estava trabalhando, e o motor de despacho gastava
+    oferta de pedido com quem não ia responder.
+
+    TOLERÂNCIA FOLGADA (30 min) de propósito: desligar cedo demais tira da rua
+    quem ESTÁ trabalhando e só ficou sem rede um instante. O custo de deixar um
+    fantasma 30 min a mais é bem menor que o de derrubar um entregador real.
+
+    Entregador com entrega em curso NUNCA é desligado, mesmo sem heartbeat —
+    ele está com o pedido na mão; sumir com ele do sistema seria pior.
+    """
+    from .utils.helpers import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("[COURIER] Sem conexao ao banco — job abortado")
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE delivery_profiles dp
+                      SET is_available = false
+                    WHERE dp.is_available IS TRUE
+                      AND (dp.last_heartbeat IS NULL
+                           OR dp.last_heartbeat < NOW() - INTERVAL '30 minutes')
+                      AND NOT EXISTS (
+                            SELECT 1 FROM orders o
+                             WHERE o.delivery_id = dp.id
+                               AND o.status IN ('accepted_by_delivery', 'delivering')
+                          )"""
+            )
+            desligados = cur.rowcount
+            conn.commit()
+        if desligados:
+            logger.info("[COURIER] %d entregador(es) desligados por inatividade", desligados)
+    except Exception:
+        logger.exception("[COURIER] Erro no job de desligamento por inatividade")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _expire_awaiting_restaurant_incidents_job() -> None:
     """Ocorrências 'awaiting_restaurant' (esperando o restaurante dizer se quer a
     devolução) que passaram do prazo caem pro DESCARTE — libera o entregador,
@@ -359,6 +414,16 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=120,
     )
     logger.info("[SCHEDULER] Fechamento por inatividade: a cada 10 minutos")
+    _scheduler.add_job(
+        func=_offline_stale_couriers_job,
+        trigger="interval",
+        minutes=10,
+        id="offline_stale_couriers",
+        name="Desliga entregadores online sem heartbeat recente",
+        replace_existing=True,
+        misfire_grace_time=120,
+    )
+    logger.info("[SCHEDULER] Entregador offline por inatividade: a cada 10 minutos")
     _scheduler.add_job(
         func=_expire_awaiting_restaurant_incidents_job,
         trigger="interval",

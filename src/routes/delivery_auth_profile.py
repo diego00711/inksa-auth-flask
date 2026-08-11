@@ -48,6 +48,84 @@ def delivery_token_required(f):
     return decorated_function
 
 # ==============================================
+# HEARTBEAT
+# ==============================================
+@delivery_auth_profile_bp.route('/heartbeat', methods=['POST', 'OPTIONS'])
+@delivery_token_required
+def delivery_heartbeat():
+    """Sinal de vida do app do entregador enquanto ele está online.
+
+    Existe porque `is_available` era uma flag PEGAJOSA: o entregador ligava o
+    botão e ela só voltava a false se ele deslogasse pelo menu ou se o timer de
+    inatividade (JS, dentro do layout) chegasse ao fim com o app ABERTO. App
+    fechado, celular que mata o processo, bateria acabando — nada disso
+    desligava. Havia entregador "online" há 25 horas.
+
+    Um job no scheduler desliga quem parou de bater. Mesmo desenho do
+    `/api/restaurant/heartbeat`, que já resolve isso do lado da loja.
+
+    Aceita lat/lng opcionais: assim o mesmo ping que prova que ele está vivo
+    também alimenta `current_lat/lng`, que é o que o motor de despacho usa pra
+    achar quem está perto. Sem isso o entregador aparece online e não recebe
+    nada.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    body = request.get_json(silent=True) or {}
+    lat, lng = body.get('latitude'), body.get('longitude')
+    try:
+        lat = float(lat) if lat is not None else None
+        lng = float(lng) if lng is not None else None
+        # Coordenada fora do mundo é lixo: ignora em vez de gravar e sumir com
+        # o entregador do raio.
+        if lat is not None and not (-90 <= lat <= 90):
+            lat = None
+        if lng is not None and not (-180 <= lng <= 180):
+            lng = None
+    except (TypeError, ValueError):
+        lat = lng = None
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão com o banco"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if lat is not None and lng is not None:
+                cur.execute("""
+                    UPDATE delivery_profiles
+                       SET last_heartbeat = NOW(),
+                           current_lat = %s, current_lng = %s,
+                           location_updated_at = NOW()
+                     WHERE user_id = %s
+                 RETURNING is_available
+                """, (lat, lng, g.user_auth_id))
+            else:
+                cur.execute("""
+                    UPDATE delivery_profiles
+                       SET last_heartbeat = NOW()
+                     WHERE user_id = %s
+                 RETURNING is_available
+                """, (g.user_auth_id,))
+            row = cur.fetchone()
+            conn.commit()
+        if not row:
+            return jsonify({"error": "Perfil não encontrado"}), 404
+        # Devolve o estado do servidor: se o job desligou o entregador, o app
+        # descobre no ping seguinte e corrige o botão sozinho.
+        return jsonify({"status": "success", "data": {"is_available": row["is_available"]}}), 200
+    except Exception:
+        logger.exception("Erro no heartbeat do entregador")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({"error": "Erro ao registrar heartbeat"}), 500
+    finally:
+        conn.close()
+
+
+# ==============================================
 # CLASSES E FUNÇÕES AUXILIARES
 # ==============================================
 class CustomJSONEncoder(json.JSONEncoder):
