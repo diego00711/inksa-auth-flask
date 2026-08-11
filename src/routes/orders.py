@@ -1563,6 +1563,10 @@ def _run_dispatch_tick(cur, settings):
           JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
          WHERE o.delivery_id IS NULL
            AND o.status IN ('ready', 'accepted_by_delivery')
+           -- ENTREGA PRÓPRIA não entra no despacho: a loja entrega com gente
+           -- dela. Sem isto o motor ofertava o pedido a entregador Inksa, que
+           -- ia até o balcão buscar algo que não é dele. NULL = 'platform'.
+           AND COALESCE(rp.delivery_type, 'platform') <> 'own'
            AND rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL
            AND (o.offer_courier_id IS NULL OR o.offer_expires_at <= NOW())
          ORDER BY o.created_at ASC
@@ -1831,6 +1835,9 @@ def get_available_orders():
                 WHERE
                     (o.status = 'ready' OR o.status = 'accepted_by_delivery')
                     AND o.delivery_id IS NULL
+                    -- Pedido de loja com ENTREGA PRÓPRIA nunca aparece pro
+                    -- entregador Inksa. Mesma trava do motor de despacho.
+                    AND COALESCE(rp.delivery_type, 'platform') <> 'own'
                     {radius_clause}{offer_clause}
                 ORDER BY o.created_at ASC;
             """
@@ -1986,14 +1993,26 @@ def accept_order_by_delivery(order_id):
                 }), 409
 
             cur.execute("""
-                SELECT id, status, delivery_id
-                FROM orders
-                WHERE id = %s
+                SELECT o.id, o.status, o.delivery_id,
+                       COALESCE(rp.delivery_type, 'platform') AS delivery_type
+                FROM orders o
+                LEFT JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
+                WHERE o.id = %s
             """, (str(order_id),))
             order = cur.fetchone()
             if not order:
                 logger.error(f"Pedido {order_id} não encontrado")
                 return jsonify({'error': 'Pedido não encontrado'}), 404
+
+            # Trava final da entrega própria. O despacho e a listagem já
+            # excluem esses pedidos, mas um app com lista velha em cache ainda
+            # conseguiria aceitar — e aí o pedido ficaria preso a um entregador
+            # Inksa que a loja não vai usar.
+            if order['delivery_type'] == 'own':
+                logger.warning(f"Pedido {order_id} é de loja com entrega própria — recusando aceite")
+                return jsonify({
+                    'error': 'Este pedido é de uma loja que faz a própria entrega.'
+                }), 409
 
             if order['status'] not in ['ready', 'accepted_by_delivery']:
                 logger.warning(f"Pedido {order_id} não está disponível. Status: {order['status']}")
