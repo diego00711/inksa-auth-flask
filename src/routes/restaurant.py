@@ -190,6 +190,11 @@ def handle_profile():
                 'bank_account_number', 'bank_account_type', 'pix_key', 'pix_key_type',
                 'mp_account_id', 'delivery_type', 'own_delivery_radius_km',
                 'max_order_items',
+                # accepts_cash faltava aqui: o app mandava, o filtro descartava
+                # sem avisar, a tela dizia "salvo" e o cliente continuava vendo
+                # a opção de dinheiro. Whitelist que engole campo em silêncio é
+                # pior que erro — ninguém tem como perceber.
+                'accepts_cash',
                 'opening_hours', 'hours_auto'
             ]
             updates = {k: v for k, v in data.items() if k in allowed_fields}
