@@ -46,6 +46,56 @@ def _init_firebase() -> bool:
         return False
 
 
+def status_firebase() -> dict:
+    """Diz se o backend CONSEGUE enviar push, e por quê não, quando não consegue.
+
+    Sem isto a única forma de descobrir que falta o arquivo de credenciais era
+    ler o log do Render: `_init_firebase()` devolve False, `send_push_*`
+    devolve False, e ninguém acima olha esse retorno. Push que não sai não
+    deixa rastro em lugar nenhum — some sem virar problema.
+    """
+    prod = os.path.exists(_PROD_CRED_PATH)
+    dev = os.path.exists(os.path.normpath(_DEV_CRED_PATH))
+    ok = _init_firebase()
+    return {
+        "pode_enviar": ok,
+        "credencial_producao": prod,      # /etc/secrets/... (Secret File do Render)
+        "credencial_local": dev,
+        "caminho_producao": _PROD_CRED_PATH,
+        "motivo": None if ok else (
+            "arquivo de credenciais não encontrado"
+            if not (prod or dev)
+            else "arquivo existe mas o firebase_admin não inicializou (veja o log)"
+        ),
+    }
+
+
+def enviar_teste(token: str) -> dict:
+    """Push de teste com o motivo da falha DE VOLTA, não só um bool.
+
+    send_push_notification devolve True/False e joga a exceção no log. Pra
+    diagnosticar um envio que não chega, o texto do erro do FCM é a única
+    coisa que importa — então aqui ele sobe junto.
+    """
+    st = status_firebase()
+    if not st["pode_enviar"]:
+        return {"enviado": False, "erro": st["motivo"], "status": st}
+    try:
+        message_id = messaging.send(messaging.Message(
+            notification=messaging.Notification(
+                title="Inksa — teste de notificação",
+                body="Se você está lendo isso, o push está funcionando de ponta a ponta.",
+            ),
+            data={"tipo": "teste"},
+            token=token,
+        ))
+        return {"enviado": True, "message_id": message_id, "status": st}
+    except messaging.UnregisteredError:
+        return {"enviado": False, "erro": "token recusado pelo FCM (app desinstalado ou token trocado)", "status": st}
+    except Exception as e:
+        return {"enviado": False, "erro": f"{type(e).__name__}: {e}", "status": st}
+
+
 def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> dict:
     """Envia a MESMA notificação pra vários clientes de uma vez.
 

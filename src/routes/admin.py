@@ -1125,7 +1125,7 @@ def admin_reports_export():
 
         fname = f"relatorio_{date_from or 'inicio'}_{date_to or 'hoje'}.csv"
         return Response(
-            "﻿" + buf.getvalue(),  # BOM: Excel pt-BR abre os acentos certos
+            "" + buf.getvalue(),  # BOM: Excel pt-BR abre os acentos certos
             mimetype="text/csv; charset=utf-8",
             headers={"Content-Disposition": f"attachment; filename={fname}"},
         )
@@ -1741,3 +1741,74 @@ def check_asaas_integration():
         "payout_provider": (os.environ.get("PAYOUT_PROVIDER") or "mock").strip().lower(),
         "webhook_token_configurado": bool(os.environ.get("ASAAS_WEBHOOK_TOKEN")),
     }), 200
+
+
+@admin_bp.route("/integrations/push/check", methods=["GET"])
+@admin_required
+def check_push_integration():
+    """Diz se o push está de pé DOS DOIS LADOS: credencial no servidor e tokens no banco.
+
+    Mesma armadilha do /integrations/asaas/check: dava pra ter tudo "certo" no
+    código e nada funcionando. Do lado do aparelho, o token só existia se cinco
+    coisas dessem certo em sequência; do lado do servidor, faltando o Secret
+    File do Firebase o envio devolve False e ninguém acima olha esse retorno.
+    Push que não sai não vira erro em lugar nenhum.
+    """
+    from ..services.notification_service import status_firebase
+
+    st = status_firebase()
+    conn = get_db_connection()
+    try:
+        tokens = {}
+        for rotulo, tabela in (("clientes", CLIENTS_TABLE),
+                               ("parceiros", RESTAURANTS_TABLE),
+                               ("entregadores", DELIVERY_TABLE)):
+            tokens[rotulo] = {
+                "com_token": _safe_int(_fetchval(
+                    conn, f"SELECT COUNT(*) FROM {tabela} WHERE COALESCE(fcm_token,'') <> ''", default=0)),
+                "total": _safe_int(_fetchval(conn, f"SELECT COUNT(*) FROM {tabela}", default=0)),
+            }
+    finally:
+        conn.close()
+
+    return jsonify({
+        "status": "success",
+        "servidor": st,
+        "aparelhos": tokens,
+        "pronto": st["pode_enviar"] and any(v["com_token"] > 0 for v in tokens.values()),
+    }), 200
+
+
+@admin_bp.route("/integrations/push/test", methods=["POST"])
+@admin_required
+def test_push_send():
+    """Dispara um push de teste pra um usuário e devolve o MOTIVO se falhar.
+
+    Body: {"user_id": "<uuid>", "user_type": "client|restaurant|delivery"}
+    """
+    from ..services.notification_service import enviar_teste
+
+    body = request.get_json(silent=True) or {}
+    user_id = (body.get("user_id") or "").strip()
+    user_type = (body.get("user_type") or "client").strip().lower()
+    tabela = {"client": CLIENTS_TABLE,
+              "restaurant": RESTAURANTS_TABLE,
+              "delivery": DELIVERY_TABLE}.get(user_type)
+    if not user_id or not tabela:
+        return jsonify({"status": "error", "message": "Informe user_id e user_type válido."}), 400
+
+    conn = get_db_connection()
+    try:
+        token = _fetchval(conn, f"SELECT fcm_token FROM {tabela} WHERE id = %s", (user_id,))
+    finally:
+        conn.close()
+
+    if not token:
+        return jsonify({"status": "error", "message": "Esse usuário não tem token salvo — o aparelho dele nunca registrou."}), 404
+
+    resultado = enviar_teste(token)
+    log_admin_action_auto(
+        "PushTest",
+        f"{user_type} {user_id} — enviado={resultado.get('enviado')} {resultado.get('erro') or ''}".strip(),
+    )
+    return jsonify({"status": "success" if resultado.get("enviado") else "error", **resultado}), 200
