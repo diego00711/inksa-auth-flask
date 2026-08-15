@@ -15,7 +15,14 @@ support_bp = Blueprint("support_bp", __name__)
 
 VALID_STATUS = {"aberto", "aguardando", "andamento", "resolvido"}
 VALID_PRIORITY = {"Baixo", "Médio", "Alto", "Crítico"}
-VALID_CATEGORY = {"Dúvida", "Pagamento", "Pedido", "Entrega", "Cardápio", "Conta", "Técnico", "Outro"}
+# "Integração" entrou junto com a aba Integração do app do Parceiro. Sem ela na
+# lista, a categoria cairia no fallback silencioso logo abaixo e viraria
+# "Dúvida" — o pedido de integração se perderia no meio dos tickets comuns,
+# sem erro nenhum pra denunciar.
+# "Financeiro" já era oferecida no app do Parceiro e NÃO estava aqui: quem
+# escolhia caía no mesmo fallback e via o ticket arquivado como "Dúvida".
+VALID_CATEGORY = {"Dúvida", "Pagamento", "Pedido", "Entrega", "Cardápio", "Financeiro",
+                  "Conta", "Técnico", "Integração", "Outro"}
 
 
 def _auth_required():
