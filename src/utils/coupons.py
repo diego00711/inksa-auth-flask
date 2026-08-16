@@ -12,7 +12,8 @@ que o desconto mostrado ao cliente seja EXATAMENTE o desconto cobrado.
 Regras (tudo configurável pelo admin, tabela `coupons`):
   - is_active = true
   - valid_until >= agora (se preenchido)
-  - uses_count < max_uses (se preenchido)
+  - uses_count < max_uses (se preenchido)          <- teto GLOBAL
+  - usos do cliente < max_uses_per_client (idem)   <- teto POR PESSOA
   - subtotal >= min_order_value (se preenchido)
   - desconto por tipo:
       percentage    -> subtotal * value/100        (limitado ao subtotal)
@@ -45,7 +46,60 @@ def _to_float(v, default=0.0):
         return default
 
 
-def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=None):
+def contar_usos_do_cliente(coupon_id, client_id, cur=None):
+    """Quantas vezes ESTE cliente já usou ESTE cupom.
+
+    Passe `cur` quando já houver um cursor aberto (evita segunda conexão);
+    sem ele, abre a sua própria.
+
+    Devolve 0 quando não dá pra saber — sem cliente identificado, ou se a
+    consulta falhar. Fail-open de propósito: quem realmente barra é o
+    fechamento do pedido, onde o cliente SEMPRE está autenticado. No preview do
+    carrinho, na pior das hipóteses a pessoa vê "cupom válido" e leva a recusa
+    no fechamento; o contrário — recusar cupom legítimo porque o banco piscou —
+    é pior, porque ela desiste do pedido.
+    """
+    if not coupon_id or not client_id:
+        return 0
+
+    sql = ("SELECT COUNT(*) FROM public.coupon_redemptions "
+           "WHERE coupon_id = %s AND client_id = %s")
+    args = (str(coupon_id), str(client_id))
+
+    if cur is not None:
+        try:
+            cur.execute(sql, args)
+            row = cur.fetchone()
+            return int((row[0] if row else 0) or 0)
+        except Exception as exc:
+            logger.warning("Falha ao contar usos do cupom %s pelo cliente %s: %s",
+                           coupon_id, client_id, exc)
+            return 0
+
+    from .helpers import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return 0
+        with conn.cursor() as c:
+            c.execute(sql, args)
+            row = c.fetchone()
+            return int((row[0] if row else 0) or 0)
+    except Exception as exc:
+        logger.warning("Falha ao contar usos do cupom %s pelo cliente %s: %s",
+                       coupon_id, client_id, exc)
+        return 0
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=None,
+                    usos_deste_cliente=0):
     """Valida um cupom já buscado (dict da linha) e calcula o desconto.
 
     `coupon` pode vir do psycopg2 (DictCursor) ou do supabase (select '*') —
@@ -89,6 +143,21 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=
         return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
                 "message": "Este cupom atingiu o limite de usos"}
 
+    # Teto POR PESSOA. Sem ele, o mesmo cliente podia usar o cupom todo dia e
+    # esgotar sozinho o teto global — numa promoção de captação, é o cliente
+    # antigo consumindo o orçamento feito pra trazer gente nova.
+    por_cliente = coupon.get('max_uses_per_client')
+    if por_cliente is not None:
+        try:
+            limite = int(por_cliente)
+        except (TypeError, ValueError):
+            limite = 0
+        if limite > 0 and int(usos_deste_cliente or 0) >= limite:
+            msg = ("Você já usou este cupom" if limite == 1
+                   else f"Você já usou este cupom {limite} vezes")
+            return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                    "message": msg}
+
     min_val = _to_float(coupon.get('min_order_value'))
     if subtotal < min_val:
         return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
@@ -124,9 +193,15 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=
             "platform_discount": round(platform_discount, 2)}
 
 
-def consume_coupon(coupon_id):
-    """Incrementa uses_count de forma atômica (para o limite de usos valer).
-    Best-effort: falha não deve derrubar o pedido. Usa conexão psycopg2 própria."""
+def consume_coupon(coupon_id, client_id=None, order_id=None):
+    """Registra o uso: incrementa uses_count E grava quem usou.
+
+    O registro por cliente é o que faz `max_uses_per_client` valer — sem ele o
+    limite por pessoa seria inverificável, porque o pedido não guarda o cupom.
+    Passar client_id é o que liga a trava; sem ele só o contador global sobe.
+
+    Best-effort: falha não deve derrubar o pedido. Usa conexão psycopg2 própria.
+    """
     from .helpers import get_db_connection
     conn = None
     try:
@@ -138,6 +213,15 @@ def consume_coupon(coupon_id):
                 "UPDATE public.coupons SET uses_count = COALESCE(uses_count, 0) + 1 WHERE id = %s",
                 (str(coupon_id),),
             )
+            if client_id:
+                # ON CONFLICT: se o fluxo de pagamento reprocessar o mesmo
+                # pedido (retry de webhook, duplo clique), não queima o direito
+                # da pessoa duas vezes.
+                cur.execute(
+                    "INSERT INTO public.coupon_redemptions (coupon_id, client_id, order_id) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (str(coupon_id), str(client_id), str(order_id) if order_id else None),
+                )
         conn.commit()
     except Exception as exc:
         logger.warning("Falha ao incrementar uses_count do cupom %s: %s", coupon_id, exc)

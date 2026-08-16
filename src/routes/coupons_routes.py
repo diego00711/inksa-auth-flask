@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify
 import psycopg2
 import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
-from ..utils.coupons import evaluate_coupon
+from ..utils.coupons import evaluate_coupon, contar_usos_do_cliente
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +142,28 @@ def _anunciar_cupom(cupom, restaurant_id):
             pass
 
 
+def _limite_por_cliente(data):
+    """Lê max_uses_per_client do corpo, tolerando o que os apps mandam.
+
+    Aceita número (1, 2, "1"), booleano (o checkbox "só 1 por cliente" manda
+    true) e vazio. Vazio/0/false = NULL = sem limite por pessoa, que é o
+    comportamento de sempre — cupom antigo não muda de regra sozinho.
+
+    Teto de 100 pra um dedo escorregado no formulário não virar um número
+    absurdo gravado no banco.
+    """
+    v = data.get('max_uses_per_client')
+    if v is True:
+        return 1
+    if v in (None, '', False):
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return min(n, 100) if n > 0 else None
+
+
 def _table_exists(cur) -> bool:
     """Verifica se a tabela coupons existe."""
     try:
@@ -194,8 +216,8 @@ def validate_coupon():
             # recusado no fechamento.
             cur.execute("""
                 SELECT id, code, discount_type, discount_value, min_order_value,
-                       max_uses, uses_count, valid_until, is_active,
-                       restaurant_id, paid_by
+                       max_uses, uses_count, max_uses_per_client, valid_until,
+                       is_active, restaurant_id, paid_by
                 FROM public.coupons
                 WHERE UPPER(code) = %s
                   AND (restaurant_id IS NULL OR restaurant_id = %s)
@@ -204,9 +226,25 @@ def validate_coupon():
             """, (code, restaurant_id))
             coupon = cur.fetchone()
 
+            # Quem já usou este cupom não pode descobrir só no fechamento: se o
+            # carrinho disser "válido" e o pedido recusar, a pessoa acha que o
+            # app quebrou. O token é opcional aqui — sem ele, conta 0 e a trava
+            # real continua sendo a do fechamento.
+            usos = 0
+            if coupon is not None:
+                try:
+                    uid, utype, err = get_user_id_from_token(request.headers.get('Authorization'))
+                    if err is None and utype == 'client':
+                        cur.execute("SELECT id FROM client_profiles WHERE user_id = %s", (uid,))
+                        perfil = cur.fetchone()
+                        if perfil:
+                            usos = contar_usos_do_cliente(coupon['id'], perfil['id'], cur)
+                except Exception:
+                    usos = 0
+
         # Validação/cálculo centralizado (mesma lógica do fechamento do pedido)
         result = evaluate_coupon(dict(coupon) if coupon else None, order_total, delivery_fee,
-                                 restaurant_id=restaurant_id)
+                                 restaurant_id=restaurant_id, usos_deste_cliente=usos)
         if not result["valid"]:
             return jsonify({"valid": False, "message": result["message"]}), 200
 
@@ -330,11 +368,14 @@ def create_coupon():
             try:
                 cur.execute("""
                     INSERT INTO public.coupons
-                        (code, discount_type, discount_value, min_order_value, max_uses, valid_until)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (code, discount_type, discount_value, min_order_value, max_uses,
+                         max_uses_per_client, valid_until)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, code, discount_type, discount_value, min_order_value,
-                              max_uses, uses_count, valid_until, is_active, created_at
-                """, (code, discount_type, discount_value, min_order_value, max_uses, valid_until))
+                              max_uses, uses_count, max_uses_per_client, valid_until,
+                              is_active, created_at
+                """, (code, discount_type, discount_value, min_order_value, max_uses,
+                      _limite_por_cliente(data), valid_until))
                 new_coupon = dict(cur.fetchone())
                 conn.commit()
             except psycopg2.errors.UniqueViolation:
@@ -370,8 +411,8 @@ def create_coupon():
 # ─────────────────────────────────────────────────────────────────────────────
 
 _COUPON_COLS = """id, code, discount_type, discount_value, min_order_value,
-                  max_uses, uses_count, valid_until, is_active, created_at,
-                  restaurant_id, paid_by, description"""
+                  max_uses, uses_count, max_uses_per_client, valid_until,
+                  is_active, created_at, restaurant_id, paid_by, description"""
 
 
 def _own_restaurant_id(cur, user_id):
@@ -481,11 +522,12 @@ def create_my_coupon():
                 cur.execute(
                     f"""INSERT INTO public.coupons
                             (code, discount_type, discount_value, min_order_value, max_uses,
-                             valid_until, description, restaurant_id, paid_by)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'restaurant')
+                             max_uses_per_client, valid_until, description, restaurant_id, paid_by)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'restaurant')
                         RETURNING {_COUPON_COLS}""",
                     (code, dtype, dvalue, float(data.get('min_order_value') or 0),
-                     data.get('max_uses') or None, data.get('valid_until') or None,
+                     data.get('max_uses') or None, _limite_por_cliente(data),
+                     data.get('valid_until') or None,
                      (data.get('description') or None), rid))
                 novo = _serialize(cur.fetchone())
                 conn.commit()
@@ -524,6 +566,8 @@ def update_my_coupon(coupon_id):
         campos.append("min_order_value = %s"); valores.append(float(data.get('min_order_value') or 0))
     if 'max_uses' in data:
         campos.append("max_uses = %s"); valores.append(data.get('max_uses') or None)
+    if 'max_uses_per_client' in data:
+        campos.append("max_uses_per_client = %s"); valores.append(_limite_por_cliente(data))
     if 'valid_until' in data:
         campos.append("valid_until = %s"); valores.append(data.get('valid_until') or None)
     if 'description' in data:
@@ -620,6 +664,8 @@ def admin_update_coupon(coupon_id):
             campos.append(f"{campo} = %s")
     if 'max_uses' in data:
         campos.append("max_uses = %s"); valores.append(data.get('max_uses') or None)
+    if 'max_uses_per_client' in data:
+        campos.append("max_uses_per_client = %s"); valores.append(_limite_por_cliente(data))
     if 'valid_until' in data:
         campos.append("valid_until = %s"); valores.append(data.get('valid_until') or None)
     if 'is_active' in data:

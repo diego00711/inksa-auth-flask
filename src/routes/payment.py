@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
 from ..utils.helpers import get_user_id_from_token, supabase_admin
 from .orders import generate_verification_code
-from ..utils.coupons import evaluate_coupon, consume_coupon
+from ..utils.coupons import evaluate_coupon, consume_coupon, contar_usos_do_cliente
 from ..utils import asaas
 from ..utils.gateway import payment_provider
 from src.extensions import limiter
@@ -419,7 +419,11 @@ def criar_preferencia_mercado_pago():
                 _rid = dados_pedido.get('restaurant_id')
                 # Cupom da loja só vale nela; cupom da plataforma vale em qualquer.
                 coupon = _buscar_cupom(coupon_code, _rid)
-                evalr = evaluate_coupon(coupon, order_subtotal, delivery_fee_c, restaurant_id=_rid)
+                evalr = evaluate_coupon(
+                    coupon, order_subtotal, delivery_fee_c, restaurant_id=_rid,
+                    usos_deste_cliente=contar_usos_do_cliente(
+                        (coupon or {}).get('id'), client_profile_id),
+                )
                 if evalr['valid'] and evalr['discount_amount'] > 0:
                     backend_discount = evalr['discount_amount']
                     desconto_parceiro = float(evalr.get('restaurant_discount') or 0)
@@ -475,7 +479,9 @@ def criar_preferencia_mercado_pago():
                 'desconto_parceiro': round(desconto_parceiro, 2),
             }).eq('id', pedido_id).execute()
             if applied_coupon_id:
-                consume_coupon(applied_coupon_id)
+                # client_profile_id + pedido: é o que registra QUEM usou, e sem
+                # isso o limite por cliente não teria como valer no próximo.
+                consume_coupon(applied_coupon_id, client_profile_id, pedido_id)
             logging.info(f"✅ total_amount corrigido para R${corrected_total:.2f} (cupom R${backend_discount:.2f} + clube R${club_discount:.2f})")
         # --- Fim VUL-08 / Clube ---
 
@@ -493,6 +499,7 @@ def criar_preferencia_mercado_pago():
                     coupon_code,
                     dados_pedido.get('total_amount_items', 0),
                     restaurant_id=dados_pedido.get('restaurant_id'),
+                    client_id=client_profile_id,
                 )
             except ValueError as ve:
                 logging.error(f"❌ Pedido em dinheiro {pedido_id} rejeitado: {ve}")
@@ -525,7 +532,7 @@ def criar_preferencia_mercado_pago():
             }).eq('id', pedido_id).execute()
 
             if _coupon_id_cash:
-                consume_coupon(_coupon_id_cash)
+                consume_coupon(_coupon_id_cash, client_profile_id, pedido_id)
 
             logging.info(f"💵 Pedido em dinheiro {pedido_id} — itens validados, total real R${total_seguro:.2f}.")
             return jsonify({
@@ -842,7 +849,7 @@ def _split_online(valor_itens, delivery_fee, distancia_km, comissao, desconto_pa
 
 
 def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items,
-                           restaurant_id=None):
+                           restaurant_id=None, client_id=None):
     """Revalida precos no banco e calcula o total no servidor (nao confia no front).
     Retorna (total_seguro, subtotal_validado, desconto, coupon_id, desconto_parceiro).
     O coupon_id (quando != None) deve ser 'consumido' pelo chamador apos criar o
@@ -871,7 +878,10 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
     if coupon_code:
         # Cupom da loja só vale nela; cupom da plataforma vale em qualquer uma.
         coupon = _buscar_cupom(coupon_code, restaurant_id)
-        evalr = evaluate_coupon(coupon, subtotal, delivery_fee, restaurant_id=restaurant_id)
+        evalr = evaluate_coupon(
+            coupon, subtotal, delivery_fee, restaurant_id=restaurant_id,
+            usos_deste_cliente=contar_usos_do_cliente((coupon or {}).get('id'), client_id),
+        )
         if evalr['valid'] and evalr['discount_amount'] > 0:
             desconto = evalr['discount_amount']
             coupon_id = coupon.get('id')
@@ -920,7 +930,8 @@ def processar_pagamento_cartao():
         try:
             total_seguro, subtotal_validado, desconto, coupon_id_card, desc_parc_card = _validar_itens_e_total(
                 items_req, d.get('delivery_fee', 0), (d.get('coupon_code') or '').strip(),
-                d.get('total_amount_items', 0), restaurant_id=d.get('restaurant_id')
+                d.get('total_amount_items', 0), restaurant_id=d.get('restaurant_id'),
+                client_id=client_profile_id,
             )
         except ValueError as ve:
             return jsonify({"erro": str(ve)}), 400
@@ -1001,7 +1012,7 @@ def processar_pagamento_cartao():
             return jsonify({"erro": "Erro ao criar pedido."}), 500
 
         if coupon_id_card:
-            consume_coupon(coupon_id_card)
+            consume_coupon(coupon_id_card, client_profile_id, ins.data[0].get('id'))
 
         # 2) Cria o pagamento no MP com o token do cartao
         base = os.environ.get("MERCADO_PAGO_WEBHOOK_URL")
