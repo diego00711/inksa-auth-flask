@@ -295,6 +295,13 @@ def handle_orders():
                 total_items = sum(item.get('price', 0) * item.get('quantity', 1) for item in data['items'])
                 delivery_fee = data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
 
+                # Peso do pedido, lido do CATÁLOGO e não do que o app mandou —
+                # mesma razão de validar preço no servidor. Fica congelado no
+                # pedido: se o parceiro corrigir o peso do produto amanhã, o
+                # pedido de hoje mantém o que valia quando foi feito.
+                from ..utils.carga import peso_do_pedido
+                peso_total = peso_do_pedido(cur, data['items'])
+
                 order_data = {
                     'id': str(uuid.uuid4()),
                     'client_id': client_profile['id'],
@@ -306,18 +313,20 @@ def handle_orders():
                     'total_amount': total_items + delivery_fee,
                     'status': 'awaiting_payment',
                     'pickup_code': generate_verification_code(),
-                    'delivery_code': generate_verification_code()
+                    'delivery_code': generate_verification_code(),
+                    'peso_total_kg': peso_total
                 }
 
-                logger.info(f"🆕 Criando pedido {order_data['id']} com status: awaiting_payment")
+                logger.info(f"🆕 Criando pedido {order_data['id']} com status: awaiting_payment "
+                            f"({peso_total} kg)")
 
                 insert_query = """
                     INSERT INTO orders
                         (id, client_id, restaurant_id, items, delivery_address,
                          total_amount_items, delivery_fee, total_amount, status,
-                         pickup_code, delivery_code, delivery_id)
+                         pickup_code, delivery_code, peso_total_kg, delivery_id)
                     VALUES
-                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
                     RETURNING *
                 """
                 cur.execute(insert_query, list(order_data.values()))
@@ -1542,6 +1551,14 @@ def _run_dispatch_tick(cur, settings):
     r_moto  = _f("delivery_radius_moto_km")  or r_global
     r_carro = _f("delivery_radius_carro_km") or r_global
 
+    # Capacidade de carga por veículo (kg). O motor PRECISA respeitar isso:
+    # se ele ofertar 60 kg a quem está de bicicleta, o filtro de carga em
+    # get_available_orders esconde o pedido do próprio destinatário — a oferta
+    # queima o prazo inteiro sem ninguém sequer ver, e o pedido fica em limbo.
+    from ..utils.carga import capacidades as _capacidades
+    _caps = _capacidades(settings)
+    c_bike, c_moto, c_carro = _caps['bike'], _caps['moto'], _caps['carro']
+
     # Pesos da nota composta (admin). Se todos vierem 0, cai em "só distância"
     # — assim uma configuração zerada por engano não trava o dispatch.
     w_dist   = _f("dispatch_weight_distance")
@@ -1558,6 +1575,7 @@ def _run_dispatch_tick(cur, settings):
     cur.execute(
         """
         SELECT o.id, o.offer_courier_id, o.offer_expires_at, o.offer_passed_ids,
+               COALESCE(o.peso_total_kg, 0) AS peso_total_kg,
                rp.latitude AS r_lat, rp.longitude AS r_lng
           FROM orders o
           JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
@@ -1626,6 +1644,12 @@ def _run_dispatch_tick(cur, settings):
                  AND NULLIF(TRIM(dp.vehicle_type), '') IS NOT NULL
                  AND (dp.vehicle_type NOT IN ('moto','carro')
                       OR (NULLIF(TRIM(dp.vehicle_plate),'') IS NOT NULL AND NULLIF(TRIM(dp.cnh),'') IS NOT NULL))
+                 -- CARGA: o veículo tem que aguentar o peso do pedido.
+                 -- Veículo fora da lista cai no ELSE 0 e só passa em pedido
+                 -- sem peso — fail-closed, como no gate de get_available_orders.
+                 AND (CASE dp.vehicle_type
+                        WHEN 'bicicleta' THEN %s WHEN 'moto' THEN %s
+                        WHEN 'carro' THEN %s ELSE 0 END) >= %s
                  AND NOT (dp.user_id = ANY(%s::uuid[]))
                  -- Quem já está com uma entrega na rua sai dos candidatos.
                  -- Sem isso o motor oferecia pedido pra quem estava no meio de
@@ -1651,6 +1675,8 @@ def _run_dispatch_tick(cur, settings):
             (od['r_lat'], od['r_lng'],
              r_bike, r_moto, r_carro, r_global,
              default_rating,
+             # capacidade por veículo + peso do pedido (filtro de carga)
+             c_bike, c_moto, c_carro, od['peso_total_kg'],
              passed,
              w_dist, w_idle, idle_target, w_rating, w_balance, daily_target),
         )
@@ -1802,6 +1828,26 @@ def get_available_orders():
                 )
                 params += [float(drv_lat), float(drv_lng), radius_km * 1000.0]
 
+            # CARGA: o pedido só aparece pra quem tem veículo que aguenta.
+            #
+            # Sem isto, 60 kg de ração eram oferecidos igualmente ao entregador
+            # de bicicleta — ele aceitava, ia até a loja e não levava, com o
+            # cliente já cobrado. Vale nos dois modos (broadcast e atribuição).
+            #
+            # Pedido sem peso informado (NULL ou 0) passa: é o caso normal de
+            # comida, e travar isso pararia a operação inteira por um dado que
+            # o parceiro de restaurante não tem motivo pra preencher.
+            from ..utils.carga import capacidades, normalizar_veiculo
+            _chave_veic = normalizar_veiculo(_dp['vehicle_type'])
+            if not _chave_veic:
+                # Veículo irreconhecível: não dá pra afirmar que ele comporta
+                # nada. Fail-closed, igual ao gate de coordenadas.
+                logger.info("Veículo não reconhecido (%r) — lista vazia", _dp['vehicle_type'])
+                return jsonify([]), 200
+            _capacidade = capacidades(_settings)[_chave_veic]
+            carga_clause = " AND COALESCE(o.peso_total_kg, 0) <= %s"
+            params.append(float(_capacidade))
+
             # No modo atribuição, o entregador vê SÓ o pedido ofertado a ele e
             # ainda dentro do prazo (o resto do WHERE segue igual).
             offer_clause = ""
@@ -1838,7 +1884,7 @@ def get_available_orders():
                     -- Pedido de loja com ENTREGA PRÓPRIA nunca aparece pro
                     -- entregador Inksa. Mesma trava do motor de despacho.
                     AND COALESCE(rp.delivery_type, 'platform') <> 'own'
-                    {radius_clause}{offer_clause}
+                    {radius_clause}{carga_clause}{offer_clause}
                 ORDER BY o.created_at ASC;
             """
             cur.execute(sql_query, params)

@@ -16,6 +16,29 @@ logging.basicConfig(level=logging.INFO)
 menu_bp = Blueprint('menu_bp', __name__)
 CORS(menu_bp) 
 
+def _peso_kg(data):
+    """Peso do produto em kg, tolerante e sem inventar valor.
+
+    Existe porque o catálogo deixou de ser só comida: com pet shop, mercado e
+    agropecuária, o peso decide se o pedido pode ir de moto ou precisa de
+    carro. Ausente/vazio vira NULL (conta como 0 no somatório) — comida não
+    tem por que preencher isso.
+
+    Aceita vírgula ("1,5") porque é assim que se digita peso em português, e
+    recusa negativo em silêncio virando NULL em vez de poluir a soma.
+    """
+    if data is None:
+        return None
+    bruto = data.get('peso_kg', data.get('peso'))
+    if bruto in (None, ''):
+        return None
+    try:
+        valor = float(str(bruto).replace(',', '.'))
+    except (TypeError, ValueError):
+        return None
+    return valor if valor > 0 else None
+
+
 def make_serializable(data):
     if isinstance(data, dict): return {k: make_serializable(v) for k, v in data.items()}
     if isinstance(data, list): return [make_serializable(item) for item in data]
@@ -87,8 +110,9 @@ def add_menu_item(conn):
 
             # Inserir o item com o restaurant_id correto
             cur.execute(
-                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None))
+                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), _peso_kg(data))
             )
             new_item = make_serializable(dict(cur.fetchone()))
             conn.commit()
@@ -116,12 +140,13 @@ def update_menu_item(conn, item_id):
         # Atualizar o item
         cur.execute(
             """
-            UPDATE menu_items 
-            SET name = %s, description = %s, price = %s, category = %s, is_available = %s, image_url = %s
+            UPDATE menu_items
+            SET name = %s, description = %s, price = %s, category = %s, is_available = %s, image_url = %s,
+                peso_kg = %s
             WHERE id = %s
             RETURNING *
             """,
-            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), str(item_id))
+            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), _peso_kg(data), str(item_id))
         )
         updated_item = make_serializable(dict(cur.fetchone()))
         conn.commit()
