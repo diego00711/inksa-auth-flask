@@ -81,19 +81,50 @@ def enviar_teste(token: str) -> dict:
     if not st["pode_enviar"]:
         return {"enviado": False, "erro": st["motivo"], "status": st}
     try:
-        message_id = messaging.send(messaging.Message(
-            notification=messaging.Notification(
-                title="Inksa — teste de notificação",
-                body="Se você está lendo isso, o push está funcionando de ponta a ponta.",
-            ),
-            data={"tipo": "teste"},
-            token=token,
+        message_id = messaging.send(_montar_mensagem(
+            token,
+            "Inksa — teste de notificação",
+            "Se você está lendo isso, o push está funcionando de ponta a ponta.",
+            {"tipo": "teste"},
         ))
         return {"enviado": True, "message_id": message_id, "status": st}
     except messaging.UnregisteredError:
         return {"enviado": False, "erro": "token recusado pelo FCM (app desinstalado ou token trocado)", "status": st}
     except Exception as e:
         return {"enviado": False, "erro": f"{type(e).__name__}: {e}", "status": st}
+
+
+def _montar_mensagem(token: str, title: str, body: str, data: dict = None):
+    """Monta a Message do FCM. Existe pra corrigir o PUSH DUPLICADO.
+
+    O bug: a mensagem ia com `notification=` no nível de cima. No WEB, isso faz
+    o SDK do Firebase EXIBIR a notificação sozinho — e o nosso
+    `onBackgroundMessage` no service worker também chamava `showNotification`.
+    Duas notificações pro mesmo push, uma do SDK e outra nossa.
+
+    A saída não é tirar o showNotification do worker: sem ele a gente perde o
+    ícone, o agrupamento por pedido (`tag`) e o clique que leva pra tela certa.
+    A saída é o contrário — mandar SÓ DADOS pro web, e deixar o worker ser o
+    único que desenha.
+
+    Mas o APK nativo precisa do bloco de notificação, senão não aparece nada
+    com o app fechado. Por isso ele vai em `android=`, que o web ignora:
+
+        web    -> só `data`      -> só o service worker desenha  -> 1
+        nativo -> `android.notification` -> o Android desenha    -> 1
+
+    title/body também entram em `data` porque, sem o bloco de cima, é de lá
+    que o service worker lê.
+    """
+    extra = {k: str(v) for k, v in (data or {}).items()}
+    corpo_dados = {**extra, "title": title, "body": body}
+    return messaging.Message(
+        data=corpo_dados,
+        android=messaging.AndroidConfig(
+            notification=messaging.AndroidNotification(title=title, body=body),
+        ),
+        token=token,
+    )
 
 
 def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> dict:
@@ -118,16 +149,11 @@ def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> d
         resultado["falhas"] = len(destinos)
         return resultado
 
-    payload = {k: str(v) for k, v in (data or {}).items()}
     for client_id, token in destinos:
         if not token:
             continue
         try:
-            messaging.send(messaging.Message(
-                notification=messaging.Notification(title=title, body=body),
-                data=payload,
-                token=token,
-            ))
+            messaging.send(_montar_mensagem(token, title, body, data))
             resultado["enviados"] += 1
         except messaging.UnregisteredError:
             # App desinstalado ou token trocado: marca pra limpeza.
@@ -151,12 +177,7 @@ def send_push_notification(token: str, title: str, body: str, data: dict = None)
         return False
 
     try:
-        message = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
-            data={k: str(v) for k, v in (data or {}).items()},
-            token=token,
-        )
-        response = messaging.send(message)
+        response = messaging.send(_montar_mensagem(token, title, body, data))
         logger.info("FCM: notificacao enviada — message_id=%s token=%s...", response, token[:10])
         return True
     except messaging.UnregisteredError:
