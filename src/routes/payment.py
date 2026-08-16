@@ -42,6 +42,79 @@ if supabase_client is None:
 _SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 
+def _frete_do_servidor(dados_pedido):
+    """Refaz a conta do frete no servidor. None quando não dá pra saber.
+
+    POR QUE ISTO EXISTE. O `delivery_fee` chegava do app e era gravado como
+    veio — nos TRÊS lugares que usam frete: o total cobrado, o repasse do
+    entregador e a margem da plataforma. Bastava um POST com
+    `delivery_fee: 0` (e criar conta de cliente é livre) pra fechar pedido com
+    frete zero. Quem pagava era o ENTREGADOR, que recebe o frete menos a taxa
+    de administração — e ele só descobriria depois de ter rodado.
+
+    O preço dos ITENS já era revalidado do cardápio. O frete era a única peça
+    que o app mandava e o servidor acreditava.
+
+    Usa `utils/frete.calcular_frete`, a MESMA função da cotação do carrinho —
+    duas contas separadas divergiriam, e a divergência apareceria como frete
+    errado cobrado ou pago.
+
+    Devolve None (e o chamador mantém o valor do app) quando não há como
+    recalcular: loja de entrega própria com taxa própria, coordenada faltando,
+    erro de leitura. Fail-open aqui é deliberado — derrubar o checkout de um
+    cliente legítimo por causa de um cadastro incompleto é pior que cobrar o
+    frete errado num pedido, que é reparável.
+    """
+    rid = dados_pedido.get('restaurant_id')
+    cli_lat = dados_pedido.get('client_latitude')
+    cli_lng = dados_pedido.get('client_longitude')
+    if not rid or cli_lat is None or cli_lng is None:
+        return None
+    try:
+        from ..utils.area_entrega import distancia_km as _dist
+        from ..utils.frete import calcular_frete
+        from ..utils.platform_settings import get_settings
+
+        r = supabase_client.table('restaurant_profiles').select(
+            'latitude, longitude, delivery_type, delivery_fee'
+        ).eq('id', str(rid)).limit(1).execute()
+        if not r.data:
+            return None
+        loja = r.data[0]
+
+        # Entrega própria: a taxa é da LOJA, não da plataforma. O valor dela é
+        # autoritativo do mesmo jeito — só não passa pela fórmula.
+        if (loja.get('delivery_type') or 'platform') == 'own':
+            taxa = loja.get('delivery_fee')
+            return round(float(taxa), 2) if taxa not in (None, '') else None
+
+        d = _dist(loja.get('latitude'), loja.get('longitude'), cli_lat, cli_lng)
+        if d is None:
+            return None  # loja sem coordenada: a calculadora já trata
+
+        peso = 0.0
+        try:
+            import psycopg2.extras
+            from ..utils.carga import peso_do_pedido
+            from ..utils.helpers import get_db_connection
+            conn = get_db_connection()
+            if conn:
+                try:
+                    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                        peso = peso_do_pedido(cur, dados_pedido.get('itens') or [])
+                finally:
+                    conn.close()
+        except Exception:
+            logging.warning("Peso não lido no fechamento — frete sem adicional de carga",
+                            exc_info=True)
+
+        valor, _metodo = calcular_frete(d, peso, get_settings())
+        return valor
+    except Exception:
+        logging.warning("Frete do servidor não calculado — mantendo o valor do app",
+                        exc_info=True)
+        return None
+
 def _checar_area_entrega(restaurant_id, cli_lat, cli_lng):
     """Recusa pedido fora da área da loja. Devolve (fora, mensagem).
 
@@ -311,6 +384,30 @@ def criar_preferencia_mercado_pago():
         # fechamento — então pedido em dinheiro/pendente ficava com o campo NULL e
         # o app do entregador mostrava o FRETE CHEIO (sem o desconto da plataforma)
         # na tela de pedido disponível. Calculando aqui, "Você recebe" já sai certo.
+        # 🔒 FRETE — o servidor refaz a conta e usa a DELE.
+        #
+        # Recomputa antes de qualquer coisa que use frete: o split do
+        # entregador logo abaixo, o desconto de cupom/clube (que incidem sobre
+        # o frete) e o total gravado. Divergência acima de alguns centavos vira
+        # log — o cliente NÃO é punido por uma diferença que não é culpa dele
+        # (ele pode ter demorado no carrinho e o preço mudou), mas repetição
+        # vira sinal.
+        _fee_srv = _frete_do_servidor(dados_pedido)
+        if _fee_srv is not None:
+            _fee_app = float(dados_pedido.get('delivery_fee', 0) or 0)
+            if abs(_fee_app - _fee_srv) > 0.05:
+                logging.warning(
+                    "⚠️ Frete divergente — app mandou R$%.2f, servidor calculou R$%.2f "
+                    "(cliente %s, loja %s). Usando o do servidor.",
+                    _fee_app, _fee_srv, client_profile_id, dados_pedido.get('restaurant_id'))
+                try:
+                    sentry_sdk.capture_message(
+                        f"Frete divergente: app R${_fee_app:.2f} x servidor R${_fee_srv:.2f}",
+                        level="warning")
+                except Exception:
+                    pass
+            dados_pedido['delivery_fee'] = _fee_srv
+
         _fee_create = float(dados_pedido.get('delivery_fee', 0) or 0)
         try:
             _payout_create = float(calculate_courier_payout(
@@ -927,6 +1024,20 @@ def processar_pagamento_cartao():
             return jsonify({"erro": "Email do cliente é obrigatório."}), 400
 
         items_req = d.get('itens', [])
+
+        # Mesma trava do fluxo online: o frete que vale é o do servidor. Esta é
+        # OUTRA função (cartão transparente), então precisa da sua própria
+        # chamada — deixar de fora daria um caminho por onde o frete zero ainda
+        # passaria, e ninguém notaria porque o online estaria protegido.
+        _fee_srv_card = _frete_do_servidor(d)
+        if _fee_srv_card is not None:
+            _fee_app_card = float(d.get('delivery_fee', 0) or 0)
+            if abs(_fee_app_card - _fee_srv_card) > 0.05:
+                logging.warning(
+                    "⚠️ Frete divergente (cartão) — app R$%.2f, servidor R$%.2f. Usando o do servidor.",
+                    _fee_app_card, _fee_srv_card)
+            d['delivery_fee'] = _fee_srv_card
+
         try:
             total_seguro, subtotal_validado, desconto, coupon_id_card, desc_parc_card = _validar_itens_e_total(
                 items_req, d.get('delivery_fee', 0), (d.get('coupon_code') or '').strip(),

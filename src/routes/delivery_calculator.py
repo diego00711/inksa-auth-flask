@@ -40,8 +40,8 @@ def handle_preflight():
         response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
         return response
 
-def _adicional_de_carga(itens, settings):
-    """Peso do carrinho -> adicional de frete. Nunca derruba a cotação.
+def _peso_do_carrinho(itens):
+    """Peso total do carrinho, do CATÁLOGO. Nunca derruba a cotação.
 
     O peso vem do CATÁLOGO, não do que o app enviou: preço que o cliente
     manda é preço que o cliente escolhe.
@@ -52,7 +52,7 @@ def _adicional_de_carga(itens, settings):
     fecha não é.
     """
     import psycopg2.extras
-    from ..utils.carga import frete_da_carga, peso_do_pedido
+    from ..utils.carga import peso_do_pedido
     from ..utils.helpers import get_db_connection
 
     if not itens:
@@ -67,9 +67,9 @@ def _adicional_de_carga(itens, settings):
             peso = peso_do_pedido(cur, itens)
         return frete_da_carga(peso, settings)
     except Exception as exc:
-        logger.warning("Adicional de carga não calculado — frete sem adicional",
+        logger.warning("Peso do carrinho não lido — frete sem adicional de carga",
                        exc_info=True)
-        return (0.0, None, 'bike', 'bicicleta')
+        return 0.0
     finally:
         if conn:
             try:
@@ -219,21 +219,13 @@ def calculate_delivery_fee():
                         "message": _area["message"],
                     }), 200
 
-                # Adicional de carga: pedido que EXIGE carro custa mais que
-                # pedido que cabe numa moto. O peso vem do catálogo (o preço
-                # não pode depender do que o app manda).
-                fixo_carga, km_carga, _v_chave, v_rotulo = _adicional_de_carga(itens_carrinho, s)
-                km_efetivo = km_carga if km_carga is not None else per_km_fee
-
-                delivery_fee = fixed_fee + fixo_carga
-                if distance_km > free_threshold:
-                    additional_km = distance_km - free_threshold
-                    delivery_fee += additional_km * km_efetivo
-                    calculation_method = f"Taxa base R$ {fixed_fee:.2f} + R$ {km_efetivo:.2f}/km extra"
-                else:
-                    calculation_method = f"Taxa base R$ {fixed_fee:.2f} (dentro do limite gratuito)"
-                if fixo_carga or km_carga is not None:
-                    calculation_method += f" + carga de {v_rotulo} (R$ {fixo_carga:.2f})"
+                # A conta mora em utils/frete.py porque o FECHAMENTO do pedido
+                # refaz a mesma conta pra não confiar no que o app mandou. Duas
+                # cópias divergiriam — e a divergência apareceria como frete
+                # errado cobrado do cliente ou pago ao entregador.
+                from ..utils.frete import calcular_frete
+                delivery_fee, calculation_method = calcular_frete(
+                    distance_km, _peso_do_carrinho(itens_carrinho), s)
 
             logger.info(f"Taxa calculada: R$ {delivery_fee}")
         
