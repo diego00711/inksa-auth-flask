@@ -8,6 +8,7 @@ import psycopg2.extras
 from flask import Blueprint, jsonify, request
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token
+from src.extensions import limiter
 
 logger = logging.getLogger(__name__)
 public_bp = Blueprint("public_bp", __name__)
@@ -235,3 +236,65 @@ def public_social_day_history():
         return jsonify({"events": [], "total_raised": 0}), 200
     finally:
         conn.close()
+
+
+@public_bp.get("/reverse-geocode")
+@limiter.limit("30 per minute")
+def reverse_geocode_endpoint():
+    """Coordenada → endereço curto, para o checkout do Cliente.
+
+    POR QUE ISTO EXISTE NO BACKEND. Até 16/08/2026 o app chamava o Nominatim
+    DIRETO do navegador. Três problemas nisso:
+
+      • A política do Nominatim exige um User-Agent identificando quem chama,
+        e o navegador não deixa definir User-Agent num fetch. Ou seja: a gente
+        usava um serviço comunitário sem se identificar, sujeito a bloqueio
+        por origem — e o sintoma do bloqueio é MUDO (o endereço volta a
+        aparecer como coordenada).
+      • Sem cache: a mesma pessoa mexendo no carrinho disparava a mesma
+        consulta várias vezes.
+      • E, no dia em que virar serviço pago, a chave estaria no bundle do app,
+        visível pra qualquer um gastar a cota.
+
+    Aqui resolve os três de uma vez, e trocar de provedor não exige AAB novo.
+    Ver a nota no topo de src/utils/geocoding_utils.py.
+
+    Devolve 200 com endereco=null quando não dá pra resolver — o app cai no
+    "Minha localização (lat, lng)". Nunca 500: endereço é conveniência, e
+    derrubar o checkout por causa de um serviço externo seria trocar um
+    problema pequeno por um grande.
+    """
+    from ..utils.geocoding_utils import reverse_geocode
+
+    lat = request.args.get("lat")
+    lng = request.args.get("lng") or request.args.get("lon")
+    if lat in (None, "") or lng in (None, ""):
+        return jsonify({"status": "error", "error": "lat e lng são obrigatórios"}), 400
+
+    endereco = reverse_geocode(lat, lng)
+    return jsonify({"status": "success", "data": {"endereco": endereco}}), 200
+
+
+@public_bp.get("/geocode")
+@limiter.limit("30 per minute")
+def geocode_endpoint():
+    """Endereço → coordenada, para centralizar o mapa no cadastro de endereço.
+
+    Mesma razão da rota acima: era chamada direta do navegador ao Nominatim,
+    sem User-Agent e sem cache. Divide o mesmo limite e vai trocar de provedor
+    junto — ver a nota no topo de src/utils/geocoding_utils.py.
+
+    Devolve lat/lng nulos quando não acha, e o cliente continua podendo
+    marcar o ponto na mão no mapa.
+    """
+    from ..utils.geocoding_utils import geocode_cached
+
+    lat, lng = geocode_cached(
+        request.args.get("street"),
+        request.args.get("number"),
+        request.args.get("neighborhood"),
+        request.args.get("city"),
+        request.args.get("state"),
+        request.args.get("zipcode"),
+    )
+    return jsonify({"status": "success", "data": {"lat": lat, "lng": lng}}), 200
