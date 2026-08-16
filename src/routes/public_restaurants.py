@@ -135,6 +135,7 @@ def list_restaurants():
     category = (request.args.get("category") or "").strip()
     search   = (request.args.get("search")   or "").strip()
     city     = (request.args.get("city")     or "").strip()  # filtra por cidade escolhida
+    state    = (request.args.get("state")    or "").strip().upper()  # UF escolhida
     user_lat = request.args.get("user_lat", type=float)
     user_lon = request.args.get("user_lon", type=float)
     # Paginação: cap padrão evita payload ilimitado conforme o catálogo cresce
@@ -187,7 +188,7 @@ def list_restaurants():
             # separa as cidades (o cliente vê só o que dá pra atender).
             # Quando o cliente ESCOLHE uma cidade no seletor, ignora o raio (ele
             # quer ver aquela cidade, mesmo estando longe/em outro lugar).
-            if has_coords and not city:
+            if has_coords and not city and not state:
                 from ..utils.platform_settings import get_settings as _get_settings
                 radius_km = float(_get_settings()["platform_max_delivery_radius"])
                 # A loja de ENTREGA PRÓPRIA pode encurtar esse raio: ela cobra
@@ -215,6 +216,13 @@ def list_restaurants():
             if city:
                 where.append("rp.address_city ILIKE %s")
                 params.append(city)
+
+            # UF sozinha (sem cidade) = "me mostra o estado inteiro". Compara
+            # normalizado porque no cadastro isso é texto livre: a base tem
+            # 'SP' e 'Sp' hoje, e sem UPPER/TRIM a loja sumiria do filtro.
+            if state:
+                where.append("UPPER(TRIM(rp.address_state)) = %s")
+                params.append(state)
 
             where_sql  = "WHERE " + " AND ".join(where)
             _base_order = "distance_km ASC NULLS LAST" if has_coords else "rp.restaurant_name"
@@ -288,20 +296,71 @@ def list_restaurants():
 # Cidades que TÊM restaurante aprovado/ativo — alimenta o seletor de cidade do
 # cliente (ele filtra os restaurantes pela cidade escolhida).
 
-@public_restaurants_bp.get("/cities")
-def list_cities():
+@public_restaurants_bp.get("/states")
+def list_states():
+    """UFs que têm loja vendendo, com quantas cidades cada uma.
+
+    Primeiro degrau do seletor (Estado → Cidade). Sem ele, ao abrir a segunda
+    praça a lista de cidades vira uma rolagem sem fim e o cliente de Lages tem
+    que caçar Lages no meio de tudo.
+
+    A UF é normalizada aqui (UPPER + TRIM) porque no cadastro ela é texto
+    livre: hoje a base tem 'SP' e 'Sp' convivendo. Sem normalizar, o mesmo
+    estado apareceria duas vezes no seletor.
+
+    Loja SEM UF preenchida não some do app — ela simplesmente não entra neste
+    seletor. Recusar cadastro incompleto aqui esconderia loja que funciona.
+    """
     conn = None
     try:
         conn = _get_conn()
         with conn.cursor() as cur:
             cur.execute("""
+                SELECT UPPER(TRIM(address_state)) AS uf,
+                       COUNT(DISTINCT LOWER(TRIM(address_city))) AS cidades
+                  FROM restaurant_profiles
+                 WHERE COALESCE(approved, TRUE) = TRUE
+                   AND COALESCE(active, TRUE) = TRUE
+                   AND NULLIF(TRIM(address_state), '') IS NOT NULL
+                   AND NULLIF(TRIM(address_city), '')  IS NOT NULL
+                 GROUP BY 1
+                 ORDER BY 1
+            """)
+            estados = [{"uf": r[0], "cidades": int(r[1])} for r in cur.fetchall()]
+        return jsonify(estados), 200
+    except Exception as e:
+        logger.error(f"Erro em list_states: {e}")
+        return jsonify([]), 200  # fail-soft: sem estados, o seletor cai direto em cidades
+    finally:
+        if conn:
+            _close(conn)
+
+
+@public_restaurants_bp.get("/cities")
+def list_cities():
+    """Cidades com loja vendendo. `?state=SC` restringe à UF (segundo degrau).
+
+    Sem o parâmetro devolve tudo — mantém funcionando qualquer versão do app
+    que ainda não conheça o seletor de estado.
+    """
+    uf = (request.args.get("state") or "").strip().upper()
+    conn = None
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            sql = """
                 SELECT DISTINCT NULLIF(TRIM(address_city), '') AS city
                   FROM restaurant_profiles
                  WHERE COALESCE(approved, TRUE) = TRUE
                    AND COALESCE(active, TRUE) = TRUE
                    AND NULLIF(TRIM(address_city), '') IS NOT NULL
-                 ORDER BY city
-            """)
+            """
+            params = []
+            if uf:
+                sql += " AND UPPER(TRIM(address_state)) = %s"
+                params.append(uf)
+            sql += " ORDER BY city"
+            cur.execute(sql, params)
             cities = [r[0] for r in cur.fetchall()]
         return jsonify(cities), 200
     except Exception as e:
