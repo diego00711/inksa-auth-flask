@@ -79,6 +79,16 @@ _DEFAULTS: dict[str, Decimal] = {
     # Nota atribuída a quem ainda NÃO tem avaliação. Sem isso o novato entraria
     # com nota 0 e nunca receberia pedido pra ser avaliado.
     "dispatch_default_rating":      Decimal("4"),
+    # FRETE POR CLASSE DE VEÍCULO. Cobra-se pelo que o PEDIDO exige (peso), não
+    # pelo veículo de quem aceita — o frete é cotado no checkout, antes de
+    # existir entregador. O 'fixo' soma à taxa base e paga o trabalho de
+    # carregar; o 'km' SUBSTITUI o per_km e paga o custo de rodar (carro faz
+    # ~10 km/L contra ~35 da moto). Bike e moto não têm adicional: são a
+    # referência que fixed_delivery_fee/per_km_delivery_fee já cobrem.
+    "frete_adicional_carro":       Decimal("8.00"),
+    "frete_km_carro":              Decimal("2.50"),
+    "frete_adicional_utilitario":  Decimal("25.00"),
+    "frete_km_utilitario":         Decimal("3.50"),
     # Teto de desconto (%) que o PARCEIRO pode criar no cupom dele. Trava de
     # segurança: o desconto sai do repasse dele, então um "90" digitado por
     # engano viraria prejuízo. Não limita os cupons criados pela Inksa.
@@ -111,6 +121,8 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               "dispatch_weight_distance", "dispatch_weight_idle", "dispatch_weight_rating",
               "dispatch_weight_balance", "dispatch_idle_target_minutes", "dispatch_daily_target",
               "dispatch_default_rating",
+              "frete_adicional_carro", "frete_km_carro",
+              "frete_adicional_utilitario", "frete_km_utilitario",
               "idle_logout_minutes"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 

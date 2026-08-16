@@ -1907,6 +1907,24 @@ def readiness():
             e["faltas"] = faltas
             e["pode_receber"] = not faltas
 
+        # Itens sem peso nos segmentos onde ele decide frete e veículo. Sem
+        # isso, um pedido de 60 kg calcula 0 kg: sai com frete de moto e a
+        # trava de carga (fail-open em peso zero) deixa passar.
+        itens_sem_peso = _fetchall(conn, """
+            SELECT rp.restaurant_name AS loja,
+                   LOWER(TRIM(rp.segment)) AS segmento,
+                   COUNT(*) AS itens
+              FROM menu_items m
+              JOIN restaurant_profiles rp ON rp.id = m.restaurant_id
+             WHERE COALESCE(m.peso_kg, 0) <= 0
+               AND LOWER(TRIM(COALESCE(rp.segment, ''))) IN
+                   ('pet','mercado','agropecuaria','bebidas')
+             GROUP BY 1, 2
+             ORDER BY 3 DESC
+        """)
+        for i in itens_sem_peso:
+            i["itens"] = int(i["itens"] or 0)
+
         clientes = _fetchrow(conn, """
             SELECT COUNT(*) AS total,
                    COUNT(*) FILTER (WHERE NULLIF(TRIM(phone), '') IS NOT NULL)     AS com_telefone,
@@ -1938,6 +1956,7 @@ def readiness():
 
         return jsonify({"status": "success", "data": {
             "lojas": lojas,
+            "itens_sem_peso": itens_sem_peso,
             "entregadores": entregadores,
             "clientes": {k: int(v or 0) for k, v in clientes.items()},
             "pedidos": {k: (int(v or 0) if k != "ultimo" else v) for k, v in pedidos.items()},

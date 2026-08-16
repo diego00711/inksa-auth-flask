@@ -178,3 +178,59 @@ def veiculo_minimo(peso_kg, settings=None):
         if peso <= caps[chave]:
             return (chave, _ROTULO[chave])
     return None
+
+
+# Adicional de frete por CLASSE EXIGIDA. Bike e moto não têm adicional: são a
+# referência, o que `fixed_delivery_fee` + `per_km_delivery_fee` já cobrem.
+_PADRAO_FRETE = {
+    'carro':       {'fixo': 8.0,  'km': 2.50},
+    'utilitario':  {'fixo': 25.0, 'km': 3.50},
+}
+
+
+def frete_da_carga(peso_kg, settings=None):
+    """Como o peso do pedido muda o frete.
+
+    ⚠️ COBRA-SE PELO QUE O PEDIDO EXIGE, NÃO PELO VEÍCULO DE QUEM ACEITA.
+    Isso não é preferência, é imposição do fluxo: o frete é cotado no
+    checkout, ANTES de existir entregador. Se dependesse do veículo de quem
+    aceita, o preço mudaria depois que o cliente já viu — ou o carro receberia
+    o mesmo que a moto por carregar 60 kg.
+
+    Devolve (fixo_extra, preco_km, chave_do_veiculo, rótulo):
+      • fixo_extra  — soma à taxa base. Paga o TRABALHO de carregar, que a
+                      conta por km não cobre: 60 kg de ração são 10-15 min a
+                      mais de esforço, iguais a 1 km ou a 10.
+      • preco_km    — SUBSTITUI o per_km normal. Paga o CUSTO de rodar: carro
+                      faz ~10 km/L contra ~35 km/L da moto.
+      • None em preco_km = usa o per_km normal (bike/moto).
+
+    Peso 0 (item sem peso cadastrado) cai em bike: sem adicional. É o mesmo
+    fail-open da trava de carga, e a razão de o peso precisar ser obrigatório
+    nos segmentos que vendem coisa pesada — senão 60 kg passam por 0 kg e o
+    adicional nunca dispara.
+    """
+    settings = settings or {}
+    alvo = veiculo_minimo(peso_kg, settings)
+    if not alvo:
+        # Nem o maior veículo leva: quem chama decide o que fazer (a trava de
+        # carga recusa o pedido). Aqui devolve o teto, pra não cobrar barato.
+        alvo = ('utilitario', _ROTULO['utilitario'])
+    chave, rotulo = alvo
+
+    padrao = _PADRAO_FRETE.get(chave)
+    if not padrao:
+        return (0.0, None, chave, rotulo)
+
+    def _num(nome, default):
+        bruto = settings.get(nome)
+        try:
+            v = float(str(bruto).replace(',', '.')) if bruto not in (None, '') else None
+        except (TypeError, ValueError):
+            v = None
+        # Configuração inválida NÃO vira frete zero: cai no padrão.
+        return v if (v is not None and v >= 0) else default
+
+    fixo = _num(f'frete_adicional_{chave}', padrao['fixo'])
+    km = _num(f'frete_km_{chave}', padrao['km'])
+    return (fixo, km, chave, rotulo)

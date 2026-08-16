@@ -16,6 +16,29 @@ logging.basicConfig(level=logging.INFO)
 menu_bp = Blueprint('menu_bp', __name__)
 CORS(menu_bp) 
 
+# Segmentos que vendem coisa PESADA. Neles o peso é obrigatório: sem ele o
+# pedido calcula 0 kg, o adicional de carga nunca dispara e a trava de veículo
+# (fail-open em peso zero) deixa 60 kg de ração irem de moto. Restaurante,
+# padaria e farmácia ficam de fora porque comida não chega perto de 20 kg —
+# exigir peso ali seria atrito sem ganho.
+_SEGMENTOS_COM_PESO = {'pet', 'mercado', 'agropecuaria', 'agropecuária', 'bebidas'}
+
+
+def _exige_peso(cur, restaurant_id):
+    """A loja é de um segmento onde o peso importa?"""
+    try:
+        cur.execute("SELECT segment FROM restaurant_profiles WHERE id = %s", (str(restaurant_id),))
+        row = cur.fetchone()
+        seg = (row[0] if row and not isinstance(row, dict) else (row or {}).get('segment')) or ''
+        return str(seg).strip().lower() in _SEGMENTOS_COM_PESO
+    except Exception:
+        # Não conseguiu saber o segmento: NÃO bloqueia o cadastro. Recusar item
+        # por causa de uma consulta que falhou seria trocar um problema de
+        # precificação por um de "não consigo cadastrar meu produto".
+        logging.warning("Não deu pra ler o segmento da loja %s — peso não exigido", restaurant_id)
+        return False
+
+
 def _peso_kg(data):
     """Peso do produto em kg, tolerante e sem inventar valor.
 
@@ -108,11 +131,23 @@ def add_menu_item(conn):
                 return jsonify({"status": "error", "error": "Restaurant profile not found"}), 404
             restaurant_id = restaurant_profile['id']
 
+            # Peso obrigatório onde ele decide o frete e o veículo. Bloquear na
+            # ORIGEM é o que faz a regra valer: um aviso depois viraria uma
+            # lista de pendências que ninguém limpa.
+            peso = _peso_kg(data)
+            if peso is None and _exige_peso(cur, restaurant_id):
+                return jsonify({
+                    "status": "error",
+                    "error": "peso_obrigatorio",
+                    "message": "Informe o peso em kg. É ele que define o frete e "
+                               "se o pedido cabe numa moto ou precisa de carro.",
+                }), 400
+
             # Inserir o item com o restaurant_id correto
             cur.execute(
                 "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), _peso_kg(data))
+                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), peso)
             )
             new_item = make_serializable(dict(cur.fetchone()))
             conn.commit()
@@ -134,8 +169,20 @@ def update_menu_item(conn, item_id):
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         # Verificar se o item pertence ao restaurante do usuário antes de atualizar
         cur.execute("SELECT rp.id FROM restaurant_profiles rp JOIN menu_items mi ON rp.id = mi.restaurant_id WHERE mi.id = %s AND rp.user_id = %s", (str(item_id), user_id))
-        if not cur.fetchone():
+        dono = cur.fetchone()
+        if not dono:
             return jsonify({"status": "error", "error": "Item not found or you are not authorized to edit it"}), 404
+
+        # Mesma exigência da criação. Sem isto, bastava criar o item antes de a
+        # loja virar 'pet' — ou salvar de novo apagando o peso — pra escapar.
+        peso = _peso_kg(data)
+        if peso is None and _exige_peso(cur, dono['id']):
+            return jsonify({
+                "status": "error",
+                "error": "peso_obrigatorio",
+                "message": "Informe o peso em kg. É ele que define o frete e "
+                           "se o pedido cabe numa moto ou precisa de carro.",
+            }), 400
 
         # Atualizar o item
         cur.execute(
@@ -146,7 +193,7 @@ def update_menu_item(conn, item_id):
             WHERE id = %s
             RETURNING *
             """,
-            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), _peso_kg(data), str(item_id))
+            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), peso, str(item_id))
         )
         updated_item = make_serializable(dict(cur.fetchone()))
         conn.commit()

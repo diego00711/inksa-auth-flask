@@ -40,6 +40,42 @@ def handle_preflight():
         response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
         return response
 
+def _adicional_de_carga(itens, settings):
+    """Peso do carrinho -> adicional de frete. Nunca derruba a cotação.
+
+    O peso vem do CATÁLOGO, não do que o app enviou: preço que o cliente
+    manda é preço que o cliente escolhe.
+
+    Falhou a consulta? Devolve "sem adicional" e loga. Um erro aqui não pode
+    impedir a pessoa de ver o frete e fechar o pedido — no pior caso a
+    plataforma cobra a menos numa entrega, o que é reparável; carrinho que não
+    fecha não é.
+    """
+    from ..utils.carga import frete_da_carga, peso_do_pedido
+    from ..utils.helpers import get_db_connection
+
+    if not itens:
+        return (0.0, None, 'bike', 'bicicleta')
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return (0.0, None, 'bike', 'bicicleta')
+        with conn.cursor() as cur:
+            peso = peso_do_pedido(cur, itens)
+        return frete_da_carga(peso, settings)
+    except Exception as exc:
+        logger.warning("Adicional de carga não calculado (%s) — frete sem adicional", exc)
+        return (0.0, None, 'bike', 'bicicleta')
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 @delivery_calculator_bp.route('/calculate_fee', methods=['POST', 'OPTIONS'])
 def calculate_delivery_fee():
     """Calcula a taxa de entrega baseada no restaurante e localização do cliente"""
@@ -56,6 +92,11 @@ def calculate_delivery_fee():
         restaurant_id = data.get('restaurant_id')
         client_latitude = data.get('client_latitude') 
         client_longitude = data.get('client_longitude')
+        # Itens do carrinho: só pra saber o PESO. O adicional de carga
+        # (carro/utilitário) tem que entrar aqui, no checkout, porque é aqui
+        # que o cliente vê o preço — depois de fechado, mudar frete é quebrar
+        # combinado.
+        itens_carrinho = data.get('items') or data.get('itens') or []
         
         if not restaurant_id:
             logger.warning("restaurant_id não fornecido")
@@ -176,13 +217,21 @@ def calculate_delivery_fee():
                         "message": _area["message"],
                     }), 200
 
-                delivery_fee = fixed_fee
+                # Adicional de carga: pedido que EXIGE carro custa mais que
+                # pedido que cabe numa moto. O peso vem do catálogo (o preço
+                # não pode depender do que o app manda).
+                fixo_carga, km_carga, _v_chave, v_rotulo = _adicional_de_carga(itens_carrinho, s)
+                km_efetivo = km_carga if km_carga is not None else per_km_fee
+
+                delivery_fee = fixed_fee + fixo_carga
                 if distance_km > free_threshold:
                     additional_km = distance_km - free_threshold
-                    delivery_fee += additional_km * per_km_fee
-                    calculation_method = f"Taxa base R$ {fixed_fee:.2f} + R$ {per_km_fee:.2f}/km extra"
+                    delivery_fee += additional_km * km_efetivo
+                    calculation_method = f"Taxa base R$ {fixed_fee:.2f} + R$ {km_efetivo:.2f}/km extra"
                 else:
                     calculation_method = f"Taxa base R$ {fixed_fee:.2f} (dentro do limite gratuito)"
+                if fixo_carga or km_carga is not None:
+                    calculation_method += f" + carga de {v_rotulo} (R$ {fixo_carga:.2f})"
 
             logger.info(f"Taxa calculada: R$ {delivery_fee}")
         
