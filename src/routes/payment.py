@@ -41,6 +41,41 @@ if supabase_client is None:
 
 _SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
+
+def _checar_area_entrega(restaurant_id, cli_lat, cli_lng):
+    """Recusa pedido fora da área da loja. Devolve (fora, mensagem).
+
+    Fail-open em erro de leitura ou coordenada ausente: a função existe pra
+    barrar a distância ABSURDA, não pra derrubar checkout por cadastro
+    incompleto. Quem trata restaurante sem coordenadas é a calculadora, que já
+    cobra taxa base e sinaliza.
+    """
+    if not restaurant_id or cli_lat is None or cli_lng is None:
+        return False, None
+    try:
+        from ..utils.area_entrega import verificar_area
+
+        r = supabase_client.table('restaurant_profiles').select(
+            'latitude, longitude, delivery_type, own_delivery_radius_km, restaurant_name'
+        ).eq('id', str(restaurant_id)).limit(1).execute()
+        if not r.data:
+            return False, None
+        loja = r.data[0]
+        ok, area = verificar_area(
+            loja.get('latitude'), loja.get('longitude'), cli_lat, cli_lng,
+            delivery_type=loja.get('delivery_type') or 'platform',
+            own_delivery_radius_km=loja.get('own_delivery_radius_km'),
+            nome_loja=loja.get('restaurant_name'),
+        )
+        if not ok:
+            logging.warning("Pedido recusado por área: %s km (raio %s km) — loja %s",
+                            area["distancia_km"], area["raio_km"], restaurant_id)
+            return True, area["message"]
+        return False, None
+    except Exception:
+        logging.warning("Checagem de área falhou — deixando passar", exc_info=True)
+        return False, None
+
 # Piso de cobrança do Asaas. É regra DELES, não nossa — vale pra PIX, débito e
 # crédito igualmente. Fica em env var caso mudem: ASAAS_VALOR_MINIMO.
 ASAAS_VALOR_MINIMO = float(os.environ.get("ASAAS_VALOR_MINIMO", "5.00"))
@@ -283,6 +318,21 @@ def criar_preferencia_mercado_pago():
         except Exception as _e_payout:
             logging.warning(f"⚠️ calculate_courier_payout na criação falhou ({_e_payout}); usando frete cheio.")
             _payout_create = _fee_create
+
+        # 🔒 ÁREA DE ENTREGA — barreira autoritativa.
+        #
+        # A calculadora de frete é CONSELHO: quem grava o pedido é quem precisa
+        # recusar. Sem esta checagem, dois pedidos de São Paulo pra Nova Iguaçu
+        # (331,74 km, frete R$ 501,10) foram criados em 13 e 15/08/2026, com o
+        # raio da plataforma em 50 km — um deles gerou cobrança PIX de R$553,10
+        # por uma entrega que ninguém tinha como fazer.
+        _fora, _msg_area = _checar_area_entrega(
+            dados_pedido.get('restaurant_id'),
+            dados_pedido.get('client_latitude'),
+            dados_pedido.get('client_longitude'),
+        )
+        if _fora:
+            return jsonify({"erro": _msg_area, "error_code": "FORA_DA_AREA"}), 409
 
         # Preparar dados do pedido para o banco
         order_data = {
@@ -917,6 +967,13 @@ def processar_pagamento_cartao():
         # 1) Cria o pedido (aguardando pagamento)
         import uuid
         from datetime import datetime
+        # 🔒 Mesma barreira do outro caminho de criação (ver _checar_area_entrega).
+        _fora, _msg_area = _checar_area_entrega(
+            d.get('restaurant_id'), d.get('client_latitude'), d.get('client_longitude'),
+        )
+        if _fora:
+            return jsonify({"erro": _msg_area, "error_code": "FORA_DA_AREA"}), 409
+
         pedido_id = d.get('pedido_id') or str(uuid.uuid4())
         order_data = {
             'id': pedido_id,

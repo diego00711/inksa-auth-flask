@@ -151,6 +151,31 @@ def calculate_delivery_fee():
                 )
                 logger.info(f"Distância calculada: {distance_km} km")
 
+                # RAIO DA PLATAFORMA — a trava que faltava aqui.
+                #
+                # O ramo 'own' logo acima já recusava fora da área; o
+                # 'platform' seguia direto pra conta taxa base + km × preço,
+                # sem teto. Em 13 e 15/08/2026 isso produziu dois pedidos de
+                # São Paulo pra Nova Iguaçu: 331,74 km, frete de R$ 501,10,
+                # com o raio configurado em 50 km. Um gerou cobrança PIX de
+                # R$ 553,10.
+                from ..utils.area_entrega import verificar_area
+                _ok, _area = verificar_area(
+                    restaurant_latitude, restaurant_longitude,
+                    client_latitude, client_longitude,
+                    delivery_type='platform',
+                    settings=s,
+                    nome_loja=restaurant_data.get('restaurant_name'),
+                )
+                if not _ok:
+                    logger.info("Fora do raio da plataforma: %.2f km > %.2f km",
+                                _area["distancia_km"], _area["raio_km"])
+                    return jsonify({
+                        "status": "error",
+                        "error": _area["error"],
+                        "message": _area["message"],
+                    }), 200
+
                 delivery_fee = fixed_fee
                 if distance_km > free_threshold:
                     additional_km = distance_km - free_threshold
