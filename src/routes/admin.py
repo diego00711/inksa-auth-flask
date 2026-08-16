@@ -353,12 +353,21 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10, with_
               -- CARRINHO PARADO: montou o pedido e não finalizou. É o número
               -- que denuncia atrito no checkout ANTES de alguém reclamar —
               -- cliente que desiste não abre ticket, só some.
+              --
+              -- TETO DE 48h. Antes só havia piso (15 min), e carrinho de 5 dias
+              -- ficava no painel pra sempre — o alerta de "precisa de você"
+              -- enchia de entulho que não é trabalho de ninguém, e número que
+              -- nunca zera é número que se aprende a ignorar. A janela é a de
+              -- quem ainda dá pra recuperar; a lista completa, com idade e sem
+              -- corte, fica em /api/admin/carrinhos.
               (SELECT COUNT(*)::int FROM {CLIENTS_TABLE}
                 WHERE COALESCE(cart_items_count, 0) > 0
-                  AND cart_updated_at < NOW() - INTERVAL '15 minutes')       AS carrinhos_parados,
+                  AND cart_updated_at <  NOW() - INTERVAL '15 minutes'
+                  AND cart_updated_at >= NOW() - INTERVAL '48 hours')        AS carrinhos_parados,
               (SELECT COALESCE(SUM(cart_value), 0) FROM {CLIENTS_TABLE}
                 WHERE COALESCE(cart_items_count, 0) > 0
-                  AND cart_updated_at < NOW() - INTERVAL '15 minutes')       AS carrinhos_valor
+                  AND cart_updated_at <  NOW() - INTERVAL '15 minutes'
+                  AND cart_updated_at >= NOW() - INTERVAL '48 hours')        AS carrinhos_valor
         """) or {}
         ent = _fetchrow(conn, _SQL_ENTREGADORES) or {}
 
@@ -1940,6 +1949,141 @@ def readiness():
                 "entregadores_prontos": sum(1 for e in entregadores if e["pode_receber"]),
             },
         }}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CARRINHOS PARADOS
+# O alerta do dashboard existia e apontava pra /usuarios — uma lista de gente,
+# sem dizer QUEM parou nem deixar fazer nada. Era um aviso sem saída.
+#
+# Aqui dá pra ver quem é e mandar UM lembrete. O lembrete é sobre o carrinho da
+# própria pessoa, não propaganda de terceiro — a mesma distinção que separa
+# push de serviço de push de anúncio, e a razão de isto não cair na trava de
+# campanha (que existe pra cupom de loja).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CARRINHO_MIN = 15
+
+
+@admin_bp.route("/carrinhos", methods=["GET"])
+@admin_required
+def carrinhos_parados():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        linhas = _fetchall(conn, f"""
+            SELECT cp.id,
+                   COALESCE(NULLIF(TRIM(CONCAT_WS(' ', cp.first_name, cp.last_name)), ''),
+                            'sem nome') AS nome,
+                   NULLIF(TRIM(cp.phone), '') AS telefone,
+                   COALESCE(cp.cart_items_count, 0) AS itens,
+                   COALESCE(cp.cart_value, 0)       AS valor,
+                   cp.cart_updated_at,
+                   ROUND(EXTRACT(EPOCH FROM (NOW() - cp.cart_updated_at)) / 60)::int AS minutos,
+                   (NULLIF(TRIM(cp.fcm_token), '') IS NOT NULL) AS tem_push,
+                   EXISTS (SELECT 1 FROM push_campaign_log l
+                            WHERE l.client_id = cp.id
+                              AND l.campanha = 'cart:' ||
+                                  (NOW() AT TIME ZONE 'America/Sao_Paulo')::date::text
+                   ) AS ja_lembrado_hoje
+              FROM {CLIENTS_TABLE} cp
+             WHERE COALESCE(cp.cart_items_count, 0) > 0
+               AND cp.cart_updated_at < NOW() - INTERVAL '{_CARRINHO_MIN} minutes'
+             ORDER BY cp.cart_value DESC NULLS LAST
+        """)
+        for l in linhas:
+            l["id"] = str(l["id"])
+            l["valor"] = float(l["valor"] or 0)
+            l["itens"] = int(l["itens"] or 0)
+            l["minutos"] = int(l["minutos"] or 0)
+            l["cart_updated_at"] = (l["cart_updated_at"].isoformat()
+                                    if l.get("cart_updated_at") else None)
+        return jsonify({"status": "success", "data": {
+            "carrinhos": linhas,
+            "total_valor": round(sum(l["valor"] for l in linhas), 2),
+            "minutos_corte": _CARRINHO_MIN,
+        }}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@admin_bp.route("/carrinhos/<client_id>/lembrar", methods=["POST"])
+@admin_required
+@limiter.limit("30 per minute")
+def lembrar_carrinho(client_id):
+    """Manda UM push sobre o carrinho parado da pessoa.
+
+    Uma vez por dia por pessoa, garantido por índice único em
+    push_campaign_log (client_id, campanha) com a campanha carimbada com a
+    data. Dois cliques no botão não viram dois pushes.
+    """
+    from ..services.notification_service import send_campaign
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(f"""
+                SELECT id, NULLIF(TRIM(fcm_token), '') AS token,
+                       COALESCE(cart_value, 0) AS valor,
+                       COALESCE(cart_items_count, 0) AS itens
+                  FROM {CLIENTS_TABLE} WHERE id = %s
+            """, (client_id,))
+            cli = cur.fetchone()
+            if not cli:
+                return jsonify({"status": "error", "message": "Cliente não encontrado."}), 404
+            if not cli["token"]:
+                return jsonify({"status": "error",
+                                "message": "Este cliente não tem avisos ligados — não dá pra lembrar."}), 400
+            if int(cli["itens"] or 0) <= 0:
+                return jsonify({"status": "error",
+                                "message": "O carrinho já não tem itens."}), 400
+
+            cur.execute("SELECT (NOW() AT TIME ZONE 'America/Sao_Paulo')::date::text AS d")
+            campanha = "cart:" + cur.fetchone()["d"]
+
+            # Reserva ANTES de enviar: se dois cliques chegarem juntos, o
+            # segundo bate no índice único e não manda. Melhor não lembrar do
+            # que lembrar duas vezes.
+            cur.execute(
+                "INSERT INTO push_campaign_log (client_id, campanha, tipo) "
+                "VALUES (%s, %s, 'cart') ON CONFLICT (client_id, campanha) DO NOTHING "
+                "RETURNING id",
+                (client_id, campanha),
+            )
+            if cur.fetchone() is None:
+                conn.commit()
+                return jsonify({"status": "error",
+                                "message": "Esta pessoa já foi lembrada hoje."}), 409
+            conn.commit()
+
+        itens = int(cli["itens"])
+        valor = float(cli["valor"] or 0)
+        corpo = (f"{itens} {'item' if itens == 1 else 'itens'} esperando"
+                 + (f" — R$ {valor:.2f}".replace(".", ",") if valor > 0 else "")
+                 + ". Finalizar agora?")
+        res = send_campaign([(client_id, cli["token"])],
+                            "Seu pedido ficou pela metade", corpo,
+                            {"type": "cart", "url": "/carrinho"})
+
+        # Token recusado = app desinstalado. Limpa e devolve o direito do dia,
+        # senão a pessoa fica marcada como lembrada por um push que não saiu.
+        if str(client_id) in {str(x) for x in (res.get("invalidos") or [])}:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE {CLIENTS_TABLE} SET fcm_token = NULL WHERE id = %s", (client_id,))
+                cur.execute("DELETE FROM push_campaign_log WHERE client_id = %s AND campanha = %s",
+                            (client_id, campanha))
+            conn.commit()
+            return jsonify({"status": "error",
+                            "message": "O aparelho recusou o aviso (app desinstalado). Token limpo."}), 400
+
+        return jsonify({"status": "success", "message": "Lembrete enviado."}), 200
     finally:
         try: conn.close()
         except Exception: pass
