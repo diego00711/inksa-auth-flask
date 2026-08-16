@@ -130,7 +130,12 @@ def buscar_pesos(cur, itens):
         return {}
     try:
         cur.execute("SELECT id, peso_kg FROM menu_items WHERE id = ANY(%s::uuid[])", (ids,))
-        return {str(r['id']): r['peso_kg'] for r in cur.fetchall() if r['peso_kg'] is not None}
+        # Índice, não nome: assim funciona com cursor comum E com DictCursor.
+        # Com r['peso_kg'] esta função exigia DictCursor sem dizer — quem
+        # chamasse com cursor comum levava TypeError, que o except abaixo
+        # engolia, e o pedido seguia como 0 kg. Aconteceu: o adicional de
+        # frete por carga nasceu sem funcionar por causa disso.
+        return {str(r[0]): r[1] for r in cur.fetchall() if r[1] is not None}
     except Exception:
         logger.warning("Não consegui ler peso dos itens — pedido segue como 0 kg", exc_info=True)
         return {}

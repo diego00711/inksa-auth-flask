@@ -51,6 +51,7 @@ def _adicional_de_carga(itens, settings):
     plataforma cobra a menos numa entrega, o que é reparável; carrinho que não
     fecha não é.
     """
+    import psycopg2.extras
     from ..utils.carga import frete_da_carga, peso_do_pedido
     from ..utils.helpers import get_db_connection
 
@@ -62,11 +63,12 @@ def _adicional_de_carga(itens, settings):
         conn = get_db_connection()
         if not conn:
             return (0.0, None, 'bike', 'bicicleta')
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             peso = peso_do_pedido(cur, itens)
         return frete_da_carga(peso, settings)
     except Exception as exc:
-        logger.warning("Adicional de carga não calculado (%s) — frete sem adicional", exc)
+        logger.warning("Adicional de carga não calculado — frete sem adicional",
+                       exc_info=True)
         return (0.0, None, 'bike', 'bicicleta')
     finally:
         if conn:
