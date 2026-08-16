@@ -2087,3 +2087,81 @@ def lembrar_carrinho(client_id):
     finally:
         try: conn.close()
         except Exception: pass
+
+
+@admin_bp.route("/carrinhos/<client_id>", methods=["DELETE"])
+@admin_required
+@limiter.limit("60 per minute")
+def descartar_carrinho(client_id):
+    """Tira o carrinho da lista, zerando o registro no perfil.
+
+    ⚠️ ISTO NÃO ESVAZIA O CARRINHO DA PESSOA. Estes campos são um ESPELHO: o
+    app do cliente manda o conteúdo do carrinho de tempos em tempos
+    (`/api/client/heartbeat`), e é isso que preenche as colunas. Zerar aqui
+    limpa o painel agora; se a pessoa abrir o app com o carrinho ainda
+    montado, o próximo heartbeat regrava e ela reaparece.
+
+    Serve pro que o Diego precisa: sumir com carrinho velho de testador, que
+    ninguém vai reabrir. Esvaziar o carrinho de alguém pelas costas seria
+    outra coisa — e uma coisa ruim.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(f"""
+                UPDATE {CLIENTS_TABLE}
+                   SET cart_items_count = 0, cart_value = 0, cart_updated_at = NULL
+                 WHERE id = %s
+                RETURNING COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''),
+                                   'sem nome') AS nome
+            """, (client_id,))
+            linha = cur.fetchone()
+            if not linha:
+                return jsonify({"status": "error", "message": "Cliente não encontrado."}), 404
+            conn.commit()
+        log_admin_action_auto("DescartarCarrinho",
+                              f"Carrinho parado descartado: {linha['nome']} ({client_id})")
+        return jsonify({"status": "success", "message": "Carrinho tirado da lista."}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@admin_bp.route("/carrinhos/antigos", methods=["DELETE"])
+@admin_required
+@limiter.limit("10 per minute")
+def descartar_carrinhos_antigos():
+    """Tira da lista todos os carrinhos com mais de N horas (padrão 48).
+
+    Mesma ressalva do individual: é o espelho que some, não o carrinho da
+    pessoa. Só alcança os ANTIGOS de propósito — um botão que limpasse tudo
+    apagaria justamente os recentes, que são os que ainda dá pra recuperar.
+    """
+    try:
+        horas = int(request.args.get("horas", 48))
+    except (TypeError, ValueError):
+        horas = 48
+    horas = max(1, min(horas, 24 * 365))
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                UPDATE {CLIENTS_TABLE}
+                   SET cart_items_count = 0, cart_value = 0, cart_updated_at = NULL
+                 WHERE COALESCE(cart_items_count, 0) > 0
+                   AND cart_updated_at < NOW() - (%s * INTERVAL '1 hour')
+            """, (horas,))
+            n = cur.rowcount
+            conn.commit()
+        log_admin_action_auto("DescartarCarrinhosAntigos",
+                              f"{n} carrinho(s) com mais de {horas}h descartado(s)")
+        return jsonify({"status": "success", "descartados": n,
+                        "message": f"{n} carrinho(s) tirado(s) da lista."}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
