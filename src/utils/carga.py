@@ -25,6 +25,12 @@ _APELIDOS = {
     'carro': 'carro', 'automovel': 'carro', 'automóvel': 'carro',
     'utilitario': 'utilitario', 'utilitário': 'utilitario',
     'van': 'utilitario', 'caminhonete': 'utilitario', 'pickup': 'utilitario',
+    # LEGADO EM INGLÊS. O CHECK do banco sempre aceitou 'motorcycle' e 'car',
+    # mas eles não estavam aqui: normalizavam pra None e o filtro de carga, que
+    # é fail-closed pra veículo desconhecido, deixava o entregador sem receber
+    # NADA — online e calado. Um valor que o banco aceita e o código não
+    # entende é uma armadilha esperando alguém cair.
+    'motorcycle': 'moto', 'car': 'carro',
 }
 
 # Ordem crescente de capacidade — usada pra dizer o veículo MÍNIMO necessário.

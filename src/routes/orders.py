@@ -1803,11 +1803,16 @@ def get_available_orders():
             if (not assign_on) and drv_lat is not None and drv_lng is not None:
                 # Raio POR TIPO DE VEÍCULO: bike alcança menos que moto/carro.
                 # Se o específico estiver 0/vazio (ou for 'outro'), usa o global.
+                # Normaliza antes de olhar o mapa: o banco aceita 'motorcycle'
+                # e 'car' (legado), e sem normalizar eles cairiam no raio global
+                # silenciosamente — parecendo funcionar, com o raio errado.
+                from ..utils.carga import normalizar_veiculo as _nv
                 _radius_key = {
-                    'bicicleta': 'delivery_radius_bike_km',
-                    'moto':      'delivery_radius_moto_km',
-                    'carro':     'delivery_radius_carro_km',
-                }.get(_dp['vehicle_type'])
+                    'bike':       'delivery_radius_bike_km',
+                    'moto':       'delivery_radius_moto_km',
+                    'carro':      'delivery_radius_carro_km',
+                    'utilitario': 'delivery_radius_utilitario_km',
+                }.get(_nv(_dp['vehicle_type']))
                 radius_km = 0.0
                 if _radius_key:
                     try:

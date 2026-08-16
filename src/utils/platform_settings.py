@@ -51,6 +51,8 @@ _DEFAULTS: dict[str, Decimal] = {
     "delivery_radius_bike_km":  Decimal("2"),
     "delivery_radius_moto_km":  Decimal("8"),
     "delivery_radius_carro_km": Decimal("10"),
+    # Utilitário alcança mais: é quem faz a entrega grande, que compensa rodar.
+    "delivery_radius_utilitario_km": Decimal("15"),
     # Motor de atribuição de pedidos. dispatch_assign_enabled: 0 = broadcast
     # (todos no raio veem, padrão atual), 1 = atribuição (oferta ao mais
     # próximo com timeout). offer_seconds: tempo da oferta. decline_cooldown_min:
@@ -117,6 +119,7 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
     for k in ("fixed_delivery_fee", "per_km_delivery_fee", "free_delivery_threshold_km",
               "delivery_base_fee", "delivery_per_km_fee", "platform_max_delivery_radius",
               "delivery_radius_bike_km", "delivery_radius_moto_km", "delivery_radius_carro_km",
+              "delivery_radius_utilitario_km",
               "dispatch_assign_enabled", "dispatch_offer_seconds", "dispatch_decline_cooldown_min",
               "dispatch_weight_distance", "dispatch_weight_idle", "dispatch_weight_rating",
               "dispatch_weight_balance", "dispatch_idle_target_minutes", "dispatch_daily_target",
