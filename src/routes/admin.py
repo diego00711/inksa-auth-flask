@@ -1812,3 +1812,134 @@ def test_push_send():
         f"{user_type} {user_id} — enviado={resultado.get('enviado')} {resultado.get('erro') or ''}".strip(),
     )
     return jsonify({"status": "success" if resultado.get("enviado") else "error", **resultado}), 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRONTIDÃO DA PRAÇA
+# Responde uma pergunta só: "se um cliente abrir o app agora, ele consegue
+# pedir?" — e, quando não consegue, QUEM está faltando.
+#
+# Existe porque os números que importam estavam espalhados e nenhum deles
+# aparecia em lugar nenhum. Dava pra ter 12 lojas "aprovadas e ativas" no
+# painel e o cliente ver três, sendo uma vazia — e ninguém notava, porque o
+# painel contava cadastro, não vitrine.
+#
+# As regras aqui são as MESMAS da listagem pública (public_restaurants.py):
+# aprovada + ativa + dono ativo + COM COORDENADA. Loja sem lat/lng é escondida
+# do cliente de propósito (sem coordenada não dá pra calcular frete e ela
+# escaparia do filtro de raio), então ela não pode ser contada como pronta.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route("/prontidao", methods=["GET"])
+@admin_required
+def readiness():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        lojas = _fetchall(conn, """
+            SELECT rp.restaurant_name AS nome,
+                   NULLIF(TRIM(rp.address_city), '')  AS cidade,
+                   UPPER(NULLIF(TRIM(rp.address_state), '')) AS uf,
+                   COALESCE(rp.approved, TRUE)  AS aprovada,
+                   COALESCE(rp.active, TRUE)    AS ativa,
+                   COALESCE(u.is_active, TRUE)  AS dono_ativo,
+                   (rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL) AS tem_coordenada,
+                   (SELECT COUNT(*) FROM menu_items m WHERE m.restaurant_id = rp.id) AS itens,
+                   COALESCE(rp.delivery_type, 'platform') AS tipo_entrega
+              FROM restaurant_profiles rp
+              LEFT JOIN users u ON u.id = rp.user_id
+             ORDER BY rp.restaurant_name
+        """)
+        for l in lojas:
+            faltas = []
+            if not (l["aprovada"] and l["ativa"] and l["dono_ativo"]):
+                faltas.append("aprovação/ativação")
+            if not l["tem_coordenada"]:
+                faltas.append("endereço no mapa")
+            if int(l["itens"] or 0) == 0:
+                faltas.append("cardápio")
+            if not l["uf"]:
+                faltas.append("estado (UF)")
+            l["itens"] = int(l["itens"] or 0)
+            l["faltas"] = faltas
+            # "Vendável" = o cliente VÊ e tem o que pedir. As duas coisas.
+            l["vendavel"] = (l["aprovada"] and l["ativa"] and l["dono_ativo"]
+                             and l["tem_coordenada"] and l["itens"] > 0)
+
+        entregadores = _fetchall(conn, """
+            SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', dp.first_name, dp.last_name)), ''),
+                            'sem nome') AS nome,
+                   NULLIF(TRIM(dp.address_city), '') AS cidade,
+                   COALESCE(dp.approved, FALSE) AS aprovado,
+                   NULLIF(TRIM(dp.vehicle_type), '') AS veiculo,
+                   (dp.latitude IS NOT NULL AND dp.longitude IS NOT NULL) AS tem_coordenada,
+                   NULLIF(TRIM(dp.phone), '') AS telefone,
+                   NULLIF(TRIM(dp.cpf), '')   AS cpf
+              FROM delivery_profiles dp
+             ORDER BY 1
+        """)
+        for e in entregadores:
+            faltas = []
+            if not e["aprovado"]:
+                faltas.append("aprovação do admin")
+            if not e["tem_coordenada"]:
+                # É a causa nº1 de "estou online e não chega nada": o filtro de
+                # raio precisa de onde ele está.
+                faltas.append("endereço no mapa")
+            if not e["veiculo"]:
+                # O filtro de carga é fail-closed pra veículo desconhecido:
+                # sem isso ele não recebe pedido NENHUM, e em silêncio.
+                faltas.append("tipo de veículo")
+            if not e["telefone"]:
+                faltas.append("telefone")
+            if not e["cpf"]:
+                faltas.append("CPF")
+            e["faltas"] = faltas
+            e["pode_receber"] = not faltas
+
+        clientes = _fetchrow(conn, """
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE NULLIF(TRIM(phone), '') IS NOT NULL)     AS com_telefone,
+                   COUNT(*) FILTER (WHERE NULLIF(TRIM(fcm_token), '') IS NOT NULL) AS com_push,
+                   COUNT(*) FILTER (WHERE EXISTS (
+                       SELECT 1 FROM client_addresses ca WHERE ca.user_id = client_profiles.user_id
+                   )) AS com_endereco
+              FROM client_profiles
+        """) or {}
+
+        pedidos = _fetchrow(conn, """
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE status IN ('delivered','completed')) AS entregues,
+                   COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS ultimos_7_dias,
+                   MAX(created_at) AS ultimo
+              FROM orders
+        """) or {}
+        if pedidos.get("ultimo") is not None:
+            pedidos["ultimo"] = pedidos["ultimo"].isoformat()
+
+        # Praças = onde há loja vendável. É a lista que o cliente enxerga,
+        # não a lista de cadastros.
+        pracas = {}
+        for l in lojas:
+            if not l["vendavel"]:
+                continue
+            chave = f'{l["cidade"] or "sem cidade"}{" - " + l["uf"] if l["uf"] else ""}'
+            pracas[chave] = pracas.get(chave, 0) + 1
+
+        return jsonify({"status": "success", "data": {
+            "lojas": lojas,
+            "entregadores": entregadores,
+            "clientes": {k: int(v or 0) for k, v in clientes.items()},
+            "pedidos": {k: (int(v or 0) if k != "ultimo" else v) for k, v in pedidos.items()},
+            "pracas": [{"praca": k, "lojas_vendaveis": v} for k, v in sorted(pracas.items())],
+            "resumo": {
+                "lojas_cadastradas": len(lojas),
+                "lojas_vendaveis": sum(1 for l in lojas if l["vendavel"]),
+                "entregadores_cadastrados": len(entregadores),
+                "entregadores_prontos": sum(1 for e in entregadores if e["pode_receber"]),
+            },
+        }}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
