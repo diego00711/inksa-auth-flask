@@ -1550,6 +1550,7 @@ def _run_dispatch_tick(cur, settings):
     r_bike  = _f("delivery_radius_bike_km")  or r_global
     r_moto  = _f("delivery_radius_moto_km")  or r_global
     r_carro = _f("delivery_radius_carro_km") or r_global
+    r_util  = _f("delivery_radius_utilitario_km") or r_global
 
     # Capacidade de carga por veículo (kg). O motor PRECISA respeitar isso:
     # se ele ofertar 60 kg a quem está de bicicleta, o filtro de carga em
@@ -1558,6 +1559,7 @@ def _run_dispatch_tick(cur, settings):
     from ..utils.carga import capacidades as _capacidades
     _caps = _capacidades(settings)
     c_bike, c_moto, c_carro = _caps['bike'], _caps['moto'], _caps['carro']
+    c_util = _caps['utilitario']
 
     # Pesos da nota composta (admin). Se todos vierem 0, cai em "só distância"
     # — assim uma configuração zerada por engano não trava o dispatch.
@@ -1617,9 +1619,16 @@ def _run_dispatch_tick(cur, settings):
                        ll_to_earth(%s, %s),
                        ll_to_earth(COALESCE(dp.current_lat, dp.latitude), COALESCE(dp.current_lng, dp.longitude))
                      ) AS dist,
-                     (CASE dp.vehicle_type
-                        WHEN 'bicicleta' THEN %s WHEN 'moto' THEN %s
-                        WHEN 'carro' THEN %s ELSE %s END) * 1000.0 AS raio_m,
+                     -- Raio por veículo. Lista os apelidos que o banco aceita:
+                     -- 'motorcycle'/'car' são legado do CHECK e, sem eles, o
+                     -- entregador caía no ELSE e rodava com o raio global sem
+                     -- ninguém perceber.
+                     (CASE
+                        WHEN dp.vehicle_type IN ('bike','bicicleta')   THEN %s
+                        WHEN dp.vehicle_type IN ('moto','motorcycle')  THEN %s
+                        WHEN dp.vehicle_type IN ('carro','car')        THEN %s
+                        WHEN dp.vehicle_type = 'utilitario'            THEN %s
+                        ELSE %s END) * 1000.0 AS raio_m,
                      COALESCE((SELECT AVG(dr.rating)::numeric
                                  FROM delivery_reviews dr
                                 WHERE dr.delivery_id = dp.id), %s) AS nota,
@@ -1647,9 +1656,16 @@ def _run_dispatch_tick(cur, settings):
                  -- CARGA: o veículo tem que aguentar o peso do pedido.
                  -- Veículo fora da lista cai no ELSE 0 e só passa em pedido
                  -- sem peso — fail-closed, como no gate de get_available_orders.
-                 AND (CASE dp.vehicle_type
-                        WHEN 'bicicleta' THEN %s WHEN 'moto' THEN %s
-                        WHEN 'carro' THEN %s ELSE 0 END) >= %s
+                 -- ⚠️ Faltava 'utilitario' aqui: ele caía no ELSE 0, e
+                 -- 0 >= 120 é falso — o único veículo capaz de levar a carga
+                 -- era o único excluído do motor. O pedido ficava sem oferta,
+                 -- em silêncio. Achado no primeiro teste real de 120 kg.
+                 AND (CASE
+                        WHEN dp.vehicle_type IN ('bike','bicicleta')   THEN %s
+                        WHEN dp.vehicle_type IN ('moto','motorcycle')  THEN %s
+                        WHEN dp.vehicle_type IN ('carro','car')        THEN %s
+                        WHEN dp.vehicle_type = 'utilitario'            THEN %s
+                        ELSE 0 END) >= %s
                  AND NOT (dp.user_id = ANY(%s::uuid[]))
                  -- Quem já está com uma entrega na rua sai dos candidatos.
                  -- Sem isso o motor oferecia pedido pra quem estava no meio de
@@ -1673,10 +1689,10 @@ def _run_dispatch_tick(cur, settings):
              LIMIT 1
             """,
             (od['r_lat'], od['r_lng'],
-             r_bike, r_moto, r_carro, r_global,
+             r_bike, r_moto, r_carro, r_util, r_global,
              default_rating,
              # capacidade por veículo + peso do pedido (filtro de carga)
-             c_bike, c_moto, c_carro, od['peso_total_kg'],
+             c_bike, c_moto, c_carro, c_util, od['peso_total_kg'],
              passed,
              w_dist, w_idle, idle_target, w_rating, w_balance, daily_target),
         )
