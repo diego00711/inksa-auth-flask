@@ -42,6 +42,37 @@ if supabase_client is None:
 _SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 
+def _peso_do_pedido_servidor(itens):
+    """Peso total do pedido, do catálogo. 0 quando não dá pra saber.
+
+    Existe separado porque o peso tem DOIS usos e só um estava coberto: ele
+    entra no frete (adicional de carga) e precisa ser GRAVADO no pedido, senão
+    o filtro de veículo do despacho — que faz COALESCE(peso_total_kg, 0) — lê
+    zero e oferta 120 kg pra quem está de bicicleta.
+    """
+    if not itens:
+        return 0.0
+    conn = None
+    try:
+        import psycopg2.extras
+        from ..utils.carga import peso_do_pedido
+        from ..utils.helpers import get_db_connection
+        conn = get_db_connection()
+        if not conn:
+            return 0.0
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            return float(peso_do_pedido(cur, itens) or 0)
+    except Exception:
+        logging.warning("Peso do pedido não lido no fechamento", exc_info=True)
+        return 0.0
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _frete_do_servidor(dados_pedido):
     """Refaz a conta do frete no servidor. None quando não dá pra saber.
 
@@ -92,22 +123,7 @@ def _frete_do_servidor(dados_pedido):
         if d is None:
             return None  # loja sem coordenada: a calculadora já trata
 
-        peso = 0.0
-        try:
-            import psycopg2.extras
-            from ..utils.carga import peso_do_pedido
-            from ..utils.helpers import get_db_connection
-            conn = get_db_connection()
-            if conn:
-                try:
-                    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                        peso = peso_do_pedido(cur, dados_pedido.get('itens') or [])
-                finally:
-                    conn.close()
-        except Exception:
-            logging.warning("Peso não lido no fechamento — frete sem adicional de carga",
-                            exc_info=True)
-
+        peso = _peso_do_pedido_servidor(dados_pedido.get('itens') or [])
         valor, _metodo = calcular_frete(d, peso, get_settings())
         return valor
     except Exception:
@@ -395,17 +411,41 @@ def criar_preferencia_mercado_pago():
         _fee_srv = _frete_do_servidor(dados_pedido)
         if _fee_srv is not None:
             _fee_app = float(dados_pedido.get('delivery_fee', 0) or 0)
-            if abs(_fee_app - _fee_srv) > 0.05:
+            _dif = round(_fee_srv - _fee_app, 2)
+
+            if _dif > 0.05:
+                # SERVIDOR COBRARIA MAIS DO QUE O CLIENTE VIU. Nunca fechar
+                # assim. A regra anterior ("usa o do servidor e loga") produziu
+                # exatamente o pior caso num teste real: a tela mostrou R$12,50,
+                # o pedido foi gravado com R$37,50, e a pessoa só descobriria
+                # na porta. No Brasil o preço anunciado obriga — e mesmo que
+                # não obrigasse, cobrar a mais por um erro NOSSO é o jeito mais
+                # rápido de perder o cliente.
+                #
+                # Recusar devolve a decisão pra quem tem que decidir: o
+                # carrinho recalcula, ela vê o valor certo e escolhe.
                 logging.warning(
-                    "⚠️ Frete divergente — app mandou R$%.2f, servidor calculou R$%.2f "
-                    "(cliente %s, loja %s). Usando o do servidor.",
+                    "⛔ Frete do app MENOR que o do servidor — app R$%.2f x servidor R$%.2f "
+                    "(cliente %s, loja %s). Pedido recusado.",
                     _fee_app, _fee_srv, client_profile_id, dados_pedido.get('restaurant_id'))
                 try:
                     sentry_sdk.capture_message(
-                        f"Frete divergente: app R${_fee_app:.2f} x servidor R${_fee_srv:.2f}",
+                        f"Frete divergente (recusado): app R${_fee_app:.2f} x servidor R${_fee_srv:.2f}",
                         level="warning")
                 except Exception:
                     pass
+                return jsonify({
+                    "erro": "O valor da entrega mudou. Volte ao carrinho para conferir "
+                            "antes de finalizar.",
+                    "error_code": "FRETE_DIVERGENTE",
+                    "delivery_fee_correto": _fee_srv,
+                }), 409
+
+            if _dif < -0.05:
+                # Servidor cobra MENOS: aplica direto. O cliente só ganha, e
+                # ninguém precisa refazer nada.
+                logging.info("Frete do servidor menor que o do app (R$%.2f -> R$%.2f).",
+                             _fee_app, _fee_srv)
             dados_pedido['delivery_fee'] = _fee_srv
 
         _fee_create = float(dados_pedido.get('delivery_fee', 0) or 0)
@@ -441,6 +481,11 @@ def criar_preferencia_mercado_pago():
             'items': dados_pedido.get('itens', []),
             'total_amount_items': dados_pedido.get('total_amount_items', 0),
             'delivery_fee': dados_pedido.get('delivery_fee', 0),
+            # Sem isto o despacho faz COALESCE(peso_total_kg, 0) e oferece um
+            # pedido de 120 kg pra quem está de bicicleta. Só o POST /orders
+            # gravava esse campo; o fluxo de pagamento (que é por onde os
+            # pedidos do app realmente passam) deixava NULL.
+            'peso_total_kg': _peso_do_pedido_servidor(dados_pedido.get('itens') or []),
             'total_amount': dados_pedido.get('total_amount', 0),
             'delivery_address': dados_pedido.get('delivery_address', ''),
             'notes': dados_pedido.get('notes', ''),

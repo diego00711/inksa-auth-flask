@@ -41,32 +41,33 @@ def handle_preflight():
         return response
 
 def _peso_do_carrinho(itens):
-    """Peso total do carrinho, do CATÁLOGO. Nunca derruba a cotação.
+    """Peso total do carrinho, lido do CATÁLOGO. Devolve float (kg).
 
-    O peso vem do CATÁLOGO, não do que o app enviou: preço que o cliente
-    manda é preço que o cliente escolhe.
+    O peso vem do catálogo, nunca do que o app enviou: peso que o cliente
+    manda é frete que o cliente escolhe.
 
-    Falhou a consulta? Devolve "sem adicional" e loga. Um erro aqui não pode
-    impedir a pessoa de ver o frete e fechar o pedido — no pior caso a
-    plataforma cobra a menos numa entrega, o que é reparável; carrinho que não
-    fecha não é.
+    Falhou? Devolve 0 e loga com stack. Um erro aqui não pode impedir a pessoa
+    de ver o frete — mas ELE NÃO PODE SER MUDO: peso 0 significa "cobra sem
+    adicional de carga", e um pedido de 120 kg saindo com frete de bicicleta
+    não tem sintoma nenhum na tela. Já aconteceu duas vezes; por isso o
+    exc_info.
     """
     import psycopg2.extras
     from ..utils.carga import peso_do_pedido
     from ..utils.helpers import get_db_connection
 
     if not itens:
-        return (0.0, None, 'bike', 'bicicleta')
+        return 0.0
 
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
-            return (0.0, None, 'bike', 'bicicleta')
+            logger.warning("Sem banco pra ler o peso do carrinho — frete sem adicional")
+            return 0.0
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            peso = peso_do_pedido(cur, itens)
-        return frete_da_carga(peso, settings)
-    except Exception as exc:
+            return float(peso_do_pedido(cur, itens) or 0)
+    except Exception:
         logger.warning("Peso do carrinho não lido — frete sem adicional de carga",
                        exc_info=True)
         return 0.0
