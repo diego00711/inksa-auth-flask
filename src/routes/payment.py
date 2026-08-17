@@ -73,6 +73,59 @@ def _peso_do_pedido_servidor(itens):
                 pass
 
 
+def _recusa_sem_veiculo(dados_pedido):
+    """(mensagem, peso) quando NINGUÉM comporta a carga. (None, peso) se ok.
+
+    A trava mora aqui porque existem DOIS caminhos que gravam pedido — o
+    online/dinheiro e o cartão transparente — e proteger só um deixa uma porta
+    aberta com o agravante de parecer resolvida. Foi o que aconteceu com o
+    frete e com o cupom nesta mesma semana.
+
+    Só o caso ESTRUTURAL recusa: ninguém cadastrado com veículo suficiente no
+    raio da loja. "Tem capaz mas está offline" NÃO recusa — enquanto a loja
+    prepara, a pessoa pode entrar, e barrar aí seria perder venda boa.
+
+    Fail-open em qualquer erro: derrubar venda legítima por causa de uma
+    consulta que piscou é pior que o problema que isto evita.
+    """
+    try:
+        peso = _peso_do_pedido_servidor(dados_pedido.get('itens') or [])
+        if peso <= 0:
+            return (None, peso)
+
+        from ..utils.carga import contar_capazes, veiculo_minimo
+        from ..utils.platform_settings import get_settings as _gs
+
+        r = supabase_client.table('restaurant_profiles').select(
+            'latitude, longitude, delivery_type').eq(
+            'id', str(dados_pedido.get('restaurant_id'))).limit(1).execute()
+        if not r.data:
+            return (None, peso)
+        loja = r.data[0]
+
+        # Loja de entrega própria leva com o veículo dela.
+        if (loja.get('delivery_type') or 'platform') == 'own':
+            return (None, peso)
+
+        capaz, _online = contar_capazes(
+            peso, loja.get('latitude'), loja.get('longitude'), _gs())
+        # None = não deu pra checar. Não bloqueia.
+        if capaz != 0:
+            return (None, peso)
+
+        vm = veiculo_minimo(peso)
+        rotulo = vm[1] if vm else 'um veículo maior'
+        logging.warning("⛔ Pedido recusado: %.0f kg exige %s e ninguém cadastrado comporta.",
+                        peso, rotulo)
+        return (
+            f"Este pedido pesa {peso:.0f} kg e precisa de {rotulo}. Ainda não temos "
+            "esse veículo na sua região — tire alguns itens ou divida em dois pedidos.",
+            peso,
+        )
+    except Exception:
+        logging.warning("Checagem de entregador capaz falhou — pedido segue", exc_info=True)
+        return (None, 0.0)
+
 def _frete_do_servidor(dados_pedido):
     """Refaz a conta do frete no servidor. None quando não dá pra saber.
 
@@ -457,43 +510,12 @@ def criar_preferencia_mercado_pago():
             _payout_create = _fee_create
 
         # 🔒 SEM VEÍCULO PRA ESTA CARGA — barreira autoritativa.
-        #
-        # O carrinho já avisa, mas aviso no app é CONSELHO: o app pode estar
-        # com JS antigo em memória (aconteceu no teste de 17/08 — pedido de
-        # 200 kg passou com a trava publicada), e a API aceita chamada direta.
-        # Quem grava o pedido é quem precisa recusar.
-        #
-        # Só o caso ESTRUTURAL: ninguém cadastrado com veículo suficiente no
-        # raio. "Tem capaz mas está offline" NÃO bloqueia — enquanto a loja
-        # prepara, a pessoa pode entrar, e recusar aí seria perder venda boa.
-        try:
-            _peso_ped = _peso_do_pedido_servidor(dados_pedido.get('itens') or [])
-            if _peso_ped > 0:
-                from ..utils.carga import contar_capazes, veiculo_minimo
-                from ..utils.platform_settings import get_settings as _gs
-                _rr = supabase_client.table('restaurant_profiles').select(
-                    'latitude, longitude, delivery_type').eq(
-                    'id', str(dados_pedido.get('restaurant_id'))).limit(1).execute()
-                _loja = (_rr.data or [{}])[0]
-                if (_loja.get('delivery_type') or 'platform') != 'own':
-                    _capaz, _ = contar_capazes(
-                        _peso_ped, _loja.get('latitude'), _loja.get('longitude'), _gs())
-                    if _capaz == 0:
-                        _vm = veiculo_minimo(_peso_ped)
-                        _rot = _vm[1] if _vm else 'veículo maior'
-                        logging.warning(
-                            "⛔ Pedido recusado: %s kg exige %s e ninguém cadastrado comporta.",
-                            _peso_ped, _rot)
-                        return jsonify({
-                            "erro": f"Este pedido pesa {_peso_ped:.0f} kg e precisa de "
-                                    f"{_rot}. Ainda não temos esse veículo na sua região — "
-                                    "tire alguns itens ou divida em dois pedidos.",
-                            "error_code": "SEM_ENTREGADOR",
-                        }), 409
-        except Exception:
-            # Fail-open: falha na checagem não pode derrubar venda legítima.
-            logging.warning("Checagem de entregador capaz falhou — pedido segue",
-                            exc_info=True)
+        # O carrinho já avisa, mas aviso no app é CONSELHO: ele pode estar com
+        # JS antigo em memória (aconteceu em 17/08 — pedido de 200 kg passou
+        # com a trava publicada) e a API aceita chamada direta.
+        _msg_veic, _ = _recusa_sem_veiculo(dados_pedido)
+        if _msg_veic:
+            return jsonify({"erro": _msg_veic, "error_code": "SEM_ENTREGADOR"}), 409
 
         # 🔒 ÁREA DE ENTREGA — barreira autoritativa.
         #
@@ -1109,6 +1131,12 @@ def processar_pagamento_cartao():
 
         items_req = d.get('itens', [])
 
+        # Mesma trava de carga do outro caminho. Cartão é uma FUNÇÃO
+        # DIFERENTE — cobrir só o fluxo online deixaria a porta aberta aqui.
+        _msg_veic_card, _ = _recusa_sem_veiculo(d)
+        if _msg_veic_card:
+            return jsonify({"erro": _msg_veic_card, "error_code": "SEM_ENTREGADOR"}), 409
+
         # Mesma trava do fluxo online: o frete que vale é o do servidor. Esta é
         # OUTRA função (cartão transparente), então precisa da sua própria
         # chamada — deixar de fora daria um caminho por onde o frete zero ainda
@@ -1116,10 +1144,24 @@ def processar_pagamento_cartao():
         _fee_srv_card = _frete_do_servidor(d)
         if _fee_srv_card is not None:
             _fee_app_card = float(d.get('delivery_fee', 0) or 0)
-            if abs(_fee_app_card - _fee_srv_card) > 0.05:
+            _dif_card = _fee_srv_card - _fee_app_card
+            if _dif_card > 0.05:
+                # MESMA regra do fluxo online: se o servidor cobraria MAIS do
+                # que a pessoa viu no carrinho, não fecha. Cobrar R$37,50 num
+                # pedido que mostrava R$12,50 aconteceu em 17/08 e é a pior
+                # falha possível — o cliente descobre pelo extrato.
                 logging.warning(
-                    "⚠️ Frete divergente (cartão) — app R$%.2f, servidor R$%.2f. Usando o do servidor.",
+                    "⛔ Frete divergente (cartão, recusado) — app R$%.2f, servidor R$%.2f.",
                     _fee_app_card, _fee_srv_card)
+                return jsonify({
+                    "erro": "O valor da entrega mudou. Volte ao carrinho para conferir "
+                            "antes de finalizar.",
+                    "error_code": "FRETE_DIVERGENTE",
+                    "delivery_fee_correto": _fee_srv_card,
+                }), 409
+            if _dif_card < -0.05:
+                logging.info("Frete do servidor menor que o do app, cartão (R$%.2f -> R$%.2f).",
+                             _fee_app_card, _fee_srv_card)
             d['delivery_fee'] = _fee_srv_card
 
         try:
@@ -1197,6 +1239,11 @@ def processar_pagamento_cartao():
             'client_longitude': d.get('client_longitude'),
             'delivery_distance_km': d.get('delivery_distance_km'),
             'payment_method': payment_method_id,
+            # Sem isto o despacho faz COALESCE(peso_total_kg, 0) e oferece um
+            # pedido de 120 kg pra quem está de bicicleta. O fluxo online já
+            # gravava; o cartão não — a mesma coluna faltando em UM dos dois
+            # caminhos é o tipo de buraco que só aparece em produção.
+            'peso_total_kg': _peso_do_pedido_servidor(items_req or []),
             'pickup_code': generate_verification_code(),
             'delivery_code': generate_verification_code(),
             'created_at': datetime.utcnow().isoformat(),
