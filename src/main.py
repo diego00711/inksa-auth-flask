@@ -393,6 +393,12 @@ def health_check():
         "timestamp": datetime.now().isoformat(),
         "service": "inksa-auth-flask",
         "version": "1.0.0",
+        # Qual commit está REALMENTE rodando. O Render injeta esta variável a
+        # cada deploy. Sem isto, "a correção já subiu?" só dava pra responder
+        # olhando o comportamento — e quando a correção é uma trava que só
+        # aparece no caso ruim, o comportamento não distingue nada. Em 17/08
+        # isso custou meia hora de suposição em cima de um pedido de 200 kg.
+        "commit": (os.environ.get("RENDER_GIT_COMMIT") or "local")[:8],
         "database": db_status,
         "mercado_pago": "configured" if app.mp_sdk else "not_configured",
         "payment_provider": _payment_provider,
