@@ -80,6 +80,15 @@ def _contar_unidades(items):
     for it in items:
         if not isinstance(it, dict):
             continue
+        # A TAXA DE ENTREGA não é volume: ela é uma linha sintética que o
+        # checkout acrescenta pra fechar a conta. Contar ela inflava o número
+        # que o entregador usa pra julgar se a carga cabe — 3 sacos apareciam
+        # como 4 itens. O teste exige nome de taxa E ausência de menu_item_id,
+        # senão um produto de verdade chamado "frete" (material de construção)
+        # sumiria da contagem.
+        _nome = str(it.get('title') or it.get('name') or '').strip().lower()
+        if not it.get('menu_item_id') and _nome in ('taxa de entrega', 'frete'):
+            continue
         try:
             total += int(it.get('quantity') or it.get('qty') or 1)
         except (TypeError, ValueError):
