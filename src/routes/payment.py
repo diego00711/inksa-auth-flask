@@ -456,6 +456,45 @@ def criar_preferencia_mercado_pago():
             logging.warning(f"⚠️ calculate_courier_payout na criação falhou ({_e_payout}); usando frete cheio.")
             _payout_create = _fee_create
 
+        # 🔒 SEM VEÍCULO PRA ESTA CARGA — barreira autoritativa.
+        #
+        # O carrinho já avisa, mas aviso no app é CONSELHO: o app pode estar
+        # com JS antigo em memória (aconteceu no teste de 17/08 — pedido de
+        # 200 kg passou com a trava publicada), e a API aceita chamada direta.
+        # Quem grava o pedido é quem precisa recusar.
+        #
+        # Só o caso ESTRUTURAL: ninguém cadastrado com veículo suficiente no
+        # raio. "Tem capaz mas está offline" NÃO bloqueia — enquanto a loja
+        # prepara, a pessoa pode entrar, e recusar aí seria perder venda boa.
+        try:
+            _peso_ped = _peso_do_pedido_servidor(dados_pedido.get('itens') or [])
+            if _peso_ped > 0:
+                from ..utils.carga import contar_capazes, veiculo_minimo
+                from ..utils.platform_settings import get_settings as _gs
+                _rr = supabase_client.table('restaurant_profiles').select(
+                    'latitude, longitude, delivery_type').eq(
+                    'id', str(dados_pedido.get('restaurant_id'))).limit(1).execute()
+                _loja = (_rr.data or [{}])[0]
+                if (_loja.get('delivery_type') or 'platform') != 'own':
+                    _capaz, _ = contar_capazes(
+                        _peso_ped, _loja.get('latitude'), _loja.get('longitude'), _gs())
+                    if _capaz == 0:
+                        _vm = veiculo_minimo(_peso_ped)
+                        _rot = _vm[1] if _vm else 'veículo maior'
+                        logging.warning(
+                            "⛔ Pedido recusado: %s kg exige %s e ninguém cadastrado comporta.",
+                            _peso_ped, _rot)
+                        return jsonify({
+                            "erro": f"Este pedido pesa {_peso_ped:.0f} kg e precisa de "
+                                    f"{_rot}. Ainda não temos esse veículo na sua região — "
+                                    "tire alguns itens ou divida em dois pedidos.",
+                            "error_code": "SEM_ENTREGADOR",
+                        }), 409
+        except Exception:
+            # Fail-open: falha na checagem não pode derrubar venda legítima.
+            logging.warning("Checagem de entregador capaz falhou — pedido segue",
+                            exc_info=True)
+
         # 🔒 ÁREA DE ENTREGA — barreira autoritativa.
         #
         # A calculadora de frete é CONSELHO: quem grava o pedido é quem precisa

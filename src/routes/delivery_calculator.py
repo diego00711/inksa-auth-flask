@@ -79,112 +79,6 @@ def _peso_do_carrinho(itens):
                 pass
 
 
-def _quem_pode_entregar(peso_kg, rest_lat, rest_lng, settings):
-    """Existe entregador capaz de levar ESTE peso? Responde no carrinho.
-
-    O problema que isto resolve: o cliente monta 3 sacos de ração, paga, e o
-    pedido fica parado porque ninguém na plataforma tem veículo pra 90 kg. Ele
-    só descobre esperando. Dinheiro preso e confiança perdida por uma coisa
-    que dava pra dizer ANTES.
-
-    Devolve (cadastrados, online):
-      • cadastrados = quantos existem com capacidade suficiente, no raio,
-        aprovados e com veículo reconhecido — INDEPENDENTE de estar online.
-        Zero aqui é estrutural: não adianta esperar, ninguém vai poder pegar.
-      • online = quantos desses estão disponíveis agora. Zero aqui é
-        temporário — enquanto a loja prepara, alguém pode entrar.
-
-    A diferença entre os dois é o que separa "não dá" de "pode demorar", e é
-    por isso que a contagem é dupla. Um número só forçaria escolher entre
-    bloquear demais ou avisar de menos.
-
-    Nunca levanta: erro devolve (None, None) e quem chama omite o aviso. Um
-    carrinho que não fecha por causa desta consulta seria pior que o problema.
-    """
-    import psycopg2.extras
-    from ..utils.carga import capacidades
-    from ..utils.helpers import get_db_connection
-
-    if rest_lat is None or rest_lng is None:
-        return (None, None)
-
-    caps = capacidades(settings)
-    try:
-        peso = float(peso_kg or 0)
-    except (TypeError, ValueError):
-        peso = 0.0
-
-    def _raio(chave, padrao_global):
-        try:
-            v = float(settings.get(f'delivery_radius_{chave}_km') or 0)
-        except (TypeError, ValueError):
-            v = 0.0
-        return v if v > 0 else padrao_global
-
-    try:
-        r_global = float(settings.get('platform_max_delivery_radius') or 15)
-    except (TypeError, ValueError):
-        r_global = 15.0
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return (None, None)
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # Mesmos apelidos do motor de despacho: o CHECK da tabela aceita
-            # 'motorcycle'/'car' (legado), e ignorá-los aqui faria a contagem
-            # dizer "ninguém pode" com entregador capaz cadastrado.
-            cur.execute("""
-                SELECT
-                  CASE
-                    WHEN dp.vehicle_type IN ('bike','bicicleta')  THEN %s
-                    WHEN dp.vehicle_type IN ('moto','motorcycle') THEN %s
-                    WHEN dp.vehicle_type IN ('carro','car')       THEN %s
-                    WHEN dp.vehicle_type = 'utilitario'           THEN %s
-                    ELSE 0 END AS capacidade,
-                  CASE
-                    WHEN dp.vehicle_type IN ('bike','bicicleta')  THEN %s
-                    WHEN dp.vehicle_type IN ('moto','motorcycle') THEN %s
-                    WHEN dp.vehicle_type IN ('carro','car')       THEN %s
-                    WHEN dp.vehicle_type = 'utilitario'           THEN %s
-                    ELSE %s END AS raio_km,
-                  earth_distance(
-                    ll_to_earth(COALESCE(dp.current_lat, dp.latitude),
-                                COALESCE(dp.current_lng, dp.longitude)),
-                    ll_to_earth(%s, %s)) / 1000.0 AS dist_km,
-                  COALESCE(dp.is_available, false) AS online
-                FROM delivery_profiles dp
-               WHERE COALESCE(dp.approved, false)
-                 AND COALESCE(dp.current_lat, dp.latitude) IS NOT NULL
-                 AND COALESCE(dp.current_lng, dp.longitude) IS NOT NULL
-            """, (caps['bike'], caps['moto'], caps['carro'], caps['utilitario'],
-                  _raio('bike', r_global), _raio('moto', r_global),
-                  _raio('carro', r_global), _raio('utilitario', r_global), r_global,
-                  float(rest_lat), float(rest_lng)))
-
-            cadastrados = 0
-            online = 0
-            for r in cur.fetchall():
-                if float(r['capacidade'] or 0) < peso:
-                    continue
-                if float(r['dist_km'] or 0) > float(r['raio_km'] or 0):
-                    continue
-                cadastrados += 1
-                if r['online']:
-                    online += 1
-        return (cadastrados, online)
-    except Exception:
-        logger.warning("Não deu pra checar entregador disponível", exc_info=True)
-        return (None, None)
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-
 @delivery_calculator_bp.route('/calculate_fee', methods=['POST', 'OPTIONS'])
 def calculate_delivery_fee():
     """Calcula a taxa de entrega baseada no restaurante e localização do cliente"""
@@ -353,7 +247,8 @@ def calculate_delivery_fee():
         if delivery_type == 'own':
             _cap_total, _cap_online = None, None
         else:
-            _cap_total, _cap_online = _quem_pode_entregar(
+            from ..utils.carga import contar_capazes
+            _cap_total, _cap_online = contar_capazes(
                 _peso_resp, restaurant_data.get('latitude'),
                 restaurant_data.get('longitude'), s)
 
