@@ -315,7 +315,8 @@ def _aptos(peso_kg, rest_lat, rest_lng, settings=None):
                     ll_to_earth(COALESCE(dp.current_lat, dp.latitude),
                                 COALESCE(dp.current_lng, dp.longitude)),
                     ll_to_earth(%s, %s)) / 1000.0 AS dist_km,
-                  COALESCE(dp.is_available, false) AS online
+                  COALESCE(dp.is_available, false) AS online,
+                  dp.last_heartbeat
                 FROM delivery_profiles dp
                WHERE COALESCE(dp.approved, false)
                  AND COALESCE(dp.current_lat, dp.latitude) IS NOT NULL
@@ -333,7 +334,8 @@ def _aptos(peso_kg, rest_lat, rest_lng, settings=None):
                     continue
                 saida.append({'id': str(r['id']),
                               'fcm_token': r['fcm_token'],
-                              'online': bool(r['online'])})
+                              'online': bool(r['online']),
+                              'last_heartbeat': r['last_heartbeat']})
             return saida
     except Exception:
         logger.warning("Não deu pra apurar entregadores aptos", exc_info=True)
@@ -372,16 +374,46 @@ def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
     return (len(aptos), sum(1 for a in aptos if a['online']))
 
 
+# Janela de "provavelmente ainda trabalhando" pro push. Ver a explicação
+# em tokens_para_avisar.
+_JANELA_PUSH_HORAS = 3
+
+
 def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None):
     """Tokens de push de quem deve ser acordado por ESTE pedido.
 
-    Só quem está ONLINE e apto. Push é a única coisa que alcança o entregador
-    com o app em segundo plano — gastar isso com quem não pode aceitar o
-    pedido é o caminho mais curto pra ele desligar a notificação, e aí a
-    gente perde o canal inteiro.
+    Apto (capacidade, raio, aprovado) E provavelmente trabalhando. "Provavelmente
+    trabalhando" NÃO é o mesmo que is_available=true, e a diferença importa:
 
-    Lista vazia = não avisa ninguém. É o correto: melhor silêncio que acordar
-    quem não pode ajudar.
+    O app manda heartbeat a cada 2 min, e um job desliga (is_available=false)
+    quem fica 30 min sem bater. Só que o Android congela o app em segundo
+    plano — o heartbeat morre no minuto em que o entregador troca pro
+    WhatsApp. Meia hora depois ele consta como offline SEM ter tocado em nada.
+
+    Se o push exigisse is_available, ele pararia de chegar exatamente na
+    situação em que o push é a ÚNICA coisa que alcança o entregador: app
+    fechado, ele esperando corrida no WhatsApp. Eu tinha escrito assim; era
+    uma trava que se fecha justo na hora de servir.
+
+    Por isso: online AGORA **ou** deu sinal de vida nas últimas 3 horas.
+
+    O erro escolhido é assumido. Acordar quem desligou há uma hora é um
+    incômodo que ele descarta; não acordar quem está trabalhando é entrega
+    perdida e um entregador convencido de que o app não presta. Entre os dois,
+    erra-se pro lado de tocar.
     """
+    from datetime import datetime, timedelta, timezone
+    corte = datetime.now(timezone.utc) - timedelta(hours=_JANELA_PUSH_HORAS)
+
+    def _trabalhando(a):
+        if a['online']:
+            return True
+        hb = a.get('last_heartbeat')
+        if not hb:
+            return False
+        if hb.tzinfo is None:
+            hb = hb.replace(tzinfo=timezone.utc)
+        return hb >= corte
+
     return [a['fcm_token'] for a in _aptos(peso_kg, rest_lat, rest_lng, settings)
-            if a['online'] and a['fcm_token']]
+            if a['fcm_token'] and _trabalhando(a)]

@@ -46,6 +46,13 @@ def _render_benefits(benefits):
         out.append(f"Bônus de R$ {float(b['per_delivery_bonus']):.2f} por entrega")
     if b.get("freight_keep_extra_pct"):
         out.append(f"Fica com {_fmt(b['freight_keep_extra_pct'])}% a mais do frete")
+    # Sai do PRÓPRIO dado, não de um texto escrito à mão em `extra`. Se a frase
+    # fosse fixa, ela continuaria na tela depois de alguém tirar o benefício no
+    # admin — prometendo pagamento rápido que não acontece mais. Aqui a frase e
+    # a regra são a mesma coisa: sumiu o campo, sumiu a promessa.
+    if b.get("payout_express_days"):
+        _d = int(float(b["payout_express_days"]))
+        out.append(f"Recebe em {_d} dia{'s' if _d > 1 else ''}, sem esperar a sexta")
     if b.get("priority"):
         out.append("Prioridade na fila de pedidos")
     if b.get("featured_listing"):
