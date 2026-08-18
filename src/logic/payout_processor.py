@@ -1,7 +1,7 @@
 # src/logic/payout_processor.py
 import logging
 import uuid as uuidlib
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, time as dtime
 from decimal import Decimal, ROUND_HALF_UP
 import psycopg2.extras
 
@@ -25,14 +25,70 @@ def get_commission_rate() -> Decimal:
         return Decimal("0.10")
 
 
+# Dias de espera do ciclo express. Vem do benefício `payout_express_days` do
+# nível; este é só o padrão de quando o nível não disser.
+_EXPRESS_DIAS = 2
+
+
+def _delivery_ids_express(conn) -> set:
+    """IDs dos entregadores cujo nível do Clube dá repasse express.
+
+    Espelha `club.level_for_activity`: o nível vale é o MAIS ALTO cujo
+    min_activity <= atividade, e atividade (para entregador) é a contagem de
+    pedidos ENTREGUES no mês corrente — não o total da vida. Se um dia o
+    club.py mudar essa definição, esta query tem que mudar junto.
+
+    Quem manda é o benefício `payout_express_days` no JSON do nível, não o
+    nome "Diamante": assim o admin move o benefício de nível sem tocar aqui.
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("SAVEPOINT express_ids")
+        try:
+            cur.execute("""
+                WITH atividade AS (
+                  SELECT dp.id AS partner_id,
+                         (SELECT COUNT(*) FROM orders o
+                           WHERE o.delivery_id = dp.id
+                             AND o.status = 'delivered'
+                             AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())
+                         ) AS ativ
+                    FROM delivery_profiles dp
+                   WHERE COALESCE(dp.active, true) = true
+                )
+                SELECT a.partner_id
+                  FROM atividade a
+                 WHERE COALESCE((
+                         SELECT (cl.benefits ->> 'payout_express_days')::numeric
+                           FROM club_levels cl
+                          WHERE cl.audience = 'delivery'
+                            AND COALESCE(cl.is_active, true) = true
+                            AND cl.min_activity <= a.ativ
+                          ORDER BY cl.min_activity DESC
+                          LIMIT 1
+                       ), 0) > 0
+            """)
+            return {str(r["partner_id"]) for r in cur.fetchall()}
+        except Exception as exc:
+            cur.execute("ROLLBACK TO SAVEPOINT express_ids")
+            # Fail-closed DE PROPÓSITO: sem conseguir saber quem é express,
+            # ninguém entra no ciclo rápido e todo mundo cai no ciclo normal.
+            # O contrário (pagar todo mundo em 2 dias por causa de um erro de
+            # consulta) mexeria no caixa sem ninguém mandar.
+            logger.warning("Não deu pra apurar entregadores express: %s", exc)
+            return set()
+
+
 def is_payout_day(cycle_type: str, reference_date: date = None) -> bool:
     """Returns True if *reference_date* (defaults to today) is a scheduled payout day.
 
+    - express  → TODO DIA (benefício de nível: recebe em 2 dias)
     - weekly   → every Friday
     - bi-weekly → every other Friday (even ISO-week numbers)
     - monthly  → 1st of each month
     """
     today = reference_date or date.today()
+    if cycle_type == "express":
+        return True
     if cycle_type == "monthly":
         return today.day == 1
     if cycle_type == "bi-weekly":
@@ -50,6 +106,30 @@ def _period_bounds(cycle_type: str, reference_date: date = None):
     """Returns (period_start, period_end) UTC datetimes for the given cycle."""
     today = reference_date or date.today()
     now = datetime.now(timezone.utc)
+    if cycle_type == "express":
+        # É AQUI que moram os "2 dias".
+        #
+        # A janela fecha por DIA DE CALENDÁRIO, não por 48 horas corridas.
+        # Com horas corridas, uma entrega das 14h só era paga depois das 14h
+        # do terceiro dia — o job roda 06:00 e às 06:00 do segundo dia só
+        # tinham passado 40 horas. O entregador conta em dias ("entreguei
+        # segunda, recebo quarta"), então a conta tem que ser em dias.
+        #
+        # Fecha às 00:00 de (hoje - 1): isso inclui tudo que foi entregue até
+        # o fim de (hoje - 2). Entregou segunda -> recebe quarta, não importa
+        # a hora.
+        #
+        # Fuso: o scheduler roda em America/Sao_Paulo (06:00), mas as datas do
+        # banco são UTC. Entrega depois das 21h de Brasília cai no dia
+        # seguinte em UTC e espera um dia a mais. É o pior caso, é raro, e
+        # errar pra MAIS é melhor que prometer e pagar atrasado.
+        fim = datetime.combine(
+            today - timedelta(days=_EXPRESS_DIAS - 1), dtime.min, tzinfo=timezone.utc
+        )
+        # Início largo de propósito: _get_eligible_orders já ignora o que foi
+        # pago (payout_id IS NOT NULL), então janela ampla só recolhe atrasado,
+        # nunca paga duas vezes.
+        return fim - timedelta(days=45), fim
     if cycle_type == "monthly":
         # O ciclo mensal roda no dia 1 e paga o MES ANTERIOR inteiro. Antes
         # cobria do dia 1 do mes CORRENTE ate agora — ou seja, so as primeiras
@@ -80,6 +160,18 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
     'bi-weekly'. Valores desconhecidos caem no default 'weekly'.
     """
     table = "restaurant_profiles" if partner_type == "restaurant" else "delivery_profiles"
+
+    # O express é benefício de nível do Clube, não frequência escolhida — e só
+    # existe pra entregador. Restaurante nunca entra.
+    if cycle_type == "express":
+        return sorted(_delivery_ids_express(conn)) if partner_type == "delivery" else []
+
+    # Quem está no express SAI dos outros ciclos. Sem isto o mesmo entregador
+    # apareceria em dois ciclos no mesmo dia; não pagaria duas vezes (o filtro
+    # payout_id IS NULL segura), mas a corrida decidiria em qual repasse cada
+    # pedido cai — e repasse é dinheiro, não pode depender de ordem de laço.
+    _fora = _delivery_ids_express(conn) if partner_type == "delivery" else set()
+
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         # SAVEPOINT (e não conn.rollback() no except): esta função roda no MEIO
         # da transação do ciclo — um rollback total apagaria payouts já
@@ -102,7 +194,8 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
                 """,
                 (cycle_type,),
             )
-            return [str(row["partner_id"]) for row in cur.fetchall()]
+            return [str(row["partner_id"]) for row in cur.fetchall()
+                    if str(row["partner_id"]) not in _fora]
         except Exception as exc:
             # payout_frequency column may not exist yet — fall back gracefully
             cur.execute("ROLLBACK TO SAVEPOINT partners_cycle")
@@ -111,7 +204,8 @@ def _get_partners_for_cycle(conn, partner_type: str, cycle_type: str) -> list:
                 cur.execute(
                     f"SELECT id AS partner_id FROM {table} WHERE COALESCE(active, true) = true"
                 )
-                return [str(row["partner_id"]) for row in cur.fetchall()]
+                return [str(row["partner_id"]) for row in cur.fetchall()
+                        if str(row["partner_id"]) not in _fora]
             return []
 
 
@@ -429,13 +523,16 @@ def process_automatic_payouts(
             # repasse pendente, cada um no ciclo dele". É o modo certo pro
             # botão manual: o admin não precisa adivinhar a frequência de
             # cada parceiro.
-            cycles_due = ["weekly", "bi-weekly", "monthly"]
-        elif force_cycle not in ("weekly", "bi-weekly", "monthly"):
+            cycles_due = ["express", "weekly", "bi-weekly", "monthly"]
+        elif force_cycle not in ("express", "weekly", "bi-weekly", "monthly"):
             raise ValueError(f"Invalid cycle_type: {force_cycle!r}")
         else:
             cycles_due = [force_cycle]
     else:
-        cycles_due = [c for c in ("weekly", "bi-weekly", "monthly") if is_payout_day(c, today)]
+        # express PRIMEIRO: ele é o mais restrito (só quem tem o benefício) e
+        # roda todo dia. Vindo antes, o pedido de um Diamante cai no repasse
+        # rápido dele; os outros ciclos já o encontram pago.
+        cycles_due = [c for c in ("express", "weekly", "bi-weekly", "monthly") if is_payout_day(c, today)]
 
     if not cycles_due:
         logger.info("process_automatic_payouts: no cycles due today (%s)", today.isoformat())
