@@ -247,33 +247,27 @@ def frete_da_carga(peso_kg, settings=None):
     return (fixo, km, chave, rotulo)
 
 
-def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
-    """Existe entregador capaz de levar ESTE peso? Responde no carrinho.
+def _aptos(peso_kg, rest_lat, rest_lng, settings=None):
+    """Entregadores que PODEM levar esta carga, saindo desta loja.
 
-    O problema que isto resolve: o cliente monta 3 sacos de ração, paga, e o
-    pedido fica parado porque ninguém na plataforma tem veículo pra 90 kg. Ele
-    só descobre esperando. Dinheiro preso e confiança perdida por uma coisa
-    que dava pra dizer ANTES.
+    Fonte ÚNICA da regra "quem serve pra este pedido": capacidade do veículo,
+    raio a partir da loja, aprovado e com coordenada conhecida.
 
-    Devolve (cadastrados, online):
-      • cadastrados = quantos existem com capacidade suficiente, no raio,
-        aprovados e com veículo reconhecido — INDEPENDENTE de estar online.
-        Zero aqui é estrutural: não adianta esperar, ninguém vai poder pegar.
-      • online = quantos desses estão disponíveis agora. Zero aqui é
-        temporário — enquanto a loja prepara, alguém pode entrar.
+    Existe porque a mesma pergunta era respondida em dois lugares com regras
+    diferentes. O aviso do carrinho usava tudo isso; o PUSH de "entrega
+    disponível" usava `SELECT fcm_token ... WHERE fcm_token IS NOT NULL
+    LIMIT 50` — ou seja, acordava entregador offline, de outra cidade e de
+    bicicleta pra um pedido de 200 kg. Duas regras pra uma pergunta é uma
+    delas errada; aqui elas viram uma.
 
-    A diferença entre os dois é o que separa "não dá" de "pode demorar", e é
-    por isso que a contagem é dupla. Um número só forçaria escolher entre
-    bloquear demais ou avisar de menos.
-
-    Nunca levanta: erro devolve (None, None) e quem chama omite o aviso. Um
-    carrinho que não fecha por causa desta consulta seria pior que o problema.
+    Devolve lista de dicts {id, fcm_token, online}. Lista vazia se não der
+    pra apurar — quem chama decide o que fazer com isso.
     """
     import psycopg2.extras
     from .helpers import get_db_connection
 
     if rest_lat is None or rest_lng is None:
-        return (None, None)
+        return []
 
     settings = settings or {}
     caps = capacidades(settings)
@@ -298,13 +292,13 @@ def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
     try:
         conn = get_db_connection()
         if not conn:
-            return (None, None)
+            return []
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             # Mesmos apelidos do motor de despacho: o CHECK da tabela aceita
-            # 'motorcycle'/'car' (legado), e ignorá-los aqui faria a contagem
+            # 'motorcycle'/'car' (legado), e ignorá-los aqui faria a conta
             # dizer "ninguém pode" com entregador capaz cadastrado.
             cur.execute("""
-                SELECT
+                SELECT dp.id, dp.fcm_token,
                   CASE
                     WHEN dp.vehicle_type IN ('bike','bicicleta')  THEN %s
                     WHEN dp.vehicle_type IN ('moto','motorcycle') THEN %s
@@ -331,23 +325,63 @@ def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
                   _raio('carro', r_global), _raio('utilitario', r_global), r_global,
                   float(rest_lat), float(rest_lng)))
 
-            cadastrados = 0
-            online = 0
+            saida = []
             for r in cur.fetchall():
                 if float(r['capacidade'] or 0) < peso:
                     continue
                 if float(r['dist_km'] or 0) > float(r['raio_km'] or 0):
                     continue
-                cadastrados += 1
-                if r['online']:
-                    online += 1
-        return (cadastrados, online)
+                saida.append({'id': str(r['id']),
+                              'fcm_token': r['fcm_token'],
+                              'online': bool(r['online'])})
+            return saida
     except Exception:
-        logger.warning("Não deu pra contar entregadores capazes", exc_info=True)
-        return (None, None)
+        logger.warning("Não deu pra apurar entregadores aptos", exc_info=True)
+        return []
     finally:
         if conn:
             try:
                 conn.close()
             except Exception:
                 pass
+
+
+def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
+    """(cadastrados, online) entre os aptos. Alimenta o aviso do carrinho.
+
+      • cadastrados = existem com veículo suficiente, no raio, aprovados —
+        INDEPENDENTE de estar online. Zero aqui é ESTRUTURAL: esperar não
+        resolve, ninguém vai poder pegar.
+      • online = quantos desses estão disponíveis agora. Zero aqui é
+        temporário — enquanto a loja prepara, alguém pode entrar.
+
+    A diferença separa "não dá" de "pode demorar", e é por isso que a
+    contagem é dupla. Um número só forçaria escolher entre bloquear demais
+    e avisar de menos.
+
+    (None, None) quando não deu pra apurar — e aí o carrinho omite o aviso,
+    em vez de afirmar algo que não sabe.
+    """
+    if rest_lat is None or rest_lng is None:
+        return (None, None)
+    try:
+        aptos = _aptos(peso_kg, rest_lat, rest_lng, settings)
+    except Exception:
+        logger.warning("Não deu pra contar entregadores capazes", exc_info=True)
+        return (None, None)
+    return (len(aptos), sum(1 for a in aptos if a['online']))
+
+
+def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None):
+    """Tokens de push de quem deve ser acordado por ESTE pedido.
+
+    Só quem está ONLINE e apto. Push é a única coisa que alcança o entregador
+    com o app em segundo plano — gastar isso com quem não pode aceitar o
+    pedido é o caminho mais curto pra ele desligar a notificação, e aí a
+    gente perde o canal inteiro.
+
+    Lista vazia = não avisa ninguém. É o correto: melhor silêncio que acordar
+    quem não pode ajudar.
+    """
+    return [a['fcm_token'] for a in _aptos(peso_kg, rest_lat, rest_lng, settings)
+            if a['online'] and a['fcm_token']]

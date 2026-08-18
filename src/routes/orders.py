@@ -485,15 +485,45 @@ def update_order_status(order_id):
                         _notify(cli_token, "Pedido aceito! 🎉", "Seu pedido foi confirmado pelo restaurante",
                                 {"order_id": str(order_id), "status": "accepted"})
                     elif new_status_internal == 'ready':
-                        # Notifica entregadores disponíveis (broadcast: busca todos com fcm_token)
+                        # Avisa SÓ quem pode pegar este pedido.
+                        #
+                        # Era um broadcast cru: `SELECT fcm_token ... WHERE
+                        # fcm_token IS NOT NULL LIMIT 50`. Acordava entregador
+                        # offline, de outra cidade e de bicicleta pra um pedido
+                        # de 200 kg — regras que o motor de despacho já aplica
+                        # e que o push ignorava. Duas regras pra mesma pergunta
+                        # é uma delas errada.
+                        #
+                        # Push é a ÚNICA coisa que alcança o entregador com o
+                        # app em segundo plano. Gastar isso com quem não pode
+                        # aceitar é o caminho mais curto pra ele desligar a
+                        # notificação — e aí perdemos o canal inteiro.
                         try:
-                            _ncur.execute("SELECT fcm_token FROM delivery_profiles WHERE fcm_token IS NOT NULL LIMIT 50")
-                            for _drow in _ncur.fetchall():
-                                _notify(_drow['fcm_token'], "Entrega disponivel! 🛵",
-                                        "Um pedido esta pronto para coleta",
-                                        {"order_id": str(order_id), "status": "ready"})
+                            from ..utils.carga import tokens_para_avisar, peso_do_pedido
+                            from ..utils.platform_settings import get_settings as _gs
+
+                            _ncur.execute("""
+                                SELECT o.items, rp.latitude, rp.longitude
+                                  FROM orders o
+                                  JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
+                                 WHERE o.id = %s
+                            """, (order_id,))
+                            _o = _ncur.fetchone()
+                            if _o:
+                                try:
+                                    _peso = float(peso_do_pedido(_ncur, _o['items']) or 0)
+                                except Exception:
+                                    _peso = 0.0
+                                _tokens = tokens_para_avisar(
+                                    _peso, _o['latitude'], _o['longitude'], _gs())
+                                logger.info("Push 'entrega disponível': %d entregador(es) aptos e online (peso %.0f kg)",
+                                            len(_tokens), _peso)
+                                for _tk in _tokens:
+                                    _notify(_tk, "Entrega disponivel! 🛵",
+                                            "Um pedido esta pronto para coleta",
+                                            {"order_id": str(order_id), "status": "ready"})
                         except Exception:
-                            pass
+                            logger.warning("Push de entrega disponível falhou", exc_info=True)
             except Exception as _e:
                 logger.warning(f"FCM update_order_status: {_e}")
 
