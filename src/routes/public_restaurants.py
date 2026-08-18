@@ -164,7 +164,23 @@ def list_restaurants():
                      # calcular frete nem distância, e ela escapava do filtro de
                      # raio — uma loja de outra cidade aparecia pra qualquer
                      # cliente. Fica escondida até geocodificar o endereço.
-                     "rp.latitude IS NOT NULL", "rp.longitude IS NOT NULL"]
+                     "rp.latitude IS NOT NULL", "rp.longitude IS NOT NULL",
+                     # LOJA SEM NENHUM ITEM NO CARDÁPIO NÃO APARECE.
+                     #
+                     # Mesma lógica das coordenadas, um passo adiante: a gente
+                     # já escondia o que quebra o FRETE, e deixava passar o que
+                     # quebra a VENDA. Loja aberta e vazia é pior que loja
+                     # fechada — o cliente entra, não acha nada pra pedir, e
+                     # não volta. Aconteceu no primeiro dia do parceiro novo
+                     # (18/08): loja aberta, zero itens, ninguém avisado.
+                     #
+                     # Escondida, não bloqueada: o parceiro segue mexendo no
+                     # app à vontade e reaparece sozinho no minuto em que
+                     # cadastrar o primeiro item. Bloquear seria receber quem
+                     # está chegando com um "não".
+                     """EXISTS (SELECT 1 FROM menu_items mi
+                                 WHERE mi.restaurant_id = rp.id
+                                   AND COALESCE(mi.is_available, TRUE) = TRUE)"""]
             params = []
 
             # Clube: destaque = restaurantes cujo volume do mês alcança um nível
