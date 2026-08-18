@@ -199,8 +199,17 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10, with_
 
     # IS NOT TRUE (nao IS FALSE): as colunas aceitam NULL, e um restaurante com
     # approved NULL esta esperando aprovacao igual aos outros.
+    #
+    # DESATIVADO NAO ESPERA APROVACAO. Sem o filtro de active, os 4 parceiros
+    # de teste que o Diego desativou em 18/08 continuaram aparecendo como
+    # "aguardando aprovacao" no painel — alerta que ninguem pode resolver, e
+    # que treina a pessoa a ignorar o contador.
     payload["kpis"]["restaurantsPending"] = _safe_int(_fetchval(
-        conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} WHERE (approved IS NOT TRUE) OR (status='pending')", default=0))
+        conn,
+        f"""SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE}
+             WHERE ((approved IS NOT TRUE) OR (status='pending'))
+               AND COALESCE(active, TRUE) = TRUE""",
+        default=0))
     payload["kpis"]["activeDeliverymen"] = _safe_int(_fetchval(
         conn, f"SELECT COUNT(*)::int FROM {DELIVERY_TABLE} WHERE active IS TRUE", default=0))
 
@@ -881,7 +890,11 @@ def admin_alerts_summary():
         incidents_pending = _safe_int(_fetchval(
             conn, "SELECT COUNT(*)::int FROM delivery_incidents WHERE resolution = 'pending'", default=0))
         restaurants_pending = _safe_int(_fetchval(
-            conn, f"SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE} WHERE (approved IS NOT TRUE) OR (status='pending')", default=0))
+            conn,
+            f"""SELECT COUNT(*)::int FROM {RESTAURANTS_TABLE}
+                 WHERE ((approved IS NOT TRUE) OR (status='pending'))
+                   AND COALESCE(active, TRUE) = TRUE""",
+            default=0))
         return jsonify({
             "tickets_open": tickets_open,
             "tickets_waiting": tickets_waiting,

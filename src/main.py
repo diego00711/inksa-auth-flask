@@ -399,6 +399,13 @@ def health_check():
         # aparece no caso ruim, o comportamento não distingue nada. Em 17/08
         # isso custou meia hora de suposição em cima de um pedido de 200 kg.
         "commit": (os.environ.get("RENDER_GIT_COMMIT") or "local")[:8],
+        # O push nativo consegue SAIR daqui? Mesma história do commit: sem
+        # expor, "o entregador é avisado com o app em segundo plano?" só se
+        # responde por tentativa e erro num aparelho. O arquivo é um Secret
+        # File do Render; se faltar, o firebase_admin nem inicializa e todo
+        # envio de push falha calado.
+        "fcm": ("ok" if os.path.exists("/etc/secrets/firebase-service-account.json")
+                else "sem credencial"),
         "database": db_status,
         "mercado_pago": "configured" if app.mp_sdk else "not_configured",
         "payment_provider": _payment_provider,
