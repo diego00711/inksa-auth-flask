@@ -406,6 +406,10 @@ def health_check():
         # envio de push falha calado.
         "fcm": ("ok" if os.path.exists("/etc/secrets/firebase-service-account.json")
                 else "sem credencial"),
+        # Canal de aviso do monitor. Mesma lógica do fcm: sem expor, só se
+        # descobre que o e-mail não sai no dia em que ele precisava sair.
+        "smtp": ("ok" if (os.environ.get("SMTP_HOST") and os.environ.get("SMTP_USERNAME")
+                          and os.environ.get("SMTP_PASSWORD")) else "sem credencial"),
         "database": db_status,
         "mercado_pago": "configured" if app.mp_sdk else "not_configured",
         "payment_provider": _payment_provider,

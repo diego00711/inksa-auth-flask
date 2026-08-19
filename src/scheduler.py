@@ -111,6 +111,22 @@ def _expire_pending_payments_job() -> None:
         logger.exception("[SCHEDULER] Erro no job de expiração de pagamentos")
 
 
+def _monitor_job() -> None:
+    """Verificacao horaria de saude. Ver src/logic/monitor.py.
+
+    Envolvido em try/except proprio: o monitor NUNCA pode derrubar o
+    agendador. Um monitor que mata os outros jobs seria pior que nao ter
+    monitor — o job de repasse e o de expirar pagamento valem mais que ele.
+    """
+    try:
+        from .logic.monitor import executar_monitor
+        r = executar_monitor()
+        logger.info("[MONITOR] %d alerta(s), %d enviado(s)",
+                    r.get("alertas", 0), r.get("enviados", 0))
+    except Exception:
+        logger.exception("[MONITOR] job falhou")
+
+
 # ---------------------------------------------------------------------------
 # Abertura automatica por horario de funcionamento
 # ---------------------------------------------------------------------------
@@ -434,6 +450,18 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=120,
     )
     logger.info("[SCHEDULER] Timeout de ocorrencia (restaurante mudo): a cada 3 minutos")
+    _scheduler.add_job(
+        func=_monitor_job,
+        trigger="interval",
+        hours=1,
+        id="monitor_saude",
+        name="Monitor de saude (avisa por e-mail quando algo quebra)",
+        replace_existing=True,
+        # 10 min de tolerancia: se o Render reiniciou na hora exata do ciclo,
+        # roda assim que voltar em vez de pular a hora inteira.
+        misfire_grace_time=600,
+    )
+    logger.info("[SCHEDULER] Monitor de saude: a cada 1 hora")
     _scheduler.start()
 
     logger.info(

@@ -2197,3 +2197,47 @@ def descartar_carrinhos_antigos():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+# ---------------------------------------------------------------------------
+# Monitor de saúde sob demanda
+# ---------------------------------------------------------------------------
+@admin_bp.route("/monitor", methods=["GET", "OPTIONS"])
+def admin_monitor():
+    """Roda AGORA as mesmas checagens do monitor horário e devolve o resultado.
+
+    Existe por um motivo prático: um monitor que só se prova de hora em hora é
+    um monitor em que ninguém confia. Com isto o Diego abre e vê o que ele
+    veria — inclusive quando está tudo certo, que é a resposta mais difícil de
+    obter de um sistema de alerta.
+
+    NÃO envia e-mail: é consulta. O envio (com o silêncio de 6h por assunto)
+    fica só no ciclo automático, senão testar aqui gastaria o silêncio e o
+    alerta de verdade não sairia depois.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    # Import local (e não no topo): datetime não estava importado neste
+    # arquivo, e um NameError aqui só apareceria em execução, no dia em que o
+    # Diego abrisse a tela — exatamente o tipo de erro que a compilação não
+    # pega e que já mordeu neste projeto.
+    import datetime as _dt
+    try:
+        from src.logic.monitor import coletar_alertas, CRITICO
+    except Exception as e:
+        return jsonify({"error": f"Monitor indisponível: {e}"}), 500
+
+    alertas = coletar_alertas()
+    return jsonify({
+        "status": "success",
+        "verificado_em": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "tudo_ok": len(alertas) == 0,
+        "criticos": sum(1 for g, _, _ in alertas if g == CRITICO),
+        "alertas": [{"gravidade": g, "titulo": t, "detalhe": d} for g, t, d in alertas],
+    }), 200
