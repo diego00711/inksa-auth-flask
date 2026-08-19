@@ -2,6 +2,7 @@
 import uuid
 import json
 import random
+import secrets
 import string
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
@@ -166,9 +167,22 @@ DELIVERY_INCIDENT_POLICY = {
 }
 
 def generate_verification_code(length=4):
+    """Código de 4 caracteres que autoriza retirada e entrega.
+
+    secrets, NÃO random: o `random` do Python é Mersenne Twister, previsível
+    depois de observar saídas suficientes. E estes códigos não são enfeite —
+    o de entrega é o que libera "entregue" (com repasse ao entregador) e o de
+    retirada é o que tira o pedido do balcão. Quem consegue prever a sequência
+    fecha entrega sem entregar.
+
+    Alfabeto sem I/O/0/1 pra não confundir na leitura em voz alta: 32
+    caracteres, 1.048.576 combinações. O tamanho sozinho não protege — quem
+    protege é isto somado ao limite de tentativas nas rotas /pickup e
+    /complete.
+    """
     chars = string.ascii_uppercase.replace('I', '').replace('O', '')
     chars += string.digits.replace('0', '').replace('1', '')
-    return ''.join(random.choice(chars) for _ in range(length))
+    return ''.join(secrets.choice(chars) for _ in range(length))
 
 def is_valid_status_transition(current_status, new_status):
     valid_transitions = {
@@ -541,6 +555,11 @@ def update_order_status(order_id):
             conn.close()
 
 @orders_bp.route('/<uuid:order_id>/pickup', methods=['POST'])
+# Sem limite, os 4 caracteres do código viram força bruta: são 1.048.576
+# combinações, e um script sem freio varre isso em horas. Com 10/min o
+# custo do ataque sai de horas para anos, e ninguém legítimo erra o
+# código 10 vezes num minuto.
+@limiter.limit("10 per minute")
 def pickup_order(order_id):
     logger.info(f"=== INÍCIO PICKUP_ORDER para {order_id} ===")
     conn = None
@@ -619,6 +638,11 @@ def pickup_order(order_id):
             conn.close()
 
 @orders_bp.route('/<uuid:order_id>/complete', methods=['POST'])
+# Sem limite, os 4 caracteres do código viram força bruta: são 1.048.576
+# combinações, e um script sem freio varre isso em horas. Com 10/min o
+# custo do ataque sai de horas para anos, e ninguém legítimo erra o
+# código 10 vezes num minuto.
+@limiter.limit("10 per minute")
 def complete_order(order_id):
     logger.info(f"=== INÍCIO COMPLETE_ORDER para {order_id} ===")
     conn = None
