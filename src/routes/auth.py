@@ -483,13 +483,13 @@ def register():
             logger.warning(f"Erro ao criar usuário no Supabase Auth: {err_msg}")
             # Supabase retorna erro específico para e-mail duplicado
             if "already registered" in err_msg.lower() or "user already exists" in err_msg.lower() or "already been registered" in err_msg.lower():
-                return jsonify({"status": "error", "error": "E-mail já cadastrado"}), 409
+                return jsonify({"status": "error", "error": "Este e-mail já tem conta na Inksa. Se você é entregador ou parceiro e quer também pedir como cliente, use outro e-mail — por enquanto cada e-mail vale para um app só."}), 409
             return jsonify({"status": "error", "error": "Erro ao criar conta: " + err_msg}), 400
 
         user = sign_up_response.user if sign_up_response else None
         if not user:
             # Supabase retorna user=None quando o e-mail já existe mas confirmação está desativada
-            return jsonify({"status": "error", "error": "E-mail já cadastrado"}), 409
+            return jsonify({"status": "error", "error": "Este e-mail já tem conta na Inksa. Se você é entregador ou parceiro e quer também pedir como cliente, use outro e-mail — por enquanto cada e-mail vale para um app só."}), 409
 
         user_id = str(user.id)
         logger.info(f"Usuário registrado: user_id={user_id}, email={email}, user_type={user_type}")
