@@ -421,3 +421,90 @@ def set_default_address(conn, address_id):
         cur.execute("UPDATE client_addresses SET is_default = true WHERE id = %s AND user_id = %s", (str(address_id), user_id))
         conn.commit()
     return jsonify({"status": "success"}), 200
+
+
+# ---------------------------------------------------------------------------
+# Sugestão de restaurante
+# ---------------------------------------------------------------------------
+def _chave_do_nome(nome: str) -> str:
+    """Agrupa 'Pizzaria do Zé', 'pizzaria do ze' e 'Pizzaria  do  Ze' no mesmo balde.
+
+    Sem isto o contador nunca sobe — e o contador é a ÚNICA coisa que faz esta
+    tabela valer algo. "7 pessoas pediram a Pizzaria X" é argumento de venda;
+    sete linhas de uma pessoa cada não é nada.
+    """
+    import re
+    import unicodedata
+    s = unicodedata.normalize('NFKD', nome or '')
+    s = ''.join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r'[^a-z0-9 ]', ' ', s.lower())
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+@client_bp.route('/suggestions', methods=['POST', 'OPTIONS'])
+def sugerir_restaurante():
+    """O cliente diz qual loja ele queria encontrar aqui.
+
+    Nasce de um problema concreto: o app mostra pouquíssimas lojas, e quem abre
+    e não acha nada desinstala sem dizer nada. Este endpoint transforma essa
+    saída silenciosa em duas coisas úteis — a pessoa se sente ouvida, e o Diego
+    ganha uma fila de prospecção ordenada por demanda real.
+
+    NÃO promete prazo. "Vamos atrás" é verdade; "em 7 dias" não seria.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'client':
+        return jsonify({"error": "Apenas clientes podem sugerir."}), 403
+
+    body = request.get_json(silent=True) or {}
+    nome = (body.get('nome') or '').strip()[:120]
+    contato = (body.get('contato') or '').strip()[:120] or None
+    cidade = (body.get('cidade') or '').strip()[:80] or None
+
+    if len(nome) < 3:
+        return jsonify({"error": "Escreva o nome do restaurante."}), 400
+    chave = _chave_do_nome(nome)
+    if not chave:
+        return jsonify({"error": "Escreva o nome do restaurante."}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Serviço indisponível no momento."}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id FROM client_profiles WHERE user_id = %s LIMIT 1", (user_id,))
+            perfil = cur.fetchone()
+            if not perfil:
+                return jsonify({"error": "Perfil não encontrado."}), 404
+
+            # ON CONFLICT: sugerir a mesma loja duas vezes não vira dois votos.
+            # Quem aperta de novo recebe a mesma resposta amigável — dizer
+            # "você já sugeriu" seria repreender alguém por querer ajudar.
+            cur.execute("""
+                INSERT INTO restaurant_suggestions (client_id, nome, nome_chave, contato, cidade)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (client_id, nome_chave) WHERE client_id IS NOT NULL
+                DO UPDATE SET contato = COALESCE(EXCLUDED.contato, restaurant_suggestions.contato)
+                RETURNING id
+            """, (perfil['id'], nome, chave, contato, cidade))
+
+            # Quantas pessoas já pediram esta mesma loja — devolve pro app, que
+            # usa pra dizer "você e mais 6". Prova social de graça, e verdadeira.
+            cur.execute("SELECT count(*)::int AS n FROM restaurant_suggestions WHERE nome_chave = %s", (chave,))
+            n = int((cur.fetchone() or {}).get('n') or 1)
+            conn.commit()
+
+        return jsonify({"status": "ok", "pedidos": n}), 201
+    except Exception:
+        logging.warning("Sugestão de restaurante falhou", exc_info=True)
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"error": "Não consegui registrar agora. Tente de novo."}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass
