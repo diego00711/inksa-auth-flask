@@ -98,6 +98,12 @@ _DEFAULTS: dict[str, Decimal] = {
     # Logoff automático por inatividade (minutos) nos apps Parceiro e Entregador.
     # 0/vazio = desliga o recurso. Editável no admin.
     "idle_logout_minutes":          Decimal("60"),
+    # Lembrete automático de carrinho abandonado. Minutos parado antes de
+    # avisar; 0 DESLIGA a automação (o botão manual do admin continua valendo).
+    # 20 e não 5: aos 5 minutos a pessoa costuma estar AINDA no checkout —
+    # escolhendo pagamento, digitando endereço — e "esqueceu algo?" no meio do
+    # pagamento é pior que não mandar nada.
+    "cart_reminder_minutes":        Decimal("20"),
 }
 
 
@@ -126,7 +132,7 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               "dispatch_default_rating",
               "frete_adicional_carro", "frete_km_carro",
               "frete_adicional_utilitario", "frete_km_utilitario",
-              "idle_logout_minutes"):
+              "idle_logout_minutes", "cart_reminder_minutes"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 
     # commission_rate é guardado como percentual humano (10 = 10%);

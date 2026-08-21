@@ -111,6 +111,23 @@ def _expire_pending_payments_job() -> None:
         logger.exception("[SCHEDULER] Erro no job de expiração de pagamentos")
 
 
+def _carrinho_abandonado_job() -> None:
+    """Lembrete de carrinho parado. Ver src/logic/carrinho_abandonado.py.
+
+    A cada 10 min e nao a cada 1: o corte (20 min por padrao) ja define QUANDO
+    a pessoa entra na fila; rodar mais vezes so consultaria o banco a toa. Com
+    10 min o atraso maximo entre "virou candidato" e "recebeu" e de 10 min, o
+    que num lembrete de 20 min e irrelevante.
+    """
+    try:
+        from .logic.carrinho_abandonado import executar
+        r = executar()
+        if r.get("enviados"):
+            logger.info("[CARRINHO] %s", r)
+    except Exception:
+        logger.exception("[CARRINHO] job falhou")
+
+
 def _monitor_job() -> None:
     """Verificacao horaria de saude. Ver src/logic/monitor.py.
 
@@ -462,6 +479,16 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=600,
     )
     logger.info("[SCHEDULER] Monitor de saude: a cada 1 hora")
+    _scheduler.add_job(
+        func=_carrinho_abandonado_job,
+        trigger="interval",
+        minutes=10,
+        id="carrinho_abandonado",
+        name="Lembrete de carrinho abandonado",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    logger.info("[SCHEDULER] Lembrete de carrinho: a cada 10 minutos")
     _scheduler.start()
 
     logger.info(

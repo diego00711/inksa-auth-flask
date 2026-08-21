@@ -73,6 +73,36 @@ def _peso_do_pedido_servidor(itens):
                 pass
 
 
+def _zerar_carrinho(client_profile_id):
+    """Zera a foto do carrinho assim que o pedido é gravado.
+
+    Antes isto dependia do app mandar o próximo heartbeat (a cada 2 min) com
+    o carrinho já vazio. Só que o comportamento normal depois de pedir é
+    LARGAR O CELULAR — app em segundo plano, Android congela o timer, o
+    heartbeat não sai. O carrinho ficava com os itens e a data velha, e a
+    pessoa entrava na lista de "carrinho abandonado" logo depois de ter
+    comprado.
+
+    Com o lembrete automático isso deixaria de ser um caso raro e viraria
+    sistemático: comprou, largou o celular, e 20 min depois recebe "você
+    esqueceu seu carrinho". Zerar aqui é autoritativo — não depende de o app
+    avisar nada.
+
+    Nunca levanta: falhar aqui não pode derrubar um pedido que já foi pago.
+    """
+    if not client_profile_id:
+        return
+    try:
+        supabase_client.table('client_profiles').update({
+            'cart_items_count': 0,
+            'cart_value': 0,
+            'cart_updated_at': None,
+        }).eq('id', str(client_profile_id)).execute()
+    except Exception:
+        logging.warning("Não deu pra zerar o carrinho de %s", client_profile_id,
+                        exc_info=True)
+
+
 def _recusa_sem_veiculo(dados_pedido):
     """(mensagem, peso) quando NINGUÉM comporta a carga. (None, peso) se ok.
 
@@ -583,6 +613,7 @@ def criar_preferencia_mercado_pago():
             
             logging.info(f"📤 Enviando dados para o Supabase: {order_data}")
             result = supabase_client.table('orders').insert(order_data).execute()
+            _zerar_carrinho(client_profile_id)
             
             logging.info(f"📥 Resposta do Supabase: {result}")
             
@@ -1250,6 +1281,7 @@ def processar_pagamento_cartao():
             'updated_at': datetime.utcnow().isoformat(),
         }
         ins = supabase_client.table('orders').insert(order_data).execute()
+        _zerar_carrinho(client_profile_id)
         if not ins.data:
             return jsonify({"erro": "Erro ao criar pedido."}), 500
 
