@@ -15,7 +15,8 @@ VALID_ROLES = {"super_admin", "admin", "operator", "viewer"}
 # com os checkboxes do AdminsPage.jsx. Se uma página existe no menu com `page`
 # mas não está aqui, ela fica impossível de conceder (some pra admin não-super).
 VALID_PAGES = {
-    "dashboard", "metricas", "usuarios", "restaurantes", "avaliacoes", "gamificacao",
+    "dashboard", "metricas", "prontidao", "carrinhos",
+    "usuarios", "restaurantes", "prospeccao", "avaliacoes", "gamificacao",
     "banners", "cupons", "recompensas", "clube", "social",
     "logs", "administradores", "relatorios", "financeiro", "payouts", "dividas",
     "ocorrencias", "suporte", "configuracoes", "integracoes",

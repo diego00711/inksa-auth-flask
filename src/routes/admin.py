@@ -2312,3 +2312,60 @@ def admin_sugestoes():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+@admin_bp.route("/sugestoes/atendida", methods=["POST", "OPTIONS"])
+def admin_sugestao_atendida():
+    """Marca (ou desmarca) "já falei com esse".
+
+    Sem isto a fila só cresce e some a diferença entre "ninguém procurou ainda"
+    e "procurei e não fechou" — que é justamente a informação que decide o que
+    fazer amanhã. Marca por nome_chave, não por linha: a tela agrupa as
+    sugestões da mesma loja, então desmarcar uma linha e deixar as outras
+    marcadas produziria um estado que a tela não sabe mostrar.
+
+    Não apaga nada. O contador de demanda continua valendo depois da visita.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    body = request.get_json(silent=True) or {}
+    chave = (body.get("nome_chave") or "").strip()
+    if not chave:
+        return jsonify({"error": "nome_chave é obrigatório"}), 400
+    atendida = bool(body.get("atendida", True))
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor() as cur:
+            # NOW() do banco, não do processo: created_at já vem de lá, e duas
+            # fontes de relógio numa mesma tabela é o tipo de detalhe que só
+            # aparece quando a data fica estranha e ninguém sabe por quê.
+            cur.execute(
+                """UPDATE restaurant_suggestions
+                      SET atendida_em = CASE WHEN %s THEN NOW() ELSE NULL END
+                    WHERE nome_chave = %s""",
+                (atendida, chave),
+            )
+            n = cur.rowcount
+        conn.commit()
+        return jsonify({
+            "status": "success",
+            "atualizadas": n,
+            "message": "Marcada como atendida." if atendida else "Voltou pra fila.",
+        }), 200
+    except Exception:
+        logger.exception("Erro ao marcar sugestão")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"error": "Erro ao marcar sugestão"}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass
