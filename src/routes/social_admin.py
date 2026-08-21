@@ -153,3 +153,238 @@ def delete_event(event_id):
         return jsonify({"error": "Erro interno"}), 500
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Indicações: quem a cidade acha que deve receber o lucro do Dia I
+# ---------------------------------------------------------------------------
+#
+# A janela de indicação é uma CHAVE PRÓPRIA, não a fase do evento. O Diego abre
+# cerca de um mês antes de propósito: quando o Dia I chegar, o destino já tem
+# que estar decidido, com tempo de falar com a instituição e combinar a
+# entrega. Amarrar isso ao "está acontecendo agora" deixaria a escolha pro dia
+# do evento — que é exatamente tarde demais.
+#
+# Chave: social_nominations_open ('true' | 'false') em platform_settings.
+
+_CHAVE_ABERTA = "social_nominations_open"
+
+
+def _chave_do_nome(nome: str) -> str:
+    """Agrupa 'Lar dos Idosos', 'lar dos idosos' e 'Lar  dos  Idosos'.
+
+    Sem normalizar, o ranking nunca sobe: cada jeito de escrever vira uma
+    linha de um voto só, e o número é a única coisa que faz esta tabela
+    valer alguma coisa.
+    """
+    import re
+    import unicodedata
+    s = unicodedata.normalize("NFKD", nome or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+@social_admin_bp.get("/nominations")
+@_admin_required
+def listar_indicacoes():
+    """Ranking das indicações + se a janela está aberta.
+
+    Traz o `motivo` de cada pessoa junto, não só a contagem. Numa escolha
+    dessas o texto costuma decidir mais que o número: "a creche da minha rua
+    ficou sem gás" convence de um jeito que sete votos anônimos não convencem.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT value FROM platform_settings WHERE key = %s", (_CHAVE_ABERTA,))
+            r = cur.fetchone()
+            aberta = bool(r and (r["value"] or "").strip().lower() == "true")
+
+            cur.execute("""
+                SELECT n.nome_chave,
+                       MIN(n.nome)                AS nome,
+                       count(*)::int              AS votos,
+                       max(n.created_at)          AS ultimo,
+                       bool_or(n.escolhida_em IS NOT NULL) AS escolhida,
+                       (array_agg(n.contato) FILTER (WHERE n.contato IS NOT NULL))[1] AS contato,
+                       array_remove(array_agg(n.motivo ORDER BY n.created_at DESC), NULL) AS motivos,
+                       array_agg(DISTINCT n.user_type) AS tipos
+                  FROM social_nominations n
+                 GROUP BY n.nome_chave
+                 ORDER BY count(*) DESC, max(n.created_at) DESC
+                 LIMIT 200
+            """)
+            linhas = []
+            for row in cur.fetchall():
+                d = dict(row)
+                d["ultimo"] = d["ultimo"].isoformat() if d.get("ultimo") else None
+                # Só os 5 motivos mais recentes: a tela mostra uma amostra, e
+                # uma indicação com 80 votos traria 80 textos pro navegador.
+                d["motivos"] = (d.get("motivos") or [])[:5]
+                linhas.append(d)
+
+        return jsonify({"status": "success", "aberta": aberta, "indicacoes": linhas}), 200
+    except Exception:
+        logger.exception("Erro ao listar indicações do Dia I")
+        return jsonify({"error": "Erro ao listar indicações"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@social_admin_bp.post("/nominations/abrir")
+@_admin_required
+def abrir_indicacoes():
+    """Liga ou desliga a caixa de indicação nos três apps."""
+    body = request.get_json(silent=True) or {}
+    aberta = bool(body.get("aberta", True))
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO platform_settings (key, value, label, category, type, updated_at)
+                VALUES (%s, %s, 'Indicações do Dia I abertas', 'social', 'boolean', NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """, (_CHAVE_ABERTA, "true" if aberta else "false"))
+        conn.commit()
+        return jsonify({
+            "status": "success",
+            "aberta": aberta,
+            "message": "Indicações abertas nos apps." if aberta else "Indicações fechadas.",
+        }), 200
+    except Exception:
+        logger.exception("Erro ao abrir/fechar indicações")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({"error": "Erro ao salvar"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@social_admin_bp.post("/nominations/escolher")
+@_admin_required
+def escolher_indicacao():
+    """Marca a instituição escolhida (ou desmarca).
+
+    Marcar não fecha a votação nem apaga as outras: serve pra saber, meses
+    depois, qual indicação virou o destino daquele Dia I. O valor doado
+    continua sendo registrado no evento, em social_day_events.destination.
+    """
+    body = request.get_json(silent=True) or {}
+    chave = (body.get("nome_chave") or "").strip()
+    if not chave:
+        return jsonify({"error": "nome_chave é obrigatório"}), 400
+    escolhida = bool(body.get("escolhida", True))
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor() as cur:
+            if escolhida:
+                # Só uma por vez: escolher a segunda tira a marca da primeira,
+                # senão a tela mostra duas escolhidas e ninguém sabe qual vale.
+                cur.execute("UPDATE social_nominations SET escolhida_em = NULL "
+                            "WHERE escolhida_em IS NOT NULL")
+            cur.execute(
+                "UPDATE social_nominations "
+                "   SET escolhida_em = CASE WHEN %s THEN NOW() ELSE NULL END "
+                " WHERE nome_chave = %s",
+                (escolhida, chave),
+            )
+            n = cur.rowcount
+        conn.commit()
+        return jsonify({"status": "success", "atualizadas": n}), 200
+    except Exception:
+        logger.exception("Erro ao escolher indicação")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({"error": "Erro ao salvar"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@social_admin_bp.route("/nominations/enviar", methods=["POST", "OPTIONS"])
+def enviar_indicacao():
+    """A pessoa indica. Cliente, parceiro OU entregador — os três podem.
+
+    Fica no blueprint do Social porque o assunto é o mesmo, mas NÃO usa o
+    @_admin_required: aqui basta estar logado, de qualquer app.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+
+    user_id, user_type, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    nome = (body.get("nome") or "").strip()[:140]
+    motivo = (body.get("motivo") or "").strip()[:400] or None
+    contato = (body.get("contato") or "").strip()[:120] or None
+
+    if len(nome) < 3:
+        return jsonify({"error": "Escreva o nome da instituição."}), 400
+    chave = _chave_do_nome(nome)
+    if not chave:
+        return jsonify({"error": "Escreva o nome da instituição."}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Serviço indisponível no momento."}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # A janela é conferida NO SERVIDOR. O app esconder a caixa é
+            # conveniência; se a checagem morasse só lá, bastava manter a tela
+            # aberta pra continuar votando depois de fechada.
+            cur.execute("SELECT value FROM platform_settings WHERE key = %s", (_CHAVE_ABERTA,))
+            r = cur.fetchone()
+            if not (r and (r["value"] or "").strip().lower() == "true"):
+                return jsonify({"error": "As indicações estão fechadas no momento."}), 409
+
+            # Indicar de novo não vira dois votos. Quem aperta outra vez recebe
+            # a mesma resposta boa — dizer "você já votou" é repreender alguém
+            # por querer ajudar.
+            cur.execute("""
+                INSERT INTO social_nominations (user_id, user_type, nome, nome_chave, motivo, contato)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, nome_chave) DO UPDATE
+                   SET motivo  = COALESCE(EXCLUDED.motivo,  social_nominations.motivo),
+                       contato = COALESCE(EXCLUDED.contato, social_nominations.contato)
+            """, (user_id, user_type or "cliente", nome, chave, motivo, contato))
+
+            cur.execute("SELECT count(*)::int AS n FROM social_nominations WHERE nome_chave = %s",
+                        (chave,))
+            n = int((cur.fetchone() or {}).get("n") or 1)
+        conn.commit()
+        return jsonify({"status": "ok", "votos": n}), 201
+    except Exception:
+        logger.exception("Indicação do Dia I falhou")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({"error": "Não consegui registrar agora. Tente de novo."}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

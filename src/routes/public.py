@@ -107,10 +107,16 @@ def public_social_day():
     if not conn:
         return jsonify({"configured": False, "visible": False}), 200
     try:
-        keys = ("social_day_date", "social_day_start", "social_day_end", "social_day_show_in_apps")
+        keys = ("social_day_date", "social_day_start", "social_day_end",
+                "social_day_show_in_apps", "social_nominations_open")
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT key, value FROM platform_settings WHERE key = ANY(%s)", (list(keys),))
             cfg = {r["key"]: (r["value"] or "").strip() for r in cur.fetchall()}
+
+            # Janela de indicação: quem a cidade acha que deve receber o lucro.
+            # É chave PRÓPRIA, não a fase do evento — o Diego abre cerca de um
+            # mês antes pra chegar no Dia I com o destino já decidido.
+            nominations_open = (cfg.get("social_nominations_open") or "").lower() == "true"
 
             date_str = cfg.get("social_day_date") or ""
             if not date_str:
@@ -187,6 +193,7 @@ def public_social_day():
             "end_time": end_str,
             "raised": raised,
             "orders_count": orders_count,
+            "nominations_open": nominations_open,
         }
         if is_admin:
             payload["breakdown"] = {"commission": round(commission, 2), "margin": round(margin, 2)}
