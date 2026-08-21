@@ -298,3 +298,74 @@ def geocode_endpoint():
         request.args.get("zipcode"),
     )
     return jsonify({"status": "success", "data": {"lat": lat, "lng": lng}}), 200
+
+
+# ---------------------------------------------------------------------------
+# Números públicos — o contador do site institucional
+# ---------------------------------------------------------------------------
+
+# Abaixo deste total, o site NÃO mostra a seção. Não é maquiagem: é a diferença
+# entre não falar de número ainda e falar um número que trabalha contra a
+# Inksa. Um dono de restaurante que abre o site e lê "34 pessoas" fecha a aba —
+# o mesmo número, daqui a alguns meses, vende sozinho.
+#
+# Fica em platform_settings (site_numeros_minimo) pra ser mudado sem deploy.
+# Zero = mostrar sempre, seja qual for o número.
+_MINIMO_PADRAO = 300
+
+
+@public_bp.get("/numeros")
+def public_numeros():
+    """Quantas pessoas já estão dentro da Inksa. Sem autenticação.
+
+    Conta CADASTROS, não sessões: é o único número que a gente pode afirmar
+    sem asterisco. Cliente, entregador e parceiro somam no total porque os
+    três são gente que criou conta aqui.
+
+    `publicar` é a decisão, não o dado. O site respeita: se vier false, a
+    seção inteira some da página em vez de mostrar número pequeno.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "success", "publicar": False}), 200
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT
+                  (SELECT count(*)::int FROM client_profiles)   AS clientes,
+                  (SELECT count(*)::int FROM delivery_profiles) AS entregadores,
+                  (SELECT count(*)::int FROM restaurant_profiles
+                    WHERE COALESCE(approved,false) AND COALESCE(active,false)) AS parceiros,
+                  (SELECT count(*)::int FROM orders
+                    WHERE status = 'delivered')                 AS entregues
+            """)
+            r = cur.fetchone() or {}
+
+        clientes = int(r.get("clientes") or 0)
+        entregadores = int(r.get("entregadores") or 0)
+        parceiros = int(r.get("parceiros") or 0)
+        total = clientes + entregadores + parceiros
+
+        try:
+            from ..utils.platform_settings import get_settings
+            minimo = int(float(get_settings().get("site_numeros_minimo") or _MINIMO_PADRAO))
+        except Exception:
+            minimo = _MINIMO_PADRAO
+
+        return jsonify({
+            "status": "success",
+            "publicar": total >= minimo,
+            "total": total,
+            "clientes": clientes,
+            "entregadores": entregadores,
+            "parceiros": parceiros,
+            "entregues": int(r.get("entregues") or 0),
+        }), 200
+    except Exception:
+        logger.exception("Erro ao contar números públicos")
+        # Falha silenciosa: o site simplesmente não mostra a seção. Melhor um
+        # site sem contador que um contador escrito "0".
+        return jsonify({"status": "success", "publicar": False}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
