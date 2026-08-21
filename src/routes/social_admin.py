@@ -360,22 +360,33 @@ def enviar_indicacao():
             if not (r and (r["value"] or "").strip().lower() == "true"):
                 return jsonify({"error": "As indicações estão fechadas no momento."}), 409
 
-            # Indicar de novo não vira dois votos. Quem aperta outra vez recebe
-            # a mesma resposta boa — dizer "você já votou" é repreender alguém
-            # por querer ajudar.
+            # UMA INDICAÇÃO POR PESSOA (não uma por instituição). Índice único
+            # em user_id: quem indica de novo TROCA a sua, não soma outra.
+            #
+            # Trocar é permitido de propósito. Quem digitou o nome errado ou
+            # mudou de ideia não pode ficar preso pra sempre a uma indicação
+            # errada — o que não pode é uma pessoa valer por cinco.
+            #
+            # O motivo é substituído inteiro, inclusive por vazio: se a pessoa
+            # trocou de instituição, o motivo antigo era sobre a outra e
+            # mantê-lo colaria a justificativa de uma no nome da outra.
             cur.execute("""
                 INSERT INTO social_nominations (user_id, user_type, nome, nome_chave, motivo, contato)
                 VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id, nome_chave) DO UPDATE
-                   SET motivo  = COALESCE(EXCLUDED.motivo,  social_nominations.motivo),
-                       contato = COALESCE(EXCLUDED.contato, social_nominations.contato)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET nome       = EXCLUDED.nome,
+                       nome_chave = EXCLUDED.nome_chave,
+                       motivo     = EXCLUDED.motivo,
+                       contato    = COALESCE(EXCLUDED.contato, social_nominations.contato),
+                       user_type  = EXCLUDED.user_type,
+                       created_at = NOW()
             """, (user_id, user_type or "cliente", nome, chave, motivo, contato))
 
             cur.execute("SELECT count(*)::int AS n FROM social_nominations WHERE nome_chave = %s",
                         (chave,))
             n = int((cur.fetchone() or {}).get("n") or 1)
         conn.commit()
-        return jsonify({"status": "ok", "votos": n}), 201
+        return jsonify({"status": "ok", "votos": n, "nome": nome}), 201
     except Exception:
         logger.exception("Indicação do Dia I falhou")
         try:
@@ -383,6 +394,93 @@ def enviar_indicacao():
         except Exception:
             pass
         return jsonify({"error": "Não consegui registrar agora. Tente de novo."}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@social_admin_bp.route("/nominations/minha", methods=["GET", "OPTIONS"])
+def minha_indicacao():
+    """O que ESTA pessoa já indicou, se indicou.
+
+    Existe por causa da regra de um voto por pessoa. Sem isto, quem já votou
+    reabre a caixa e vê um formulário vazio — parece que o voto não foi
+    registrado, e a pessoa manda de novo achando que a primeira falhou. O app
+    precisa poder dizer "você indicou X" antes de oferecer o formulário.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+
+    user_id, _utype, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if err:
+        return err
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"minha": None}), 200
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                "SELECT nome, nome_chave, motivo FROM social_nominations WHERE user_id = %s",
+                (user_id,),
+            )
+            r = cur.fetchone()
+            if not r:
+                return jsonify({"minha": None}), 200
+            cur.execute("SELECT count(*)::int AS n FROM social_nominations WHERE nome_chave = %s",
+                        (r["nome_chave"],))
+            n = int((cur.fetchone() or {}).get("n") or 1)
+        return jsonify({"minha": {"nome": r["nome"], "motivo": r["motivo"], "votos": n}}), 200
+    except Exception:
+        logger.exception("Erro ao ler indicação da pessoa")
+        # Falha aqui não pode travar a caixa: sem resposta, o app mostra o
+        # formulário normal e o servidor continua garantindo o voto único.
+        return jsonify({"minha": None}), 200
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@social_admin_bp.delete("/nominations")
+@_admin_required
+def limpar_indicacoes():
+    """Zera as indicações pro próximo ciclo.
+
+    APAGA MESMO, e não tem volta. É o que o Diego pediu, e faz sentido: a
+    pergunta "quem deve receber o lucro do PRÓXIMO Dia I" não pode carregar os
+    votos do anterior — quem votou há três meses já foi atendido.
+
+    O que se perde é a lista bruta de votos. O RESULTADO não se perde: a
+    instituição escolhida fica registrada no evento, em
+    social_day_events.destination, que é o que alimenta a página pública de
+    prestação de contas. Por isso limpar é seguro DEPOIS de registrar o
+    evento, e perigoso antes.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM social_nominations")
+            n = cur.rowcount
+        conn.commit()
+        logger.info("[SOCIAL] indicações limpas: %d linha(s)", n)
+        return jsonify({
+            "status": "success",
+            "apagadas": n,
+            "message": f"{n} indicação(ões) apagada(s).",
+        }), 200
+    except Exception:
+        logger.exception("Erro ao limpar indicações")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({"error": "Erro ao limpar"}), 500
     finally:
         try:
             conn.close()
