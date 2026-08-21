@@ -369,3 +369,93 @@ def public_numeros():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+# ---------------------------------------------------------------------------
+# Prestação de contas — para onde foi o dinheiro dos pedidos
+# ---------------------------------------------------------------------------
+
+# Mesma lógica do contador: existe, calcula sozinho, e só publica quando tem o
+# que mostrar. Abaixo disto a porcentagem é ruído — com 3 pedidos, um pedido
+# grande sozinho entorta o gráfico inteiro.
+_MIN_PEDIDOS_PADRAO = 30
+
+
+@public_bp.get("/transparencia")
+def public_transparencia():
+    """O split real de tudo que já foi entregue. Sem autenticação.
+
+    A conta que o site mostra hoje como EXEMPLO (um pedido de R$100) vira aqui
+    a conta somada de verdade. É a única página do site em que a Inksa mostra
+    número próprio, então ela tem duas obrigações:
+
+    1. FECHAR. As três fatias somam exatamente o que o cliente pagou, porque a
+       fatia da Inksa é calculada por diferença (total − parceiro − entregador)
+       e não por outra coluna. Se algum dia um campo novo entrar no meio do
+       cálculo, essa conta continua fechando em vez de sobrar um resto que
+       ninguém explica. Prestação de contas que não bate é pior que nenhuma.
+
+    2. NÃO SE CONFUNDIR COM CAIXA. Isto é para onde foi o dinheiro DOS PEDIDOS,
+       não o extrato da Inksa. Em pedido pago em dinheiro o cliente paga o
+       entregador na mão e a comissão vira dívida — o dinheiro nunca passa pela
+       conta da empresa. Chamar isso de receita seria mentira contábil.
+
+    Do que fica com a Inksa ainda saem gateway, servidor e imposto. A página
+    diz isso com todas as letras; esconder inverteria o sentido de existir dela.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "success", "publicar": False}), 200
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT count(*)::int                                   AS pedidos,
+                       COALESCE(SUM(total_amount), 0)                  AS movimentado,
+                       COALESCE(SUM(valor_repassado_restaurante), 0)   AS parceiros,
+                       COALESCE(SUM(valor_repassado_entregador), 0)    AS entregadores
+                  FROM orders
+                 WHERE status = 'delivered'
+            """)
+            o = cur.fetchone() or {}
+
+            # Dia I: o que já foi doado. Vem da mesma tabela que alimenta a
+            # página pública do evento, então os dois números não divergem.
+            cur.execute("SELECT COALESCE(SUM(raised), 0) AS doado FROM social_day_events")
+            d = cur.fetchone() or {}
+
+        pedidos = int(o.get("pedidos") or 0)
+        movimentado = float(o.get("movimentado") or 0)
+        parceiros = float(o.get("parceiros") or 0)
+        entregadores = float(o.get("entregadores") or 0)
+        # Por diferença, nunca por outra coluna — ver a obrigação 1 acima.
+        inksa = max(0.0, movimentado - parceiros - entregadores)
+
+        try:
+            from ..utils.platform_settings import get_settings
+            minimo = int(float(get_settings().get("site_transparencia_minimo")
+                               or _MIN_PEDIDOS_PADRAO))
+        except Exception:
+            minimo = _MIN_PEDIDOS_PADRAO
+
+        def pct(v):
+            return round(100.0 * v / movimentado, 1) if movimentado > 0 else 0.0
+
+        return jsonify({
+            "status": "success",
+            "publicar": pedidos >= minimo and movimentado > 0,
+            "pedidos": pedidos,
+            "movimentado": round(movimentado, 2),
+            "parceiros": round(parceiros, 2),
+            "entregadores": round(entregadores, 2),
+            "inksa": round(inksa, 2),
+            "pct_parceiros": pct(parceiros),
+            "pct_entregadores": pct(entregadores),
+            "pct_inksa": pct(inksa),
+            "doado": round(float(d.get("doado") or 0), 2),
+        }), 200
+    except Exception:
+        logger.exception("Erro ao montar a prestação de contas")
+        return jsonify({"status": "success", "publicar": False}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
