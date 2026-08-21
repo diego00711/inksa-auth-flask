@@ -114,13 +114,18 @@ def public_social_day():
             cfg = {r["key"]: (r["value"] or "").strip() for r in cur.fetchall()}
 
             # Janela de indicação: quem a cidade acha que deve receber o lucro.
-            # É chave PRÓPRIA, não a fase do evento — o Diego abre cerca de um
-            # mês antes pra chegar no Dia I com o destino já decidido.
+            #
+            # VAI EM TODA RESPOSTA, inclusive nas que escondem o banner. O
+            # momento natural de abrir indicação é justamente quando o Dia I
+            # anterior já passou e o banner se escondeu sozinho — se o campo só
+            # viesse na resposta completa, abrir as indicações não mostraria
+            # nada em app nenhum. Foi o que aconteceu no primeiro teste.
             nominations_open = (cfg.get("social_nominations_open") or "").lower() == "true"
 
             date_str = cfg.get("social_day_date") or ""
             if not date_str:
-                return jsonify({"configured": False, "visible": False}), 200
+                return jsonify({"configured": False, "visible": False,
+                                "nominations_open": nominations_open}), 200
 
             start_str = cfg.get("social_day_start") or "00:00"
             end_str = cfg.get("social_day_end") or "23:59"
@@ -142,7 +147,8 @@ def public_social_day():
                 win_start = datetime.strptime(f"{date_str} {start_str}", "%Y-%m-%d %H:%M")
                 win_end = datetime.strptime(f"{date_str} {end_str}", "%Y-%m-%d %H:%M")
             except ValueError:
-                return jsonify({"configured": False, "visible": False}), 200
+                return jsonify({"configured": False, "visible": False,
+                                "nominations_open": nominations_open}), 200
             if win_end < win_start:
                 win_end = win_start
 
@@ -157,7 +163,8 @@ def public_social_day():
             expired = phase == "ended" and now_sp > (win_end + timedelta(hours=24))
             visible = show_in_apps and not expired
             if not visible and not is_admin:
-                return jsonify({"configured": True, "visible": False}), 200
+                return jsonify({"configured": True, "visible": False,
+                                "nominations_open": nominations_open}), 200
 
             raised = 0.0
             orders_count = 0
