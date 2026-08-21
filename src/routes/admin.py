@@ -731,10 +731,22 @@ def set_restaurant_founding(restaurant_id):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
                 """UPDATE restaurant_profiles
-                      SET fundador = %s, updated_at = NOW()
+                      SET fundador = %s,
+                          -- A JANELA É DE 6 MESES A PARTIR DA MARCAÇÃO, por
+                          -- parceiro. Antes só existia a data global
+                          -- (founding_partner_until = 31/01/2027), o que fazia
+                          -- a campanha encolher conforme o tempo passava: quem
+                          -- entrasse em agosto ganhava 5 meses, em novembro
+                          -- ganharia 2. O site promete "6 meses"; o sistema
+                          -- passa a cumprir 6 meses pra qualquer um que entre.
+                          fundador_desde = CASE WHEN %s THEN COALESCE(fundador_desde, NOW()) ELSE fundador_desde END,
+                          fundador_ate   = CASE WHEN %s
+                                                THEN (COALESCE(fundador_desde, NOW())::date + INTERVAL '6 months')::date
+                                                ELSE fundador_ate END,
+                          updated_at = NOW()
                     WHERE id = %s
-                RETURNING id, restaurant_name, fundador""",
-                (fundador, str(restaurant_id)),
+                RETURNING id, restaurant_name, fundador, fundador_ate""",
+                (fundador, fundador, fundador, str(restaurant_id)),
             )
             row = cur.fetchone()
         if not row:
@@ -2241,3 +2253,62 @@ def admin_monitor():
         "criticos": sum(1 for g, _, _ in alertas if g == CRITICO),
         "alertas": [{"gravidade": g, "titulo": t, "detalhe": d} for g, t, d in alertas],
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# Sugestões de restaurante — a fila de prospecção ordenada pela demanda real
+# ---------------------------------------------------------------------------
+@admin_bp.route("/sugestoes", methods=["GET", "OPTIONS"])
+def admin_sugestoes():
+    """Quais lojas os clientes estão pedindo, e quantos pediram cada uma.
+
+    É a lista de prospecção que se constrói sozinha. Chegar num restaurante
+    dizendo "sete pessoas do meu app pediram vocês esta semana" vale mais que
+    qualquer argumento de comissão — deixa de ser venda e vira recado.
+
+    Traz também `ja_existe`: se a loja sugerida JÁ está cadastrada, o problema
+    não é falta de parceiro, é a loja estar invisível (sem cardápio, sem
+    coordenada ou desativada). São dois problemas diferentes e a mesma tela
+    precisa separar, senão o Diego vai prospectar quem já é parceiro.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT s.nome_chave,
+                       MIN(s.nome)              AS nome,
+                       count(*)::int            AS pedidos,
+                       max(s.created_at)        AS ultimo,
+                       count(*) FILTER (WHERE s.contato IS NOT NULL)::int AS com_contato,
+                       (array_agg(s.contato) FILTER (WHERE s.contato IS NOT NULL))[1] AS contato,
+                       EXISTS (
+                         SELECT 1 FROM restaurant_profiles rp
+                          WHERE chave_nome_loja(rp.restaurant_name) = s.nome_chave
+                       ) AS ja_existe,
+                       bool_or(s.atendida_em IS NOT NULL) AS atendida
+                  FROM restaurant_suggestions s
+                 GROUP BY s.nome_chave
+                 ORDER BY count(*) DESC, max(s.created_at) DESC
+                 LIMIT 200
+            """)
+            linhas = [dict(r) for r in cur.fetchall()]
+        for l in linhas:
+            if l.get("ultimo"):
+                l["ultimo"] = l["ultimo"].isoformat()
+        return jsonify({"status": "success", "sugestoes": linhas}), 200
+    except Exception:
+        logger.exception("Erro ao listar sugestões")
+        return jsonify({"error": "Erro ao listar sugestões"}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass
