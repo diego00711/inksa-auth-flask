@@ -398,11 +398,14 @@ def _dono_do_item(cur, item_id, user_id):
 @menu_bp.route('/items/<uuid:item_id>/opcoes', methods=['GET', 'OPTIONS'])
 @handle_db_errors
 def listar_opcoes_do_item(conn, item_id):
-    """Grupos e opções de um item. Aberto pra quem está logado.
+    """Grupos e opções de um item. PÚBLICO, sem token.
 
-    O app do cliente precisa disto pra montar a tela de escolha, e o do
-    parceiro pra editar. Como só devolve cardápio (nome e preço de opção), não
-    há dado sensível — a mesma informação já aparece na vitrine.
+    É cardápio: nome e preço de opção, a mesma natureza do que já aparece na
+    vitrine pra quem nem tem conta. Exigir token aqui só quebraria a vitrine
+    sem esconder nada.
+
+    Quem ESCREVE é outra história — o POST abaixo exige o parceiro dono do
+    item. Ler o cardápio dos outros é vitrine; mexer nele é invasão.
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 204
