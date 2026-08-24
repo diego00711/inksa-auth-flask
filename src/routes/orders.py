@@ -2664,3 +2664,130 @@ def archive_order(order_id):
     finally:
         if conn:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Linha do tempo do pedido
+# ---------------------------------------------------------------------------
+
+# Rótulo de cada status, na linguagem de quem lê — não a do banco. "delivering"
+# não diz nada pro entregador; "Saiu para entrega" diz.
+_ROTULO_EVENTO = {
+    "awaiting_payment":     "Aguardando pagamento",
+    "pending":              "Pedido feito",
+    "accepted":             "Loja aceitou",
+    "preparing":            "Em preparo",
+    "ready":                "Pronto para retirada",
+    "accepted_by_delivery": "Entregador aceitou",
+    "delivering":           "Saiu para entrega",
+    "delivered":            "Pedido entregue",
+    "completed":            "Finalizado",
+    "cancelled":            "Cancelado",
+    "canceled":             "Cancelado",
+    "delivery_failed":      "Entrega não concluída",
+}
+
+
+def _minutos(a, b):
+    """Minutos inteiros entre dois instantes, ou None se faltar um deles."""
+    if not a or not b:
+        return None
+    return max(0, int((b - a).total_seconds() // 60))
+
+
+@orders_bp.route('/<order_id>/linha-do-tempo', methods=['GET'])
+def order_linha_do_tempo(order_id):
+    """A hora de cada passo do pedido, e quanto durou cada trecho.
+
+    Pedido do Diego (24/08/2026), no formato do histórico de rota que os
+    aplicativos grandes mostram: aceito às 18:16, retirado às 18:36, entregue
+    às 18:48.
+
+    Serve pra três coisas diferentes, e é por isso que vale mais que enfeite:
+
+      • o entregador confere o que ele levou, e para de discutir de memória;
+      • o parceiro vê quanto tempo o pedido ficou parado depois de PRONTO;
+      • a Inksa descobre onde o tempo se perde, que é o único jeito de
+        melhorar prazo sem chutar.
+
+    Os eventos vêm de um gatilho no banco, não de chamada no código: se o
+    status mudou, o evento existe. Ver a migração linha_do_tempo_do_pedido.
+    """
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Autorização por PARTICIPAÇÃO: cliente, parceiro ou entregador
+            # daquele pedido — mais admin. Sem isto, qualquer pessoa logada
+            # leria a rotina de entrega de qualquer outra.
+            cur.execute("""
+                SELECT o.id,
+                       (SELECT user_id FROM client_profiles     WHERE id = o.client_id)     AS dono_cliente,
+                       (SELECT user_id FROM restaurant_profiles WHERE id = o.restaurant_id) AS dono_loja,
+                       (SELECT user_id FROM delivery_profiles   WHERE id = o.delivery_id)   AS dono_entregador
+                  FROM orders o WHERE o.id = %s
+            """, (str(order_id),))
+            dono = cur.fetchone()
+            if not dono:
+                return jsonify({"error": "Pedido não encontrado"}), 404
+
+            permitido = (user_type == 'admin') or str(user_id) in {
+                str(dono['dono_cliente']), str(dono['dono_loja']), str(dono['dono_entregador'])
+            }
+            if not permitido:
+                return jsonify({"error": "Acesso negado"}), 403
+
+            cur.execute("""
+                SELECT status, de_status, created_at
+                  FROM order_status_events
+                 WHERE order_id = %s
+                 ORDER BY created_at, id
+            """, (str(order_id),))
+            linhas = cur.fetchall()
+
+        eventos = []
+        anterior = None
+        for r in linhas:
+            eventos.append({
+                "status": r["status"],
+                "rotulo": _ROTULO_EVENTO.get(r["status"], r["status"]),
+                "hora": r["created_at"].isoformat() if r["created_at"] else None,
+                # Quanto ficou no passo ANTERIOR. É esse número que mostra
+                # onde o tempo se perde — a hora sozinha não mostra.
+                "desde_o_anterior_min": _minutos(anterior, r["created_at"]),
+            })
+            anterior = r["created_at"]
+
+        # Trechos que interessam, cada um respondendo uma pergunta de negócio.
+        em = {}
+        for r in linhas:
+            em.setdefault(r["status"], r["created_at"])
+
+        resumo = {
+            # Quanto a loja levou pra preparar.
+            "preparo_min": _minutos(em.get("accepted"), em.get("ready")),
+            # Quanto o pedido ficou PRONTO esperando alguém retirar. Este é o
+            # número da conversa sobre marcar "pronto" cedo demais — só que
+            # ele ainda mistura duas coisas: esperar entregador aparecer e
+            # entregador esperando na porta. Separar exige o evento "cheguei
+            # na coleta", que ainda não existe.
+            "esperando_retirada_min": _minutos(em.get("ready"), em.get("delivering")),
+            # Quanto durou a rota até a porta do cliente.
+            "rota_min": _minutos(em.get("delivering"), em.get("delivered")),
+            # Do pedido feito até a entrega: o que o cliente sentiu.
+            "total_min": _minutos(em.get("pending") or em.get("awaiting_payment"),
+                                  em.get("delivered")),
+        }
+
+        return jsonify({"status": "success", "eventos": eventos, "resumo": resumo}), 200
+    except Exception:
+        logging.exception("Erro ao montar a linha do tempo do pedido")
+        return jsonify({"error": "Erro ao montar a linha do tempo"}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass
