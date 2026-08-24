@@ -483,15 +483,21 @@ def sugerir_restaurante():
                 return jsonify({"error": "Perfil não encontrado."}), 404
 
             # ON CONFLICT: sugerir a mesma loja duas vezes não vira dois votos.
-            # Quem aperta de novo recebe a mesma resposta amigável — dizer
-            # "você já sugeriu" seria repreender alguém por querer ajudar.
+            #
+            # `xmax = 0` distingue linha NOVA de linha que já existia — é o
+            # jeito do Postgres de dizer se o INSERT virou UPDATE. Sem isso a
+            # resposta era idêntica nos dois casos, e o app dizia "anotado,
+            # você foi a primeira pessoa" pra quem já tinha pedido antes.
+            # Parecia que o pedido não tinha contado; na verdade tinha contado
+            # da primeira vez. Confundiu na primeira semana de uso.
             cur.execute("""
                 INSERT INTO restaurant_suggestions (client_id, nome, nome_chave, contato, cidade)
                 VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (client_id, nome_chave) WHERE client_id IS NOT NULL
                 DO UPDATE SET contato = COALESCE(EXCLUDED.contato, restaurant_suggestions.contato)
-                RETURNING id
+                RETURNING id, (xmax = 0) AS nova
             """, (perfil['id'], nome, chave, contato, cidade))
+            nova = bool((cur.fetchone() or {}).get('nova'))
 
             # Quantas pessoas já pediram esta mesma loja — devolve pro app, que
             # usa pra dizer "você e mais 6". Prova social de graça, e verdadeira.
@@ -499,7 +505,7 @@ def sugerir_restaurante():
             n = int((cur.fetchone() or {}).get('n') or 1)
             conn.commit()
 
-        return jsonify({"status": "ok", "pedidos": n}), 201
+        return jsonify({"status": "ok", "pedidos": n, "ja_tinha": not nova}), 201
     except Exception:
         logging.warning("Sugestão de restaurante falhou", exc_info=True)
         try: conn.rollback()
@@ -508,3 +514,55 @@ def sugerir_restaurante():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+@client_bp.route('/suggestions', methods=['GET'])
+def listar_sugestoes_publicas():
+    """O que outras pessoas já pediram, pro cliente escolher em vez de digitar.
+
+    Nasce de um problema real do primeiro dia de uso: a mesma padaria entrou
+    duas vezes, como "Padaria muller" e "Pqdaria mullre". A normalização junta
+    maiúscula, acento e espaço a mais — não conserta letra trocada. E adivinhar
+    por semelhança é pior: no dia em que o palpite errar, junta duas lojas
+    diferentes num registro só e o número que o Diego leva pro dono da loja
+    passa a estar errado.
+
+    A saída é não adivinhar. Mostra o que já existe e deixa a PESSOA escolher.
+    Quem toca numa opção manda exatamente o mesmo nome que já está lá, e o
+    contador sobe em vez de nascer uma linha nova.
+
+    De quebra vira prova social: ver "Padaria Muller — 6 pessoas já pediram"
+    convence mais a mandar a sua do que um campo vazio.
+    """
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'client':
+        return jsonify({"error": "Apenas clientes."}), 403
+
+    conn = get_db_connection()
+    if not conn:
+        # Falha aqui não pode travar a caixa de sugestão: sem a lista o app
+        # mostra só o campo de texto, que é o comportamento antigo.
+        return jsonify({"sugestoes": []}), 200
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT MIN(nome)   AS nome,
+                       nome_chave,
+                       count(*)::int AS pedidos
+                  FROM restaurant_suggestions
+                 GROUP BY nome_chave
+                 ORDER BY count(*) DESC, max(created_at) DESC
+                 LIMIT 200
+            """)
+            linhas = [dict(r) for r in cur.fetchall()]
+        return jsonify({"sugestoes": linhas}), 200
+    except Exception:
+        logging.warning("Listagem de sugestões falhou", exc_info=True)
+        return jsonify({"sugestoes": []}), 200
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

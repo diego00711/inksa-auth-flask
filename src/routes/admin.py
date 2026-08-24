@@ -2369,3 +2369,54 @@ def admin_sugestao_atendida():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+@admin_bp.route("/sugestoes", methods=["DELETE", "OPTIONS"])
+def admin_apagar_sugestao():
+    """Apaga uma sugestão da fila de prospecção.
+
+    Existe porque o campo é texto livre e texto livre gera entulho: erro de
+    digitação vira uma loja nova ("Pqdaria mullre" ao lado de "Padaria
+    muller"), e duas linhas pra mesma padaria estragam o número que é a razão
+    da tela existir.
+
+    Apaga por nome_chave, não por linha: a tela agrupa por nome_chave, então
+    apagar uma linha de um grupo deixaria a mesma loja na lista com o contador
+    menor — pior que não apagar.
+
+    NÃO é o mesmo que "já atendi". Atendida some da fila e mantém o histórico;
+    apagar é pra lixo, e não tem volta.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    chave = (request.args.get("nome_chave") or "").strip()
+    if not chave:
+        return jsonify({"error": "nome_chave é obrigatório"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM restaurant_suggestions WHERE nome_chave = %s", (chave,))
+            n = cur.rowcount
+        conn.commit()
+        return jsonify({
+            "status": "success",
+            "apagadas": n,
+            "message": "Sugestão apagada." if n else "Nada para apagar.",
+        }), 200
+    except Exception:
+        logger.exception("Erro ao apagar sugestão")
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"error": "Erro ao apagar"}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass
