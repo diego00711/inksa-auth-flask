@@ -102,8 +102,21 @@ def get_menu_items(conn):
         restaurant_id = restaurant_profile['id']
         
         # 2. Agora, usar o restaurant_id para buscar os itens do cardápio.
+        # Traz junto o NOME dos grupos de opção de cada item, pra lista do
+        # cardápio mostrar o que já está configurado. Numa subconsulta, e não
+        # numa chamada por item: com 40 itens seriam 40 requisições só pra
+        # desenhar uma linha de texto.
         cur.execute(
-            "SELECT id, name, description, price, category, is_available, image_url FROM menu_items WHERE restaurant_id = %s ORDER BY category, name", 
+            """SELECT mi.id, mi.name, mi.description, mi.price, mi.category,
+                      mi.is_available, mi.image_url,
+                      COALESCE((
+                        SELECT array_agg(g.nome ORDER BY g.ordem, g.created_at)
+                          FROM menu_item_option_groups g
+                         WHERE g.item_id = mi.id
+                      ), ARRAY[]::text[]) AS grupos_opcoes
+                 FROM menu_items mi
+                WHERE mi.restaurant_id = %s
+                ORDER BY mi.category, mi.name""",
             (restaurant_id,)
         )
         items = [make_serializable(dict(row)) for row in cur.fetchall()]
@@ -419,7 +432,7 @@ def listar_opcoes_do_item(conn, item_id):
         grupos = [dict(r) for r in cur.fetchall()]
         if grupos:
             cur.execute("""
-                SELECT id, group_id, nome, preco_extra, disponivel, ordem
+                SELECT id, group_id, nome, preco_extra, disponivel, ordem, imagem_url
                   FROM menu_item_options
                  WHERE group_id = ANY(%s::uuid[])
                  ORDER BY ordem, created_at
@@ -495,10 +508,12 @@ def salvar_opcoes_do_item(conn, item_id):
                 except (TypeError, ValueError):
                     preco = 0.0
                 cur.execute("""
-                    INSERT INTO menu_item_options (group_id, nome, preco_extra, disponivel, ordem)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO menu_item_options
+                        (group_id, nome, preco_extra, disponivel, ordem, imagem_url)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                 """, (gid, (o.get('nome') or '').strip()[:80], preco,
-                      bool(o.get('disponivel', True)), j))
+                      bool(o.get('disponivel', True)), j,
+                      (o.get('imagem_url') or '').strip()[:500] or None))
 
     conn.commit()
     return jsonify({"status": "success"}), 200
