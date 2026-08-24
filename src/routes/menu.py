@@ -380,3 +380,122 @@ def importar_catalogo(conn):
         "ignorados": ignorados[:50],
         "total_ignorados": len(ignorados),
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# Opções do item: "escolha o corte", "escolha o molho", "adicionais"
+# ---------------------------------------------------------------------------
+
+def _dono_do_item(cur, item_id, user_id):
+    """O item é mesmo desta loja? Sem isto, um parceiro editaria o cardápio do
+    outro só trocando o id na chamada."""
+    cur.execute("""SELECT 1 FROM menu_items mi
+                     JOIN restaurant_profiles rp ON rp.id = mi.restaurant_id
+                    WHERE mi.id = %s AND rp.user_id = %s""", (str(item_id), str(user_id)))
+    return cur.fetchone() is not None
+
+
+@menu_bp.route('/items/<uuid:item_id>/opcoes', methods=['GET', 'OPTIONS'])
+@handle_db_errors
+def listar_opcoes_do_item(conn, item_id):
+    """Grupos e opções de um item. Aberto pra quem está logado.
+
+    O app do cliente precisa disto pra montar a tela de escolha, e o do
+    parceiro pra editar. Como só devolve cardápio (nome e preço de opção), não
+    há dado sensível — a mesma informação já aparece na vitrine.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("""
+            SELECT g.id, g.nome, g.min_escolhas, g.max_escolhas, g.ordem
+              FROM menu_item_option_groups g
+             WHERE g.item_id = %s
+             ORDER BY g.ordem, g.created_at
+        """, (str(item_id),))
+        grupos = [dict(r) for r in cur.fetchall()]
+        if grupos:
+            cur.execute("""
+                SELECT id, group_id, nome, preco_extra, disponivel, ordem
+                  FROM menu_item_options
+                 WHERE group_id = ANY(%s::uuid[])
+                 ORDER BY ordem, created_at
+            """, ([g['id'] for g in grupos],))
+            por_grupo = {}
+            for r in cur.fetchall():
+                d = dict(r)
+                d['preco_extra'] = float(d['preco_extra'] or 0)
+                por_grupo.setdefault(str(d['group_id']), []).append(d)
+            for g in grupos:
+                g['id'] = str(g['id'])
+                g['opcoes'] = por_grupo.get(g['id'], [])
+    return jsonify({"status": "success", "grupos": grupos}), 200
+
+
+@menu_bp.route('/items/<uuid:item_id>/opcoes', methods=['POST'])
+@handle_db_errors
+def salvar_opcoes_do_item(conn, item_id):
+    """Substitui os grupos/opções do item de uma vez.
+
+    SUBSTITUI em vez de editar peça por peça, e isso é escolha: a tela do
+    parceiro monta a lista inteira e manda. Com edição incremental, cada
+    campo viraria uma chamada e a tela precisaria orquestrar ordem de
+    criação/remoção — mais código, mais chance de o cardápio ficar meio
+    salvo. Aqui ou salva tudo, ou não muda nada.
+
+    Body: {"grupos": [{nome, min_escolhas, max_escolhas,
+                       opcoes:[{nome, preco_extra, disponivel}]}]}
+    """
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'restaurant':
+        return jsonify({"error": "Apenas o parceiro edita o próprio cardápio."}), 403
+
+    grupos = (request.get_json(silent=True) or {}).get('grupos', [])
+    if not isinstance(grupos, list):
+        return jsonify({"error": "Formato inválido."}), 400
+    if len(grupos) > 12:
+        return jsonify({"error": "Máximo de 12 grupos por item."}), 400
+
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        if not _dono_do_item(cur, item_id, user_id):
+            return jsonify({"error": "Item não encontrado."}), 404
+
+        # ON DELETE CASCADE limpa as opções junto.
+        cur.execute("DELETE FROM menu_item_option_groups WHERE item_id = %s", (str(item_id),))
+
+        for i, g in enumerate(grupos):
+            nome = (g.get('nome') or '').strip()[:80]
+            if not nome:
+                continue
+            opcoes = [o for o in (g.get('opcoes') or []) if (o.get('nome') or '').strip()]
+            if not opcoes:
+                # Grupo sem opção é armadilha: apareceria pro cliente como uma
+                # escolha obrigatória impossível de satisfazer.
+                continue
+            if len(opcoes) > 30:
+                return jsonify({"error": f"Máximo de 30 opções em '{nome}'."}), 400
+
+            maxe = max(1, min(int(g.get('max_escolhas') or 1), len(opcoes)))
+            mine = max(0, min(int(g.get('min_escolhas') or 0), maxe))
+
+            cur.execute("""
+                INSERT INTO menu_item_option_groups (item_id, nome, min_escolhas, max_escolhas, ordem)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (str(item_id), nome, mine, maxe, i))
+            gid = cur.fetchone()['id']
+
+            for j, o in enumerate(opcoes):
+                try:
+                    preco = max(0.0, round(float(o.get('preco_extra') or 0), 2))
+                except (TypeError, ValueError):
+                    preco = 0.0
+                cur.execute("""
+                    INSERT INTO menu_item_options (group_id, nome, preco_extra, disponivel, ordem)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (gid, (o.get('nome') or '').strip()[:80], preco,
+                      bool(o.get('disponivel', True)), j))
+
+    conn.commit()
+    return jsonify({"status": "success"}), 200

@@ -802,6 +802,31 @@ def criar_preferencia_mercado_pago():
                     return jsonify({"erro": f"Item de cardápio inválido: {titulo}"}), 400
 
                 preco_real = float(db_result.data[0]['price'])
+                # Opções (corte, molho, adicional) somam ao preço do item, com
+                # valor lido do banco. Sem isto aqui, o pedido ONLINE cobraria
+                # o item pelado e a loja entregaria o adicional de graça — a
+                # regra tem que existir NOS DOIS caminhos de pagamento, que é
+                # a lição que este arquivo já ensinou antes.
+                #
+                # Try PRÓPRIO de propósito: o `except (ValueError, TypeError)`
+                # lá embaixo faz `continue`, ou seja, DESCARTA o item e segue.
+                # Se um erro de opção caísse nele, o item sumiria da cobrança e
+                # continuaria no pedido — cliente paga menos, loja entrega
+                # igual, e ninguém percebe até o fechamento do mês.
+                try:
+                    extra_opcoes, desc_opcoes = preco_extra_das_opcoes(
+                        menu_item_id, item.get('opcoes'))
+                except ValueError as erro_opcao:
+                    logging.error(f"❌ Opção inválida em '{titulo}': {erro_opcao}")
+                    supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                    return jsonify({
+                        "erro": "Uma das opções escolhidas não está mais disponível. "
+                                "Recarregue o cardápio e monte o item de novo.",
+                        "item": titulo,
+                    }), 400
+                preco_real = round(preco_real + extra_opcoes, 2)
+                if desc_opcoes:
+                    titulo = f"{titulo} ({desc_opcoes})"
                 preco_frontend = float(item.get('unit_price', 0))
 
                 if abs(preco_real - preco_frontend) > 0.01:
@@ -1103,7 +1128,10 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
         if not db.data:
             raise ValueError("Item de cardápio inválido.")
         preco_real = float(db.data[0]['price'])
-        subtotal += preco_real * quantidade
+        # Opções escolhidas (corte, molho, adicional) entram no preço AQUI,
+        # com valor lido do banco. Ver preco_extra_das_opcoes.
+        extra, _desc = preco_extra_das_opcoes(menu_item_id, item.get('opcoes'))
+        subtotal += (preco_real + extra) * quantidade
 
     # Desconto de cupom — mesma lógica única do preview e do fluxo online
     desconto = 0.0
@@ -1683,3 +1711,57 @@ def asaas_webhook():
         return jsonify({"status": "error"}), 500
 
     return jsonify({"status": "ok"}), 200
+
+
+def preco_extra_das_opcoes(menu_item_id, opcoes):
+    """Quanto as opções escolhidas somam ao preço do item, conferido no banco.
+
+    O app manda só os IDs das opções. O NOME e o PREÇO vêm daqui — nunca do
+    que o cliente enviou. Sem isto, bastaria mandar {"preco_extra": -20} pra
+    comprar barato: opção paga seria a porta de fraude de preço mais fácil que
+    este sistema já teve.
+
+    Confere também que a opção PERTENCE ao item pedido. Sem essa checagem dava
+    pra colar o adicional de R$ 0,50 de um prato no preço de outro.
+
+    Devolve (extra_unitario, descricao). A descrição é o que fica gravado no
+    pedido e sai na comanda — sem ela impressa, a cozinha faz errado e o app
+    leva a culpa por um pedido que registrou certo.
+
+    Lança ValueError se a opção não existe, não é do item ou está indisponível.
+    """
+    ids = []
+    for o in (opcoes or []):
+        oid = o.get('id') if isinstance(o, dict) else o
+        if oid:
+            ids.append(str(oid))
+    if not ids:
+        return 0.0, ''
+    ids = list(dict.fromkeys(ids))   # sem repetir a mesma opção
+
+    # !inner força o vínculo com o grupo: a mesma consulta confere existência,
+    # disponibilidade e dono do item.
+    res = supabase_client.table('menu_item_options') \
+        .select('id, nome, preco_extra, menu_item_option_groups!inner(item_id, nome)') \
+        .in_('id', ids) \
+        .eq('disponivel', True) \
+        .eq('menu_item_option_groups.item_id', str(menu_item_id)) \
+        .execute()
+    achadas = res.data or []
+
+    if len(achadas) != len(ids):
+        raise ValueError("Opção do item inválida ou indisponível.")
+
+    extra = 0.0
+    partes = []
+    for r in achadas:
+        # Confere o dono também em Python. O filtro do PostgREST já garante,
+        # mas esta é a linha que decide preço: uma trava barata a mais aqui
+        # custa menos que um pedido cobrado errado.
+        grupo = r.get('menu_item_option_groups') or {}
+        if str(grupo.get('item_id')) != str(menu_item_id):
+            raise ValueError("Opção não pertence a este item.")
+        extra += float(r.get('preco_extra') or 0)
+        partes.append(f"{grupo.get('nome') or 'Opção'}: {r.get('nome')}")
+
+    return round(extra, 2), ' · '.join(partes)
