@@ -569,7 +569,8 @@ def criar_preferencia_mercado_pago():
             'restaurant_id': dados_pedido.get('restaurant_id'),
             'delivery_id': None,
             'status': 'pending' if payment_method == 'cash' else 'awaiting_payment',
-            'items': dados_pedido.get('itens', []),
+            # Nome da opcao junto do id: a comanda le o PEDIDO, nao o cardapio.
+            'items': itens_com_nome_das_opcoes(dados_pedido.get('itens', [])),
             'total_amount_items': dados_pedido.get('total_amount_items', 0),
             'delivery_fee': dados_pedido.get('delivery_fee', 0),
             # Sem isto o despacho faz COALESCE(peso_total_kg, 0) e oferece um
@@ -1288,7 +1289,7 @@ def processar_pagamento_cartao():
             'restaurant_id': d.get('restaurant_id'),
             'delivery_id': None,
             'status': 'awaiting_payment',
-            'items': items_req,
+            'items': itens_com_nome_das_opcoes(items_req),
             'total_amount_items': subtotal_validado,
             'delivery_fee': d.get('delivery_fee', 0),
             'total_amount': total_seguro,
@@ -1730,14 +1731,26 @@ def preco_extra_das_opcoes(menu_item_id, opcoes):
 
     Lança ValueError se a opção não existe, não é do item ou está indisponível.
     """
-    ids = []
+    # QUANTIDADE POR OPÇÃO: "açaí com 3 de banana" é uma opção só, três vezes.
+    # O teto de quantas UNIDADES cabem é do grupo (max_escolhas) e continua
+    # sendo conferido no app; aqui a trava é outra e mais dura: quantidade tem
+    # que ser inteiro positivo e pequena. Sem isso, um pedido com qtd negativa
+    # baixaria o preço do item — e qtd gigante estouraria o total.
+    quantidades = {}
     for o in (opcoes or []):
         oid = o.get('id') if isinstance(o, dict) else o
-        if oid:
-            ids.append(str(oid))
+        if not oid:
+            continue
+        try:
+            q = int((o or {}).get('qtd', 1)) if isinstance(o, dict) else 1
+        except (TypeError, ValueError):
+            q = 1
+        q = max(1, min(q, 20))
+        quantidades[str(oid)] = quantidades.get(str(oid), 0) + q
+
+    ids = list(quantidades.keys())
     if not ids:
         return 0.0, ''
-    ids = list(dict.fromkeys(ids))   # sem repetir a mesma opção
 
     # !inner força o vínculo com o grupo: a mesma consulta confere existência,
     # disponibilidade e dono do item.
@@ -1761,7 +1774,66 @@ def preco_extra_das_opcoes(menu_item_id, opcoes):
         grupo = r.get('menu_item_option_groups') or {}
         if str(grupo.get('item_id')) != str(menu_item_id):
             raise ValueError("Opção não pertence a este item.")
-        extra += float(r.get('preco_extra') or 0)
-        partes.append(f"{grupo.get('nome') or 'Opção'}: {r.get('nome')}")
+        q = quantidades.get(str(r.get('id')), 1)
+        extra += float(r.get('preco_extra') or 0) * q
+        rotulo = f"{q}x {r.get('nome')}" if q > 1 else str(r.get('nome'))
+        partes.append(f"{grupo.get('nome') or 'Opção'}: {rotulo}")
 
     return round(extra, 2), ' · '.join(partes)
+
+
+def itens_com_nome_das_opcoes(itens):
+    """Grava o NOME de cada opção junto do pedido, não só o id.
+
+    O app manda `opcoes: [{id}]` de propósito — quem decide preço é o servidor.
+    Só que o pedido era gravado exatamente assim, com ids crus, e aí a comanda
+    e a tela do parceiro não tinham como mostrar "presunto": elas leem o
+    pedido, não o cardápio.
+
+    Pior que ilegível: EFÊMERO. No dia em que a loja renomeia "presunto" ou
+    apaga a opção, o id do pedido antigo deixa de resolver e o histórico perde
+    o que foi vendido. Pedido tem que se explicar sozinho anos depois.
+
+    Best-effort: se a busca falhar, devolve os itens como vieram. Enfeitar o
+    histórico não pode derrubar a criação do pedido.
+    """
+    try:
+        ids = []
+        for it in (itens or []):
+            for o in (it.get('opcoes') or []):
+                if isinstance(o, dict) and o.get('id'):
+                    ids.append(str(o['id']))
+        if not ids:
+            return itens
+
+        res = supabase_client.table('menu_item_options') \
+            .select('id, nome, preco_extra, menu_item_option_groups(nome)') \
+            .in_('id', list(dict.fromkeys(ids))).execute()
+        por_id = {str(r['id']): r for r in (res.data or [])}
+
+        enriquecidos = []
+        for it in (itens or []):
+            novo = dict(it)
+            if novo.get('opcoes'):
+                enriq = []
+                for o in novo['opcoes']:
+                    if not (isinstance(o, dict) and o.get('id')):
+                        continue
+                    ref = por_id.get(str(o['id'])) or {}
+                    try:
+                        qtd = max(1, min(int(o.get('qtd', 1)), 20))
+                    except (TypeError, ValueError):
+                        qtd = 1
+                    enriq.append({
+                        'id': str(o['id']),
+                        'nome': ref.get('nome') or '',
+                        'grupo': (ref.get('menu_item_option_groups') or {}).get('nome') or '',
+                        'preco_extra': float(ref.get('preco_extra') or 0),
+                        'qtd': qtd,
+                    })
+                novo['opcoes'] = enriq
+            enriquecidos.append(novo)
+        return enriquecidos
+    except Exception:
+        logging.warning("Não consegui gravar o nome das opções no pedido", exc_info=True)
+        return itens
