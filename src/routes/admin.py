@@ -739,10 +739,23 @@ def set_restaurant_founding(restaurant_id):
                           -- entrasse em agosto ganhava 5 meses, em novembro
                           -- ganharia 2. O site promete "6 meses"; o sistema
                           -- passa a cumprir 6 meses pra qualquer um que entre.
-                          fundador_desde = CASE WHEN %s THEN COALESCE(fundador_desde, NOW()) ELSE fundador_desde END,
+                          --
+                          -- DESMARCAR LIMPA AS DATAS, e é isso que permite
+                          -- reiniciar a contagem: desmarcar e marcar de novo
+                          -- dá 6 meses a partir de hoje.
+                          --
+                          -- Antes o ELSE preservava fundador_desde, então o
+                          -- COALESCE abaixo sempre reencontrava a data velha e
+                          -- o relógio NUNCA podia ser reiniciado pelo admin.
+                          -- Isso virou problema concreto: o Diego prometeu a
+                          -- dois parceiros que a contagem começaria quando eles
+                          -- entrassem no ar, e a tela não tinha como cumprir.
+                          -- Promessa que o sistema não executa é promessa
+                          -- quebrada com data marcada.
+                          fundador_desde = CASE WHEN %s THEN COALESCE(fundador_desde, NOW()) ELSE NULL END,
                           fundador_ate   = CASE WHEN %s
                                                 THEN (COALESCE(fundador_desde, NOW())::date + INTERVAL '6 months')::date
-                                                ELSE fundador_ate END,
+                                                ELSE NULL END,
                           updated_at = NOW()
                     WHERE id = %s
                 RETURNING id, restaurant_name, fundador, fundador_ate""",
