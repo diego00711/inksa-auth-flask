@@ -2420,3 +2420,166 @@ def admin_apagar_sugestao():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+def _centro_do_mapa(parceiros, entregadores):
+    """Centro pela média dos pontos reais, com Lages como piso.
+
+    Fixar Lages na mão funcionaria hoje e quebraria no dia da primeira cidade
+    vizinha — o painel mostraria a serra enquanto a operação acontece a 40 km
+    dali.
+    """
+    pts = [(p["lat"], p["lng"]) for p in parceiros] + \
+          [(e["lat"], e["lng"]) for e in entregadores]
+    if not pts:
+        return {"lat": -27.8156, "lng": -50.3264}   # Lages, SC
+    return {"lat": sum(p[0] for p in pts) / len(pts),
+            "lng": sum(p[1] for p in pts) / len(pts)}
+
+
+def _desloca(uuid_str):
+    """Deslocamento fixo de ~50 a 150 m para o ponto do cliente.
+
+    Determinístico a partir do próprio id: o mesmo pedido cai sempre no mesmo
+    lugar. Sorteio a cada atualização faria o ponto tremer no mapa e pareceria
+    entregador andando.
+
+    Usa os dígitos hexadecimais do uuid direto — já são aleatórios o bastante
+    e evitam trazer hashlib só pra isso.
+    """
+    h = uuid_str.replace("-", "")
+    a = int(h[0:6], 16) / 0xFFFFFF - 0.5
+    b = int(h[6:12], 16) / 0xFFFFFF - 0.5
+    return a * 0.0026, b * 0.0026
+
+
+@admin_bp.route("/tv/mapa", methods=["GET", "OPTIONS"])
+@admin_required
+def admin_tv_mapa():
+    """Mapa de parede do escritório (rota /tv/mapa do admin).
+
+    Endpoint PRÓPRIO, e não um pedaço do /tv/stats, porque as duas telas ficam
+    abertas ao mesmo tempo em TVs diferentes: juntar tudo faria cada uma
+    carregar o dobro do que usa.
+
+    Três camadas, todas de dado que já existe:
+      • parceiros    — onde a cidade tem loja, e quais estão abertas AGORA;
+      • entregadores — quem está em campo, e onde;
+      • pedidos de hoje — de onde saiu e pra onde foi.
+
+    A COORDENADA DO CLIENTE SAI DAQUI DESLOCADA. É um painel de parede, e
+    parede de escritório é vista por visita, por entregador e por quem passa na
+    recepção. O ponto continua contando a história ("saiu do centro pro
+    Coral") e para de ser o endereço de alguém.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "DB connection error"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(f"""
+                SELECT id, restaurant_name AS nome, latitude, longitude,
+                       COALESCE(is_open,false) AS aberto
+                  FROM {RESTAURANTS_TABLE}
+                 WHERE COALESCE(approved,false) AND COALESCE(active,false)
+                   AND latitude IS NOT NULL AND longitude IS NOT NULL
+            """)
+            parceiros = [{
+                "id": str(r["id"]), "nome": r["nome"],
+                "lat": float(r["latitude"]), "lng": float(r["longitude"]),
+                "aberto": bool(r["aberto"]),
+            } for r in cur.fetchall()]
+
+            # current_lat/lng é a posição de agora; latitude/longitude é o
+            # endereço de cadastro. Cai no segundo só pra não sumir do mapa
+            # quem ainda não mandou posição.
+            #
+            # Só entra com sinal de vida recente: ponto de ontem num painel "ao
+            # vivo" é pior que ponto nenhum, porque sugere uma cobertura que
+            # não existe.
+            cur.execute("""
+                SELECT id, COALESCE(vehicle_type,'') AS veiculo,
+                       COALESCE(current_lat, latitude)  AS lat,
+                       COALESCE(current_lng, longitude) AS lng,
+                       COALESCE(is_available,false) AS disponivel
+                  FROM delivery_profiles
+                 WHERE COALESCE(approved,false)
+                   AND COALESCE(current_lat, latitude) IS NOT NULL
+                   AND COALESCE(current_lng, longitude) IS NOT NULL
+                   AND last_heartbeat >= NOW() - INTERVAL '3 hours'
+            """)
+            entregadores = [{
+                "id": str(r["id"]), "veiculo": (r["veiculo"] or "").lower(),
+                "lat": float(r["lat"]), "lng": float(r["lng"]),
+                "disponivel": bool(r["disponivel"]),
+            } for r in cur.fetchall()]
+
+            # Pedidos de hoje: os entregues viram brilho no mapa, os em curso
+            # viram linha da loja até o cliente.
+            cur.execute(f"""
+                SELECT o.id, o.status, o.client_latitude AS clat, o.client_longitude AS clng,
+                       r.latitude AS rlat, r.longitude AS rlng,
+                       r.restaurant_name AS loja,
+                       o.total_amount AS valor, o.created_at
+                  FROM {ORDERS_TABLE} o
+                  LEFT JOIN {RESTAURANTS_TABLE} r ON r.id = o.restaurant_id
+                 WHERE {_HOJE_SP('o.created_at')}
+                   AND o.status NOT IN ('cancelled','canceled')
+                   AND o.client_latitude IS NOT NULL AND o.client_longitude IS NOT NULL
+                 ORDER BY o.created_at DESC
+                 LIMIT 120
+            """)
+            EM_ROTA = ("accepted", "preparing", "ready", "out_for_delivery", "picked_up")
+            pedidos = []
+            for r in cur.fetchall():
+                oid = str(r["id"])
+                dlat, dlng = _desloca(oid)
+                pedidos.append({
+                    "id": oid[:8],
+                    "status": r["status"],
+                    "entregue": r["status"] in ("delivered", "completed"),
+                    "em_rota": r["status"] in EM_ROTA,
+                    "lat": float(r["clat"]) + dlat,
+                    "lng": float(r["clng"]) + dlng,
+                    "loja": r["loja"] or "",
+                    "loja_lat": float(r["rlat"]) if r["rlat"] is not None else None,
+                    "loja_lng": float(r["rlng"]) if r["rlng"] is not None else None,
+                    "valor": _safe_float(r["valor"]),
+                    "hora": r["created_at"].strftime("%H:%M") if r["created_at"] else "",
+                })
+
+        try:
+            raio = float(get_settings().get("platform_max_delivery_radius") or 15)
+        except Exception:
+            raio = 15.0
+
+        entregues = [p for p in pedidos if p["entregue"]]
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "parceiros": parceiros,
+                "entregadores": entregadores,
+                "pedidos": pedidos,
+                "centro": _centro_do_mapa(parceiros, entregadores),
+                "raio_km": raio,
+                "resumo": {
+                    "abertos": sum(1 for p in parceiros if p["aberto"]),
+                    "parceiros": len(parceiros),
+                    "em_campo": len(entregadores),
+                    "disponiveis": sum(1 for e in entregadores if e["disponivel"]),
+                    "entregues_hoje": len(entregues),
+                    "em_rota": sum(1 for p in pedidos if p["em_rota"]),
+                    "valor_hoje": round(sum(p["valor"] for p in entregues), 2),
+                },
+            },
+        }), 200
+    except Exception:
+        logger.exception("Erro no /api/admin/tv/mapa")
+        return jsonify({"status": "error", "message": "Erro ao montar o mapa"}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass
