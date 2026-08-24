@@ -2583,3 +2583,92 @@ def admin_tv_mapa():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+@admin_bp.route("/site-visitas", methods=["GET", "OPTIONS"])
+def admin_site_visitas():
+    """Quem entrou no site, quanta gente voltou, e de onde veio.
+
+    A pergunta que importa aqui não é "quantas visitas" — é DE ONDE. Número
+    total sobe e desce sem dizer o que fazer; origem diz onde investir a
+    próxima hora de trabalho.
+
+    `unicos` conta pessoas (anon distinto), `visitas` conta sessões. As duas
+    juntas mostram se o site está trazendo gente nova ou a mesma gente
+    voltando, que são situações opostas com o mesmo total.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    try:
+        dias = max(1, min(int(request.args.get("dias", 30)), 180))
+    except (TypeError, ValueError):
+        dias = 30
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Banco indisponível"}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT
+                  count(*) FILTER (WHERE created_at >= NOW() - INTERVAL '1 day')::int      AS visitas_24h,
+                  count(DISTINCT anon) FILTER (WHERE created_at >= NOW() - INTERVAL '1 day')::int AS unicos_24h,
+                  count(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::int     AS visitas_7d,
+                  count(DISTINCT anon) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::int AS unicos_7d,
+                  count(*)::int                                                             AS visitas_total,
+                  count(DISTINCT anon)::int                                                 AS unicos_total
+                  FROM site_visits
+            """)
+            resumo = dict(cur.fetchone() or {})
+
+            cur.execute("""
+                SELECT COALESCE(NULLIF(origem,''), 'direto') AS origem,
+                       count(*)::int AS visitas,
+                       count(DISTINCT anon)::int AS unicos
+                  FROM site_visits
+                 WHERE created_at >= NOW() - (%s || ' days')::interval
+                 GROUP BY 1 ORDER BY count(*) DESC LIMIT 15
+            """, (str(dias),))
+            origens = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT dispositivo, count(*)::int AS visitas
+                  FROM site_visits
+                 WHERE created_at >= NOW() - (%s || ' days')::interval
+                 GROUP BY 1 ORDER BY count(*) DESC
+            """, (str(dias),))
+            dispositivos = [dict(r) for r in cur.fetchall()]
+
+            # Série diária: sem ela o total é um número solto. É a linha que
+            # mostra se a campanha de ontem fez efeito.
+            cur.execute("""
+                SELECT (created_at AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
+                       count(*)::int AS visitas,
+                       count(DISTINCT anon)::int AS unicos
+                  FROM site_visits
+                 WHERE created_at >= NOW() - (%s || ' days')::interval
+                 GROUP BY 1 ORDER BY 1
+            """, (str(dias),))
+            serie = [{"dia": r["dia"].isoformat(), "visitas": r["visitas"],
+                      "unicos": r["unicos"]} for r in cur.fetchall()]
+
+        return jsonify({
+            "status": "success",
+            "dias": dias,
+            "resumo": resumo,
+            "origens": origens,
+            "dispositivos": dispositivos,
+            "serie": serie,
+        }), 200
+    except Exception:
+        logger.exception("Erro ao ler visitas do site")
+        return jsonify({"error": "Erro ao ler visitas"}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass

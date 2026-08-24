@@ -473,3 +473,73 @@ def public_transparencia():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+# ---------------------------------------------------------------------------
+# Visitas do site institucional
+# ---------------------------------------------------------------------------
+
+_BOTS = ("bot", "crawler", "spider", "curl", "wget", "python-requests",
+         "headlesschrome", "lighthouse", "pingdom", "uptime", "monitor")
+
+
+@public_bp.route("/visita", methods=["POST", "OPTIONS"])
+@limiter.limit("60 per minute")
+def public_visita():
+    """Registra uma visita do site. Sem autenticação, sem cookie, sem IP.
+
+    Medição própria em vez de um serviço de terceiro: a página promete que os
+    dados são da Inksa, e mandar o rastro de cada visitante pra fora contradiz
+    isso por conveniência.
+
+    O que dá pra responder com isto: quanta gente entra, quanta volta, e DE
+    ONDE VEM. Esse último é o que decide dinheiro — sem ele não há como saber
+    se a campanha do Instagram ou o cafezinho do influenciador trouxeram
+    alguém.
+
+    Duas travas contra número inflado:
+      • user-agent de robô não conta. Crawler não vira visita.
+      • a mesma pessoa só conta de novo depois de 30 min. Sem isso, recarregar
+        a página vira "visitante novo" e o número deixa de significar gente.
+
+    Falha em silêncio, sempre 204: contador quebrado não pode quebrar site.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+
+    ua = (request.headers.get("User-Agent") or "").lower()
+    if not ua or any(b in ua for b in _BOTS):
+        return "", 204
+
+    body = request.get_json(silent=True) or {}
+    anon = (body.get("anon") or "").strip()
+    if len(anon) != 36:
+        return "", 204
+
+    caminho = (body.get("caminho") or "/").strip()[:200] or "/"
+    origem = (body.get("origem") or "").strip().lower()[:120] or None
+    campanha = (body.get("campanha") or "").strip()[:120] or None
+    dispositivo = "celular" if body.get("celular") else "computador"
+
+    conn = get_db_connection()
+    if not conn:
+        return "", 204
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO site_visits (anon, caminho, origem, campanha, dispositivo)
+                SELECT %s, %s, %s, %s, %s
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM site_visits
+                    WHERE anon = %s AND created_at > NOW() - INTERVAL '30 minutes'
+                 )
+            """, (anon, caminho, origem, campanha, dispositivo, anon))
+        conn.commit()
+    except Exception:
+        logger.warning("Registro de visita falhou", exc_info=True)
+        try: conn.rollback()
+        except Exception: pass
+    finally:
+        try: conn.close()
+        except Exception: pass
+    return "", 204
