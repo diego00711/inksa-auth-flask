@@ -29,6 +29,11 @@ try:
 except Exception:
     _send_push = None
 
+try:
+    from ..utils.referrals import qualificar_por_entrega as _qualificar_indicacao
+except Exception:
+    _qualificar_indicacao = None
+
 
 def _get_fcm_token(cur, table: str, user_id: str):
     """Busca fcm_token de um perfil. Retorna None silenciosamente se falhar."""
@@ -48,6 +53,44 @@ def _notify(token, title, body, data=None):
         _send_push(token, title, body, data or {})
     except Exception as e:
         logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
+
+
+def _pagar_indicacao(client_id, order_id):
+    """Paga quem indicou este cliente, se este for o 1º pedido entregue dele.
+
+    O PUSH NÃO É ENFEITE AQUI. Programa de indicação morre por falta de
+    fechamento: a pessoa indica, não vê nada acontecer, e nunca mais indica.
+    O aviso de que o prêmio caiu é o que faz ela indicar a segunda vez.
+
+    Tudo dentro de try: prêmio de indicação jamais pode derrubar a conclusão de
+    uma entrega que já aconteceu no mundo real.
+    """
+    if not _qualificar_indicacao:
+        return
+    try:
+        r = _qualificar_indicacao(client_id, order_id)
+        if not r or not r.get("cupom"):
+            return
+        valor = f"R$ {r['valor']:.2f}".replace(".", ",")
+        corpo = f"Sua indicação virou {valor} em cupom: {r['cupom']}"
+        if r.get("marco"):
+            bonus = f"R$ {r['valor_marco']:.2f}".replace(".", ",")
+            corpo += (f" — e você chegou a {r['total_indicacoes']} indicações: "
+                      f"mais {bonus} no cupom {r['marco']}")
+        _conn = get_db_connection()
+        if not _conn:
+            return
+        try:
+            with _conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _cur:
+                token = _get_fcm_token(_cur, 'client_profiles', r["referrer_id"])
+            _notify(token, "Seu convidado fez o primeiro pedido! 🎉", corpo,
+                    {"url": "/indique"})
+        finally:
+            try: _conn.close()
+            except Exception: pass
+    except Exception as _e:
+        logging.getLogger(__name__).warning(
+            f"Indicação: falha ao premiar pedido {order_id}: {_e}")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -813,6 +856,7 @@ def complete_order(order_id):
                         )
                         if _award_first_order_bonus:
                             _award_first_order_bonus(str(completed_order['client_id']), str(order_id))
+                        _pagar_indicacao(str(completed_order['client_id']), str(order_id))
                     if completed_order['delivery_id']:
                         _award_completion_points(
                             str(completed_order['delivery_id']), 'delivery', str(order_id)

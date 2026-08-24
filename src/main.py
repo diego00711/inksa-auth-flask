@@ -90,6 +90,7 @@ try:
     from src.routes.whatsapp_bot import whatsapp_bp
     from src.routes.chat_routes import chat_bp
     from src.routes.club_routes import club_bp
+    from src.routes.referrals_routes import referrals_bp
     from src.scheduler import start_scheduler
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
@@ -295,6 +296,7 @@ app.register_blueprint(coupons_bp, url_prefix='/api/coupons')
 app.register_blueprint(whatsapp_bp, url_prefix='/api/whatsapp')
 app.register_blueprint(chat_bp, url_prefix='/api/chat')
 app.register_blueprint(club_bp, url_prefix='/api/club')
+app.register_blueprint(referrals_bp, url_prefix='/api/referrals')
 
 # --- Rotas de Admin ---
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
