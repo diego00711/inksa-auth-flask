@@ -328,16 +328,51 @@ def founding_commission_factor(restaurant_id) -> Decimal:
             pass
 
 
-def calculate_platform_commission(subtotal, restaurant_id=None) -> Decimal:
-    """Calcula a comissão da plataforma sobre o subtotal do pedido.
+def effective_commission_rate(restaurant_id=None) -> Decimal:
+    """Taxa de comissão que vale pra este parceiro agora (fração 0..1).
 
-    Se `restaurant_id` for de um Parceiro Fundador dentro do prazo da campanha,
-    aplica o fator promocional (metade da comissão)."""
+    Existem DOIS descontos e eles NÃO SE SOMAM — vale o melhor dos dois:
+
+      • Parceiro Fundador: fator sobre a taxa cheia (0.5 = metade), com prazo.
+      • Clube Inksa: desconto em pontos percentuais conforme o faturamento do mês.
+
+    Empilhar seria caro justamente onde dói: um fundador (7,5%) que chegasse ao
+    topo do Clube (-3pp) pagaria 4,5% — a Inksa perderia quase 70% da receita do
+    seu MELHOR parceiro, que é exatamente quem mais fatura. Com `min`, durante a
+    campanha o fundador fica nos 7,5% (que já ganha de qualquer nível do Clube) e
+    quando a campanha vencer ele cai pro nível que conquistou, sem degrau.
+
+    Piso em zero: comissão negativa significaria a Inksa pagando pra vender.
+    """
+    base = get_settings()["commission_rate"]
+    if not restaurant_id:
+        return base
+
+    fundador = base * founding_commission_factor(restaurant_id)
+
+    # Import local: club importa helpers, e helpers não importa este módulo —
+    # mas o import tardio deixa isso imune a quem mexer nessa ordem depois.
+    try:
+        from .club import restaurant_commission_discount_pp
+        pp = Decimal(str(restaurant_commission_discount_pp(restaurant_id)))
+    except Exception:
+        logger.exception("effective_commission_rate: clube indisponível, usando taxa cheia")
+        pp = Decimal("0")
+    clube = base - (pp / Decimal("100"))
+
+    rate = min(fundador, clube)
+    return rate if rate > 0 else Decimal("0")
+
+
+def calculate_platform_commission(subtotal, restaurant_id=None) -> Decimal:
+    """Comissão da plataforma sobre o subtotal do pedido.
+
+    Ponto único: quem chama é o checkout online, o checkout de cartão E a
+    liquidação do dinheiro. Regra de comissão que não more aqui vira regra que
+    vale num caminho e não vale no outro.
+    """
     try:
         sub = Decimal(str(subtotal))
     except (InvalidOperation, TypeError):
         return Decimal("0.00")
-    rate = get_settings()["commission_rate"]
-    if restaurant_id:
-        rate = rate * founding_commission_factor(restaurant_id)
-    return (sub * rate).quantize(Decimal("0.01"))
+    return (sub * effective_commission_rate(restaurant_id)).quantize(Decimal("0.01"))

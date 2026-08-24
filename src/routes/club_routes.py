@@ -6,7 +6,8 @@ from flask import Blueprint, request, jsonify
 from flask_cors import CORS
 import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
-from ..utils.club import fetch_levels, level_for_activity, next_level, monthly_activity
+from ..utils.club import (fetch_levels, level_for_activity, next_level, monthly_activity,
+                          ACTIVITY_UNIT)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,18 @@ def _render_benefits(benefits):
         out.append("Prioridade na fila de pedidos")
     if b.get("featured_listing"):
         out.append("Destaque na listagem para os clientes")
+    # Mostra a comissão QUE ELE VAI PAGAR, não "-2pp". O parceiro não pensa em
+    # pontos percentuais; ele quer saber quanto a Inksa fica. A taxa cheia vem
+    # das configurações, então se você mudar a comissão base amanhã a frase
+    # acompanha em vez de virar promessa velha na tela.
+    if b.get("commission_discount_pp"):
+        try:
+            from ..utils.platform_settings import get_settings as _gs
+            cheia = float(_gs()["commission_rate"]) * 100
+            pp = float(b["commission_discount_pp"])
+            out.append(f"Comissão de {_fmt(cheia - pp)}% em vez de {_fmt(cheia)}%")
+        except Exception:
+            out.append(f"{_fmt(b['commission_discount_pp'])} ponto(s) a menos de comissão")
     for extra in (b.get("extra") or []):
         if extra:
             out.append(str(extra))
@@ -71,8 +84,14 @@ def _fmt(n):
         return str(n)
 
 
-def _to_view(lvl, nxt):
-    """Formata um nível do banco no formato que os apps esperam."""
+def _to_view(lvl, nxt, audience=None):
+    """Formata um nível do banco no formato que os apps esperam.
+
+    `unit` diz em QUE os números estão: 'orders' pra cliente/entregador,
+    'brl' pro parceiro (que sobe de nível por faturamento). Sem isso o app
+    escreveria "faltam 1500 pedidos" onde são R$ 1.500. Os nomes min_orders/
+    max_orders ficaram por compatibilidade com o que os apps já consomem.
+    """
     return {
         "level": _slug(lvl["name"]),
         "label": lvl["name"],
@@ -80,6 +99,7 @@ def _to_view(lvl, nxt):
         "emoji": lvl.get("emoji") or "🏅",
         "color": lvl.get("color"),
         "level_order": lvl["level_order"],
+        "unit": ACTIVITY_UNIT.get(audience or "client", "orders"),
         "min_orders": int(lvl["min_activity"]),
         "max_orders": (int(nxt["min_activity"]) - 1) if nxt else None,
         "benefits": _render_benefits(lvl.get("benefits")),
@@ -109,7 +129,7 @@ def get_levels():
             views = []
             for i, lvl in enumerate(levels):
                 nxt = levels[i + 1] if i + 1 < len(levels) else None
-                views.append(_to_view(lvl, nxt))
+                views.append(_to_view(lvl, nxt, audience))
         return jsonify({"status": "success", "data": views}), 200
     except Exception:
         logger.exception("club.get_levels failed")
@@ -143,21 +163,26 @@ def get_club_status():
             current = level_for_activity(levels, activity)
             nxt = next_level(levels, current)
 
-            current_view = _to_view(current, nxt) if current else None
+            current_view = _to_view(current, nxt, user_type) if current else None
             next_view = None
             if nxt:
                 after = next_level(levels, nxt)
-                next_view = _to_view(nxt, after)
+                next_view = _to_view(nxt, after, user_type)
 
-            to_next = (int(nxt["min_activity"]) - activity) if nxt else 0
+            to_next = (float(nxt["min_activity"]) - activity) if nxt else 0
             to_next = max(0, to_next)
 
-            unit = "entrega" if user_type == "delivery" else "pedido"
-            if nxt:
-                plural = "s" if to_next != 1 else ""
-                motivation = f"Faltam {to_next} {unit}{plural} para você ser {nxt['name']}! {nxt.get('emoji','')}"
-            else:
+            if not nxt:
                 motivation = "Você atingiu o nível máximo! 💎 Aproveite todos os benefícios."
+            elif ACTIVITY_UNIT.get(user_type) == "brl":
+                # Parceiro sobe por faturamento: falar em pedidos aqui seria
+                # mentira, porque dois pedidos dele podem valer o dobro.
+                falta = f"R$ {to_next:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                motivation = f"Faltam {falta} em vendas para você ser {nxt['name']}! {nxt.get('emoji','')}"
+            else:
+                unit = "entrega" if user_type == "delivery" else "pedido"
+                plural = "s" if int(to_next) != 1 else ""
+                motivation = f"Faltam {int(to_next)} {unit}{plural} para você ser {nxt['name']}! {nxt.get('emoji','')}"
 
             # Pedidos recentes do mês (só cliente usa na tela; barato pros demais)
             col = {"client": "client_id", "delivery": "delivery_id", "restaurant": "restaurant_id"}[user_type]

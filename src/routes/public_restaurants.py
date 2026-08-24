@@ -183,8 +183,11 @@ def list_restaurants():
                                    AND COALESCE(mi.is_available, TRUE) = TRUE)"""]
             params = []
 
-            # Clube: destaque = restaurantes cujo volume do mês alcança um nível
-            # com featured_listing. threshold = menor min_activity desses níveis.
+            # Clube: destaque = parceiros cujo FATURAMENTO do mês alcança um
+            # nível com featured_listing. threshold = menor min_activity desses
+            # níveis (que para o parceiro é expresso em reais).
+            from ..utils.club import restaurant_month_volume_sql
+            _volume_sql = restaurant_month_volume_sql("rp.id")
             cur.execute("""
                 SELECT MIN(min_activity) AS t FROM public.club_levels
                  WHERE audience = 'restaurant' AND is_active
@@ -265,11 +268,14 @@ def list_restaurants():
                     rp.delivery_time                            AS delivery_time,
                     rp.delivery_type,
                     {dist_expr}                                 AS distance_km,
-                    CASE WHEN %s::int IS NOT NULL AND (
-                            SELECT COUNT(*) FROM orders o
-                             WHERE o.restaurant_id = rp.id AND o.status = 'delivered'
-                               AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())
-                         ) >= %s::int THEN 1 ELSE 0 END           AS is_featured
+                    -- O nível do parceiro passou a ser medido em REAIS
+                    -- faturados no mês, não em quantidade de pedidos. A conta
+                    -- vem de utils/club (restaurant_month_volume_sql) pra ser
+                    -- a MESMA que decide o nível na tela dele: se divergisse,
+                    -- ele leria "Ouro" no app e não apareceria em destaque.
+                    CASE WHEN %s::numeric IS NOT NULL AND (
+                            {_volume_sql}
+                         ) >= %s::numeric THEN 1 ELSE 0 END       AS is_featured
                 FROM restaurant_profiles rp
                 LEFT JOIN users u ON u.id = rp.user_id
                 {where_sql}

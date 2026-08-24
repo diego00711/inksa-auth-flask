@@ -13,7 +13,14 @@ Fonte única usada por:
 Atividade do mês (define o nível):
   - client      = pedidos confirmados no mês (não conta cancelado/aguardando)
   - delivery    = entregas concluídas (delivered) no mês
-  - restaurant  = pedidos entregues (delivered) no mês
+  - restaurant  = FATURAMENTO entregue no mês, em reais
+
+POR QUE O PARCEIRO CONTA DINHEIRO E NÃO PEDIDO: o benefício dele é desconto na
+comissão, e o que esse desconto custa à Inksa acompanha o faturamento, não a
+quantidade de pedidos. Contando pedido, a lanchonete de ticket R$25 e o pet
+shop de ticket R$150 chegariam ao mesmo nível gerando receitas seis vezes
+diferentes — e quem paga a conta seria a Inksa. Qualificação e custo na mesma
+unidade é o que mantém a escada em pé quando entrarem outros ramos.
 """
 import logging
 import psycopg2.extras
@@ -22,6 +29,38 @@ from .helpers import get_db_connection
 logger = logging.getLogger(__name__)
 
 _ACTIVITY_COL = {"client": "client_id", "delivery": "delivery_id", "restaurant": "restaurant_id"}
+
+# Em que unidade cada público é medido. Os apps usam isto pra escrever "R$ 1.500"
+# em vez de "1500 pedidos".
+ACTIVITY_UNIT = {"client": "orders", "delivery": "orders", "restaurant": "brl"}
+
+# Teto do desconto de comissão, em pontos percentuais. Não é desconfiança do
+# Diego — é que este número é digitado numa tela e um zero a mais zeraria a
+# receita da plataforma em silêncio, pedido a pedido, até alguém reparar.
+MAX_COMMISSION_DISCOUNT_PP = 10.0
+
+
+def restaurant_month_volume_sql(id_expr="%s"):
+    """SQL do faturamento do mês do parceiro (subtotal dos pedidos entregues).
+
+    Devolvido como texto porque DOIS lugares precisam da mesma conta: o nível do
+    Clube (aqui) e o destaque na listagem (public_restaurants, que precisa dela
+    correlacionada com `rp.id`). Duas versões da mesma regra divergiriam, e o
+    parceiro veria um nível na tela dele e outro no destaque.
+
+    `total_amount_items` é o subtotal gravado; o fallback existe pros pedidos
+    antigos que não têm essa coluna preenchida — nunca o total cheio, senão o
+    frete entraria no faturamento e inflaria o nível.
+    """
+    return f"""
+        SELECT COALESCE(SUM(COALESCE(o.total_amount_items,
+                                     o.total_amount - COALESCE(o.delivery_fee, 0),
+                                     0)), 0)
+          FROM orders o
+         WHERE o.restaurant_id = {id_expr}
+           AND o.status = 'delivered'
+           AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())
+    """
 
 
 def fetch_levels(cur, audience):
@@ -56,6 +95,11 @@ def next_level(levels, current):
 
 def monthly_activity(cur, audience, profile_id):
     col = _ACTIVITY_COL[audience]
+    if audience == "restaurant":
+        # Parceiro conta REAIS (ver cabeçalho do módulo).
+        cur.execute(restaurant_month_volume_sql() + " ", (profile_id,))
+        row = cur.fetchone()
+        return float(row[0] or 0) if row else 0.0
     if audience == "client":
         cur.execute(f"""
             SELECT COUNT(*)::int AS c FROM orders
@@ -136,6 +180,56 @@ def client_checkout_benefits(client_id):
         "max_discount_brl": _bnum(b, "max_discount_brl", 0.0, None),
         "level_name": st["current"]["name"],
     }
+
+
+def restaurant_commission_discount_pp(restaurant_id):
+    """Desconto de comissão do parceiro, em PONTOS PERCENTUAIS (ex.: 2.0 = -2pp).
+
+    Chamada no caminho do checkout, então tem conexão própria e query enxuta —
+    não usa get_status (que busca a tabela de níveis inteira).
+
+    Fail-safe deliberado: qualquer erro devolve 0, ou seja, comissão CHEIA.
+    Errar pra baixo aqui seria dar desconto que ninguém autorizou, em silêncio,
+    em todo pedido — e só apareceria no fechamento do mês.
+    """
+    if not restaurant_id:
+        return 0.0
+    conn = get_db_connection()
+    if not conn:
+        return 0.0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(restaurant_month_volume_sql(), (str(restaurant_id),))
+            row = cur.fetchone()
+            volume = float(row[0] or 0) if row else 0.0
+
+            # O nível mais alto que o faturamento alcança. `->>` devolve texto e
+            # a conversão é feita aqui: cast em SQL estouraria a query inteira se
+            # alguém digitasse "2%" na tela do admin.
+            cur.execute("""
+                SELECT benefits->>'commission_discount_pp'
+                  FROM public.club_levels
+                 WHERE audience = 'restaurant' AND is_active = TRUE
+                   AND min_activity <= %s
+                 ORDER BY level_order DESC
+                 LIMIT 1
+            """, (volume,))
+            row = cur.fetchone()
+            if not row or row[0] in (None, ""):
+                return 0.0
+            pp = float(row[0])
+    except Exception:
+        logger.exception("club.restaurant_commission_discount_pp failed")
+        return 0.0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if pp != pp or pp < 0:   # NaN ou negativo
+        return 0.0
+    return min(pp, MAX_COMMISSION_DISCOUNT_PP)
 
 
 def delivery_level_benefits(delivery_id):
