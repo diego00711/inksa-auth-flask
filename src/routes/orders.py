@@ -2246,7 +2246,13 @@ def restaurant_accept_order(order_id):
         estimated_prep_time = data.get('estimated_time')  # minutos (int)
         if estimated_prep_time is not None:
             try:
-                estimated_prep_time = int(estimated_prep_time)
+                # LIMITE AQUI TAMBÉM, não só na tela. O app do parceiro passou a
+                # aceitar tempo livre (mercado separando compra grande leva mais
+                # que os 60 min dos botões), e limite que mora só no front é
+                # limite que some no dia em que alguém chamar a rota por fora.
+                # Teto de 4h: acima disso não é preparo, é outro combinado — e
+                # um zero a mais digitado viraria "600 min" na tela do cliente.
+                estimated_prep_time = max(5, min(int(estimated_prep_time), 240))
             except (ValueError, TypeError):
                 estimated_prep_time = None
 
