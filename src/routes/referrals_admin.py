@@ -28,6 +28,7 @@ _CAMPOS = {
     "referral_min_order_brl": (0, 500),
     "referral_validity_days": (1, 365),
     "referral_monthly_cap":   (0, 1000),
+    "referral_welcome_min_brl": (0, 500),
 }
 
 # Datas da campanha (AAAA-MM-DD). Vazio = sem limite daquele lado.

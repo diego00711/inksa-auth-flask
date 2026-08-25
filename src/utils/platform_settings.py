@@ -53,6 +53,12 @@ _DEFAULTS: dict[str, Decimal] = {
     "referral_min_order_brl":  Decimal("50"),   # subtotal mínimo pra usar o cupom
     "referral_validity_days":  Decimal("30"),
     "referral_monthly_cap":    Decimal("10"),   # indicações premiadas por mês
+    # Mínimo do FRETE GRÁTIS do convidado. 0 = sem mínimo (padrão).
+    # É separado do mínimo do cupom de quem indica de propósito: exigir valor
+    # logo no pedido de estreia derruba a conversão onde ela é mais frágil. Mas
+    # sem mínimo nenhum, um pedido de R$15 com frete grátis dá prejuízo — então
+    # a régua fica aqui, pra ser decidida com número na mão e não no código.
+    "referral_welcome_min_brl": Decimal("0"),
     # Raio POR TIPO DE VEÍCULO (km). Bike alcança menos que moto/carro. Se um
     # deles ficar 0/vazio, cai no platform_max_delivery_radius acima. 'outro'
     # sempre usa o raio global. Editável no admin.
@@ -154,7 +160,8 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               "frete_adicional_utilitario", "frete_km_utilitario",
               "idle_logout_minutes", "cart_reminder_minutes",
               "referral_enabled", "referral_reward_brl", "referral_min_order_brl",
-              "referral_validity_days", "referral_monthly_cap"):
+              "referral_validity_days", "referral_monthly_cap",
+              "referral_welcome_min_brl"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 
     # commission_rate é guardado como percentual humano (10 = 10%);

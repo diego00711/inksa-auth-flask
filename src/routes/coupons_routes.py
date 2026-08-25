@@ -269,6 +269,96 @@ def validate_coupon():
             conn.close()
 
 
+@coupons_bp.route('/disponiveis', methods=['GET'])
+def cupons_disponiveis():
+    """Cupons que ESTE cliente pode usar NESTE carrinho, com o desconto de cada um.
+
+    POR QUE EXISTE: só entra UM cupom por pedido, mas o cliente não tinha como
+    saber disso nem o que tinha na mão. O convidado ganha frete grátis, chega
+    numa loja que está com promoção própria, e escolhia às cegas — ou nem sabia
+    que tinha escolha, porque o cupom dele só existia dentro de uma notificação.
+
+    Devolve tudo já avaliado contra este carrinho (evaluate_coupon, a mesma
+    função do checkout), ordenado pelo que economiza mais. Assim a tela mostra
+    a decisão em vez de esconder o conflito.
+
+    Query: restaurant_id, subtotal, delivery_fee.
+    """
+    auth_uid, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'client':
+        return jsonify({"status": "success", "data": []}), 200
+
+    restaurant_id = request.args.get('restaurant_id') or None
+    try:
+        subtotal = float(request.args.get('subtotal') or 0)
+        delivery_fee = float(request.args.get('delivery_fee') or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "subtotal/delivery_fee inválidos"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "DB indisponível"}), 503
+    try:
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id FROM public.client_profiles WHERE user_id = %s", (auth_uid,))
+            perfil = cur.fetchone()
+            if not perfil:
+                return jsonify({"status": "success", "data": []}), 200
+            client_id = str(perfil['id'])
+
+            # Três origens: o cupom PESSOAL dele, o da LOJA do carrinho e o de
+            # CAMPANHA da plataforma. Cupom pessoal de outra pessoa nem é lido.
+            cur.execute("""
+                SELECT id, code, discount_type, discount_value, min_order_value,
+                       max_uses, uses_count, max_uses_per_client, valid_until,
+                       is_active, restaurant_id, paid_by, owner_client_id, description
+                  FROM public.coupons
+                 WHERE is_active
+                   AND (valid_until IS NULL OR valid_until >= now())
+                   AND (COALESCE(uses_count,0) < COALESCE(max_uses, 2147483647))
+                   AND (owner_client_id = %s
+                        OR (owner_client_id IS NULL
+                            AND (restaurant_id IS NULL OR restaurant_id = %s)))
+                 ORDER BY created_at DESC
+                 LIMIT 50
+            """, (client_id, restaurant_id))
+            candidatos = [dict(r) for r in cur.fetchall()]
+
+            saida = []
+            for c in candidatos:
+                usos = contar_usos_do_cliente(c['id'], client_id, cur)
+                r = evaluate_coupon(c, subtotal, delivery_fee,
+                                    restaurant_id=restaurant_id,
+                                    usos_deste_cliente=usos, client_id=client_id)
+                if not r["valid"] or r["discount_amount"] <= 0:
+                    continue
+                saida.append({
+                    "codigo": c["code"],
+                    "desconto": round(float(r["discount_amount"]), 2),
+                    "tipo": c["discount_type"],
+                    "minimo": float(c["min_order_value"] or 0),
+                    "vence_em": c["valid_until"].isoformat() if c["valid_until"] else None,
+                    "meu": c["owner_client_id"] is not None,
+                    "da_loja": c["restaurant_id"] is not None,
+                    "descricao": c["description"],
+                })
+
+        # Melhor primeiro: a tela precisa poder dizer qual compensa mais sem
+        # fazer o cliente calcular.
+        saida.sort(key=lambda x: x["desconto"], reverse=True)
+        return jsonify({"status": "success", "data": saida}), 200
+    except Exception:
+        logger.exception("cupons_disponiveis falhou")
+        # Falha aqui não pode travar o carrinho: sem a lista, o campo de código
+        # continua funcionando como sempre funcionou.
+        return jsonify({"status": "success", "data": []}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
 @coupons_bp.route('/admin', methods=['GET'])
 def list_coupons():
     """

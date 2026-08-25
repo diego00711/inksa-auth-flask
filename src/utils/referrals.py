@@ -65,6 +65,7 @@ def _cfg():
         "termina_em": fim,
         "valor": float(s["referral_reward_brl"]),
         "minimo": float(s["referral_min_order_brl"]),
+        "minimo_boas_vindas": float(s["referral_welcome_min_brl"]),
         "validade": int(float(s["referral_validity_days"])),
         "teto": int(float(s["referral_monthly_cap"])),
     }
@@ -181,11 +182,14 @@ def aplicar_codigo(cur, client_id, codigo):
 
     # Frete grátis: alavanca de maior percepção e menor custo em delivery, e
     # ataca a objeção de quem nunca pediu ("vou pagar frete só pra testar?").
-    # Sem mínimo — exigir R$ 50 logo no pedido de estreia derrubaria a conversão
-    # justamente onde ela é mais frágil.
+    #
+    # O mínimo daqui é SEPARADO do mínimo do cupom de quem indica, e nasce em
+    # zero: exigir valor logo no pedido de estreia derruba a conversão onde ela
+    # é mais frágil. Mas frete grátis num pedido de R$15 dá prejuízo (a Inksa
+    # paga o entregador e ganha R$2 de comissão), então a régua é configurável.
     cupom_id, cupom_code = _criar_cupom(
         cur, client_id, 0, "Frete grátis de boas-vindas (indicação)",
-        minimo=0, tipo="free_delivery")
+        minimo=c["minimo_boas_vindas"], tipo="free_delivery")
 
     cur.execute("""INSERT INTO public.referrals (referrer_id, referred_id, code_used)
                    VALUES (%s, %s, %s)""", (referrer_id, str(client_id), codigo))
