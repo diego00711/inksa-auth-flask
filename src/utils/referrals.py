@@ -35,10 +35,26 @@ from .helpers import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-VALOR_INDICACAO = 5.00        # R$ por indicação qualificada — regra única
-MINIMO_DE_COMPRA = 50.00      # subtotal mínimo pra usar o cupom
-VALIDADE_DIAS = 30            # cupom sem prazo vira dívida eterna e some do radar
-TETO_MENSAL = 10              # indicações premiadas por mês, por pessoa
+def _cfg():
+    """Números da campanha, lidos das configurações da plataforma.
+
+    Eram constantes aqui. Mudaram três vezes numa tarde só, e cada mudança
+    exigia deploy — o que é o oposto do que uma campanha precisa. Agora saem do
+    admin, com cache de 60s como o resto das configurações.
+
+    Fail-safe: qualquer problema cai nos defaults do platform_settings, nunca
+    em zero (prêmio zerado silenciosamente é pior que prêmio errado — ninguém
+    reclama de não receber o que não sabia que ia receber).
+    """
+    from .platform_settings import get_settings
+    s = get_settings()
+    return {
+        "ligado": float(s["referral_enabled"]) > 0,
+        "valor": float(s["referral_reward_brl"]),
+        "minimo": float(s["referral_min_order_brl"]),
+        "validade": int(float(s["referral_validity_days"])),
+        "teto": int(float(s["referral_monthly_cap"])),
+    }
 
 # Sem I, O, 0 e 1: este código é DITADO em grupo de WhatsApp e lido em print.
 # "INK-I0O1" gera erro de digitação que o usuário culpa o app, não a fonte.
@@ -79,8 +95,8 @@ def obter_ou_criar_codigo(cur, client_id):
     raise RuntimeError("não consegui gerar código de indicação")
 
 
-def _criar_cupom(cur, dono_id, valor, descricao, validade_dias=VALIDADE_DIAS,
-                 minimo=MINIMO_DE_COMPRA, tipo="fixed"):
+def _criar_cupom(cur, dono_id, valor, descricao, validade_dias=None,
+                 minimo=None, tipo="fixed"):
     """Cupom PESSOAL da plataforma: código único, um uso só, e com DONO.
 
     owner_client_id é o que impede o prêmio de vazar. O código chega por push,
@@ -91,6 +107,11 @@ def _criar_cupom(cur, dono_id, valor, descricao, validade_dias=VALIDADE_DIAS,
     da Inksa. Se saísse do repasse do parceiro, ele estaria pagando a conta do
     marketing de outro — e descobriria no fechamento do mês.
     """
+    c = _cfg()
+    if validade_dias is None:
+        validade_dias = c["validade"]
+    if minimo is None:
+        minimo = c["minimo"]
     for _ in range(10):
         code = ("IND" if tipo == "fixed" else "BV") + _sortear(7)
         try:
@@ -116,6 +137,9 @@ def aplicar_codigo(cur, client_id, codigo):
     Só vale pra quem AINDA NÃO comprou: indicação é aquisição, não desconto
     retroativo pra quem já é cliente.
     """
+    if not _cfg()["ligado"]:
+        return {"ok": False, "erro": "O programa de indicação está pausado no momento."}
+
     codigo = (codigo or "").strip().upper()
     if not codigo:
         return {"ok": False, "erro": "Informe o código."}
@@ -161,6 +185,7 @@ def qualificar_por_entrega(client_id, order_id):
     falha silenciosa: prêmio de indicação não pode derrubar a entrega de um
     pedido. Devolve o que foi concedido (ou None) pra quem quiser avisar.
     """
+    c = _cfg()
     conn = get_db_connection()
     if not conn:
         return None
@@ -186,17 +211,18 @@ def qualificar_por_entrega(client_id, order_id):
                               AND DATE_TRUNC('month', qualified_at) = DATE_TRUNC('month', NOW())""",
                         (referrer_id,))
             no_mes = cur.fetchone()[0]
-            if no_mes >= TETO_MENSAL:
-                # Registra como qualificada mesmo assim: a indicação ACONTECEU, e
-                # marcar isso é o que impede o mesmo indicado pagar mês que vem.
+            # Programa pausado ou teto batido: a indicação é registrada assim
+            # mesmo. Ela ACONTECEU — e marcar isso é o que impede o mesmo
+            # indicado voltar a pagar mês que vem ou quando religar.
+            if not c["ligado"] or no_mes >= c["teto"]:
                 cur.execute("""UPDATE public.referrals
                                   SET qualified_at = now(), qualifying_order_id = %s
                                 WHERE id = %s""", (str(order_id), referral_id))
                 return {"teto_atingido": True}
 
             cupom_id, cupom_code = _criar_cupom(
-                cur, referrer_id, VALOR_INDICACAO,
-                f"Indicação premiada — R$ {VALOR_INDICACAO:.2f}".replace(".", ","))
+                cur, referrer_id, c["valor"],
+                f"Indicação premiada — R$ {c['valor']:.2f}".replace(".", ","))
 
             cur.execute("""SELECT COUNT(*) FROM public.referrals
                             WHERE referrer_id = %s AND qualified_at IS NOT NULL""",
@@ -210,7 +236,7 @@ def qualificar_por_entrega(client_id, order_id):
                         (str(order_id), cupom_id, referral_id))
 
             return {"referrer_id": referrer_id, "cupom": cupom_code,
-                    "valor": VALOR_INDICACAO, "total_indicacoes": total}
+                    "valor": c["valor"], "total_indicacoes": total}
     except Exception:
         logger.exception("referrals.qualificar_por_entrega falhou")
         return None
@@ -263,14 +289,21 @@ def resumo(cur, client_id):
           FROM public.referrals WHERE referrer_id = %s
     """, (str(client_id),))
     premiadas, pendentes, no_mes = cur.fetchone()
+    c = _cfg()
     return {
         "codigo": codigo,
+        "ligado": c["ligado"],
         "premiadas": int(premiadas or 0),
         "pendentes": int(pendentes or 0),
         "no_mes": int(no_mes or 0),
-        "teto_mensal": TETO_MENSAL,
-        "ganho_total": round(float(premiadas or 0) * VALOR_INDICACAO, 2),
-        "valor_indicacao": VALOR_INDICACAO,
-        "minimo_de_compra": MINIMO_DE_COMPRA,
+        "teto_mensal": c["teto"],
+        # Soma o que os CUPONS realmente valem, em vez de multiplicar pelo valor
+        # de hoje: se o prêmio mudar de R$5 pra R$7, o histórico continua
+        # contando o que cada indicação valeu na época.
+        "ganho_total": round(sum(
+            k["valor"] for k in cupons_do_cliente(cur, client_id)
+            if k["tipo"] != "free_delivery"), 2),
+        "valor_indicacao": c["valor"],
+        "minimo_de_compra": c["minimo"],
         "cupons": cupons_do_cliente(cur, client_id),
     }

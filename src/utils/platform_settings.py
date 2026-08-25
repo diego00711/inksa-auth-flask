@@ -45,6 +45,14 @@ _DEFAULTS: dict[str, Decimal] = {
     # dele. É o que separa as cidades sem misturar tudo (cada um vê o que é da
     # sua região).
     "platform_max_delivery_radius": Decimal("15"),
+    # Indique e ganhe. Estes números mudaram três vezes numa tarde só — deixar
+    # no código significa um deploy por ajuste de campanha. Editáveis no admin.
+    # referral_enabled: 0 desliga o programa sem apagar nada do que já foi dado.
+    "referral_enabled":        Decimal("1"),
+    "referral_reward_brl":     Decimal("5"),    # prêmio por indicação qualificada
+    "referral_min_order_brl":  Decimal("50"),   # subtotal mínimo pra usar o cupom
+    "referral_validity_days":  Decimal("30"),
+    "referral_monthly_cap":    Decimal("10"),   # indicações premiadas por mês
     # Raio POR TIPO DE VEÍCULO (km). Bike alcança menos que moto/carro. Se um
     # deles ficar 0/vazio, cai no platform_max_delivery_radius acima. 'outro'
     # sempre usa o raio global. Editável no admin.
@@ -132,7 +140,9 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               "dispatch_default_rating",
               "frete_adicional_carro", "frete_km_carro",
               "frete_adicional_utilitario", "frete_km_utilitario",
-              "idle_logout_minutes", "cart_reminder_minutes"):
+              "idle_logout_minutes", "cart_reminder_minutes",
+              "referral_enabled", "referral_reward_brl", "referral_min_order_brl",
+              "referral_validity_days", "referral_monthly_cap"):
         out[k] = _to_decimal(raw.get(k), _DEFAULTS[k])
 
     # commission_rate é guardado como percentual humano (10 = 10%);
