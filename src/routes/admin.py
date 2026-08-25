@@ -2545,7 +2545,31 @@ def admin_tv_mapa():
                  ORDER BY o.created_at DESC
                  LIMIT 120
             """)
-            EM_ROTA = ("accepted", "preparing", "ready", "out_for_delivery", "picked_up")
+            # "Em curso" = aceito pela loja e ainda não entregue.
+            #
+            # A lista anterior era ("accepted","preparing","ready",
+            # "out_for_delivery","picked_up"). Os dois últimos NÃO EXISTEM neste
+            # sistema — nunca casaram com nada — e faltavam os dois que
+            # importam: 'accepted_by_delivery' (entregador a caminho da loja) e
+            # 'delivering' (na rua com o pedido).
+            #
+            # O efeito era o inverso do que um painel de parede serve: a entrega
+            # aparecia enquanto a comida estava na COZINHA e sumia no instante em
+            # que saía pra rua. Foi assim que o Diego viu o painel dizer "a
+            # cidade pode pedir agora" com uma entrega acontecendo.
+            EM_ROTA = ("accepted", "preparing", "ready", "accepted_by_delivery", "delivering")
+
+            # Se alguém renomear um status lá na origem, isto aparece no log em
+            # vez de o painel simplesmente ficar vazio de novo — que é um jeito
+            # de quebrar que ninguém percebe olhando a tela.
+            try:
+                from .orders import VALID_STATUSES_INTERNAL as _VALIDOS
+                _fantasmas = [s for s in EM_ROTA if s not in _VALIDOS]
+                if _fantasmas:
+                    logger.warning("tv/mapa: status inexistentes em EM_ROTA: %s", _fantasmas)
+            except Exception:
+                pass
+
             pedidos = []
             for r in cur.fetchall():
                 oid = str(r["id"])
