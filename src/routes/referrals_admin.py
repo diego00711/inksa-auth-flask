@@ -7,6 +7,7 @@ sem deploy. A segunda existe porque estes valores mudaram três vezes numa tarde
 só — campanha que precisa de deploy pra ajustar não é campanha.
 """
 import logging
+from datetime import date
 from functools import wraps
 
 import psycopg2.extras
@@ -28,6 +29,25 @@ _CAMPOS = {
     "referral_validity_days": (1, 365),
     "referral_monthly_cap":   (0, 1000),
 }
+
+# Datas da campanha (AAAA-MM-DD). Vazio = sem limite daquele lado.
+_DATAS = ("referral_starts_at", "referral_ends_at")
+
+
+def _data_valida(v):
+    """Aceita vazio (sem limite) ou uma data ISO de verdade.
+
+    Validar aqui e não só no formulário: o campo vai virar comparação de texto
+    lá no referrals.py, e um "31/12/2026" gravado no formato errado não daria
+    erro — daria uma campanha que nunca começa, em silêncio.
+    """
+    v = (v or "").strip()
+    if not v:
+        return True, ""
+    try:
+        return True, date.fromisoformat(v).isoformat()
+    except ValueError:
+        return False, v
 
 
 def _admin(fn):
@@ -53,6 +73,13 @@ def painel():
     try:
         s = get_settings()
         config = {k: float(s[k]) for k in _CAMPOS}
+        for k in _DATAS:
+            config[k] = (s.get(k) or "").strip()
+        hoje = date.today().isoformat()
+        config["no_prazo"] = ((not config["referral_starts_at"]
+                               or hoje >= config["referral_starts_at"])
+                              and (not config["referral_ends_at"]
+                                   or hoje <= config["referral_ends_at"]))
 
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             # RESGATADO x EMITIDO é a distinção que importa: cupom emitido é
@@ -179,6 +206,20 @@ def salvar_config():
         if v < lo or v > hi:
             return jsonify({"error": f"{k} deve ficar entre {lo} e {hi}"}), 422
         mudancas[k] = v
+
+    for k in _DATAS:
+        if k not in body:
+            continue
+        ok, valor = _data_valida(body[k])
+        if not ok:
+            return jsonify({"error": f"Data inválida em {k}. Use AAAA-MM-DD."}), 422
+        mudancas[k] = valor
+
+    inicio = mudancas.get("referral_starts_at")
+    fim = mudancas.get("referral_ends_at")
+    if inicio and fim and fim < inicio:
+        return jsonify({"error": "A data de fim não pode ser antes da de início."}), 422
+
     if not mudancas:
         return jsonify({"error": "Nada para salvar"}), 400
 
@@ -188,9 +229,12 @@ def salvar_config():
     try:
         with conn, conn.cursor() as cur:
             for k, v in mudancas.items():
-                # Inteiro sai sem ".0": o valor é lido por gente no admin, e
-                # "30.0 dias" parece defeito.
-                txt = str(int(v)) if float(v).is_integer() else str(v)
+                if isinstance(v, str):
+                    txt = v
+                else:
+                    # Inteiro sai sem ".0": o valor é lido por gente no admin, e
+                    # "30.0 dias" parece defeito.
+                    txt = str(int(v)) if float(v).is_integer() else str(v)
                 cur.execute("""
                     INSERT INTO public.platform_settings (key, value, updated_at)
                     VALUES (%s, %s, NOW())

@@ -29,7 +29,7 @@ TRÊS DECISÕES QUE SUSTENTAM ISTO:
 """
 import logging
 import random
-import string
+from datetime import date
 
 from .helpers import get_db_connection
 
@@ -48,8 +48,21 @@ def _cfg():
     """
     from .platform_settings import get_settings
     s = get_settings()
+    inicio = (s.get("referral_starts_at") or "").strip()
+    fim = (s.get("referral_ends_at") or "").strip()
+    hoje = date.today().isoformat()
+
+    # A data é uma trava À PARTE do interruptor, e as duas precisam concordar:
+    # campanha com prazo é campanha que termina sozinha, sem depender de alguém
+    # lembrar de desligar num domingo. Comparação por texto ISO (AAAA-MM-DD)
+    # funciona porque a ordem alfabética dessa forma é a ordem cronológica.
+    no_prazo = (not inicio or hoje >= inicio) and (not fim or hoje <= fim)
+
     return {
-        "ligado": float(s["referral_enabled"]) > 0,
+        "ligado": float(s["referral_enabled"]) > 0 and no_prazo,
+        "no_prazo": no_prazo,
+        "comeca_em": inicio,
+        "termina_em": fim,
         "valor": float(s["referral_reward_brl"]),
         "minimo": float(s["referral_min_order_brl"]),
         "validade": int(float(s["referral_validity_days"])),
@@ -137,8 +150,11 @@ def aplicar_codigo(cur, client_id, codigo):
     Só vale pra quem AINDA NÃO comprou: indicação é aquisição, não desconto
     retroativo pra quem já é cliente.
     """
-    if not _cfg()["ligado"]:
-        return {"ok": False, "erro": "O programa de indicação está pausado no momento."}
+    c = _cfg()
+    if not c["ligado"]:
+        return {"ok": False, "erro": (
+            "A promoção de indicação encerrou." if not c["no_prazo"]
+            else "O programa de indicação está pausado no momento.")}
 
     codigo = (codigo or "").strip().upper()
     if not codigo:

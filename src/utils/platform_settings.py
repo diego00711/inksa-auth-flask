@@ -115,6 +115,18 @@ _DEFAULTS: dict[str, Decimal] = {
 }
 
 
+# Configurações que são TEXTO, não número — datas, por enquanto. Ficam no mesmo
+# cache das numéricas: sem isto, cada leitura de "a campanha ainda está no
+# prazo?" iria ao Postgres, e essa pergunta é feita em toda entrega concluída.
+_TEXT_DEFAULTS: dict[str, str] = {
+    # Vazio = sem limite daquele lado. Campanha sem data de fim é campanha que
+    # ninguém lembra de desligar — mas forçar uma data também é errado, porque
+    # nem toda campanha tem prazo. Então: opcional dos dois lados, e explícito.
+    "referral_starts_at": "",
+    "referral_ends_at": "",
+}
+
+
 def _to_decimal(raw, default: Decimal) -> Decimal:
     if raw is None or raw == "":
         return default
@@ -160,6 +172,11 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
     # Guardada SEMPRE como percentual humano (15 = 15%); converte p/ fração 0..1
     # e limita ao intervalo válido. Campo rotulado "(%)" no admin, sem heurística
     # ambígua (0,5 = 0,5%, não 50%).
+    # Texto passa direto, só aparado. Vazio/ausente cai no default.
+    for k, padrao in _TEXT_DEFAULTS.items():
+        v = raw.get(k)
+        out[k] = (str(v).strip() if v is not None else "") or padrao
+
     raw_adm = raw.get("financial_delivery_commission")
     if raw_adm is not None and raw_adm != "":
         try:
