@@ -99,7 +99,7 @@ def contar_usos_do_cliente(coupon_id, client_id, cur=None):
 
 
 def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=None,
-                    usos_deste_cliente=0):
+                    usos_deste_cliente=0, client_id=None):
     """Valida um cupom já buscado (dict da linha) e calcula o desconto.
 
     `coupon` pode vir do psycopg2 (DictCursor) ou do supabase (select '*') —
@@ -131,6 +131,19 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=
     if dono and restaurant_id and str(dono) != str(restaurant_id):
         return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
                 "message": "Este cupom vale só em outra loja"}
+
+    # Cupom PESSOAL (prêmio de indicação): só o dono usa.
+    #
+    # O código chega por notificação, e notificação é printada e mandada no
+    # grupo. Sem esta trava, quem visse o código usaria primeiro — o max_uses=1
+    # garante que só UMA pessoa use, não que seja a pessoa certa.
+    #
+    # Sem client_id (chamada sem login), cupom pessoal é RECUSADO: na dúvida
+    # sobre quem está pedindo, não se entrega dinheiro de outro.
+    pessoal = coupon.get('owner_client_id')
+    if pessoal and (not client_id or str(pessoal) != str(client_id)):
+        return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                "message": "Este cupom é pessoal e foi emitido para outra conta"}
 
     vu = _parse_dt(coupon.get('valid_until'))
     if vu and vu < now:

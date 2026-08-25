@@ -4,8 +4,12 @@
 Indique e ganhe.
 
     O indicado  -> frete grátis no 1º pedido
-    Quem indica -> R$ 5 quando esse pedido é ENTREGUE, +R$ 10 a cada 5 indicações
+    Quem indica -> R$ 5 quando esse pedido é ENTREGUE
     Mínimo de compra pra usar o cupom: R$ 50 de SUBTOTAL (sem frete)
+
+Uma regra só, sem bônus por marco: quanto mais simples de explicar no grupo do
+WhatsApp, mais gente indica. E como o app aplica UM cupom por pedido, dez
+indicações não viram R$ 50 num pedido — viram dez pedidos de R$ 50 pra cima.
 
 TRÊS DECISÕES QUE SUSTENTAM ISTO:
 
@@ -31,9 +35,7 @@ from .helpers import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-VALOR_INDICACAO = 5.00        # R$ por indicação qualificada
-VALOR_MARCO = 10.00           # R$ de bônus a cada N indicações
-MARCO_A_CADA = 5
+VALOR_INDICACAO = 5.00        # R$ por indicação qualificada — regra única
 MINIMO_DE_COMPRA = 50.00      # subtotal mínimo pra usar o cupom
 VALIDADE_DIAS = 30            # cupom sem prazo vira dívida eterna e some do radar
 TETO_MENSAL = 10              # indicações premiadas por mês, por pessoa
@@ -77,9 +79,13 @@ def obter_ou_criar_codigo(cur, client_id):
     raise RuntimeError("não consegui gerar código de indicação")
 
 
-def _criar_cupom(cur, valor, descricao, validade_dias=VALIDADE_DIAS,
+def _criar_cupom(cur, dono_id, valor, descricao, validade_dias=VALIDADE_DIAS,
                  minimo=MINIMO_DE_COMPRA, tipo="fixed"):
-    """Cupom PESSOAL da plataforma (código único, um uso só).
+    """Cupom PESSOAL da plataforma: código único, um uso só, e com DONO.
+
+    owner_client_id é o que impede o prêmio de vazar. O código chega por push,
+    e push é printado e mandado no grupo — sem dono, o primeiro que digitasse
+    levava. max_uses=1 garante que só UMA pessoa use, não que seja a certa.
 
     paid_by='platform' e restaurant_id NULL de propósito: indicação é aquisição
     da Inksa. Se saísse do repasse do parceiro, ele estaria pagando a conta do
@@ -92,11 +98,11 @@ def _criar_cupom(cur, valor, descricao, validade_dias=VALIDADE_DIAS,
                 INSERT INTO public.coupons
                     (code, discount_type, discount_value, min_order_value,
                      max_uses, max_uses_per_client, valid_until, description,
-                     restaurant_id, paid_by, is_active)
+                     restaurant_id, paid_by, is_active, owner_client_id)
                 VALUES (%s, %s, %s, %s, 1, 1, now() + (%s || ' days')::interval,
-                        %s, NULL, 'platform', TRUE)
+                        %s, NULL, 'platform', TRUE, %s)
                 RETURNING id, code
-            """, (code, tipo, valor, minimo, validade_dias, descricao))
+            """, (code, tipo, valor, minimo, validade_dias, descricao, str(dono_id)))
             return cur.fetchone()
         except Exception:
             cur.connection.rollback()
@@ -138,7 +144,7 @@ def aplicar_codigo(cur, client_id, codigo):
     # Sem mínimo — exigir R$ 50 logo no pedido de estreia derrubaria a conversão
     # justamente onde ela é mais frágil.
     cupom_id, cupom_code = _criar_cupom(
-        cur, 0, "Frete grátis de boas-vindas (indicação)",
+        cur, client_id, 0, "Frete grátis de boas-vindas (indicação)",
         minimo=0, tipo="free_delivery")
 
     cur.execute("""INSERT INTO public.referrals (referrer_id, referred_id, code_used)
@@ -189,34 +195,22 @@ def qualificar_por_entrega(client_id, order_id):
                 return {"teto_atingido": True}
 
             cupom_id, cupom_code = _criar_cupom(
-                cur, VALOR_INDICACAO,
+                cur, referrer_id, VALOR_INDICACAO,
                 f"Indicação premiada — R$ {VALOR_INDICACAO:.2f}".replace(".", ","))
 
-            # Marco: a cada N indicações qualificadas na VIDA (não no mês) — o
-            # teto mensal limita o custo, mas o marco é conquista acumulada e
-            # zerar todo dia 1º tiraria o sentido dele. O +1 é esta indicação,
-            # que só vira qualified_at no UPDATE lá embaixo.
             cur.execute("""SELECT COUNT(*) FROM public.referrals
                             WHERE referrer_id = %s AND qualified_at IS NOT NULL""",
                         (referrer_id,))
             total = cur.fetchone()[0] + 1
 
-            marco_id = marco_code = None
-            if total % MARCO_A_CADA == 0:
-                marco_id, marco_code = _criar_cupom(
-                    cur, VALOR_MARCO,
-                    f"Bônus de {total} indicações — R$ {VALOR_MARCO:.2f}".replace(".", ","))
-
             cur.execute("""UPDATE public.referrals
                               SET qualified_at = now(), qualifying_order_id = %s,
-                                  reward_coupon_id = %s, milestone_coupon_id = %s
+                                  reward_coupon_id = %s
                             WHERE id = %s""",
-                        (str(order_id), cupom_id, marco_id, referral_id))
+                        (str(order_id), cupom_id, referral_id))
 
             return {"referrer_id": referrer_id, "cupom": cupom_code,
-                    "valor": VALOR_INDICACAO, "marco": marco_code,
-                    "valor_marco": VALOR_MARCO if marco_code else 0,
-                    "total_indicacoes": total}
+                    "valor": VALOR_INDICACAO, "total_indicacoes": total}
     except Exception:
         logger.exception("referrals.qualificar_por_entrega falhou")
         return None
@@ -227,8 +221,38 @@ def qualificar_por_entrega(client_id, order_id):
             pass
 
 
+def cupons_do_cliente(cur, client_id):
+    """Cupons pessoais deste cliente, do mais novo pro mais velho.
+
+    ISTO EXISTE PORQUE O CÓDIGO NÃO PODE MORAR SÓ NO PUSH. A notificação é
+    dispensada, o celular é trocado, e aí a pessoa ganhou um cupom que não tem
+    onde procurar — e conclui, com razão, que não recebeu nada.
+
+    Mostra os já usados e os vencidos também: sumir com eles faria parecer que
+    o prêmio nunca existiu.
+    """
+    cur.execute("""
+        SELECT code, discount_type, discount_value, min_order_value, valid_until,
+               COALESCE(uses_count, 0) >= COALESCE(max_uses, 1) AS usado,
+               valid_until IS NOT NULL AND valid_until < now() AS vencido
+          FROM public.coupons
+         WHERE owner_client_id = %s AND is_active
+         ORDER BY created_at DESC
+         LIMIT 40
+    """, (str(client_id),))
+    return [{
+        "codigo": r[0],
+        "tipo": r[1],
+        "valor": float(r[2] or 0),
+        "minimo": float(r[3] or 0),
+        "vence_em": r[4].isoformat() if r[4] else None,
+        "usado": bool(r[5]),
+        "vencido": bool(r[6]),
+    } for r in cur.fetchall()]
+
+
 def resumo(cur, client_id):
-    """Código, quantas indicações e quanto já rendeu — pra tela do cliente."""
+    """Código, quantas indicações, quanto rendeu e os cupons — tela do cliente."""
     codigo = obter_ou_criar_codigo(cur, client_id)
     cur.execute("""
         SELECT COUNT(*) FILTER (WHERE qualified_at IS NOT NULL)  AS premiadas,
@@ -245,12 +269,8 @@ def resumo(cur, client_id):
         "pendentes": int(pendentes or 0),
         "no_mes": int(no_mes or 0),
         "teto_mensal": TETO_MENSAL,
-        "ganho_total": round(float(premiadas or 0) * VALOR_INDICACAO
-                             + (int(premiadas or 0) // MARCO_A_CADA) * VALOR_MARCO, 2),
+        "ganho_total": round(float(premiadas or 0) * VALOR_INDICACAO, 2),
         "valor_indicacao": VALOR_INDICACAO,
-        "valor_marco": VALOR_MARCO,
-        "marco_a_cada": MARCO_A_CADA,
         "minimo_de_compra": MINIMO_DE_COMPRA,
-        "faltam_pro_marco": (MARCO_A_CADA - (int(premiadas or 0) % MARCO_A_CADA))
-                            % MARCO_A_CADA or MARCO_A_CADA,
+        "cupons": cupons_do_cliente(cur, client_id),
     }

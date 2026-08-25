@@ -658,6 +658,7 @@ def criar_preferencia_mercado_pago():
                     coupon, order_subtotal, delivery_fee_c, restaurant_id=_rid,
                     usos_deste_cliente=contar_usos_do_cliente(
                         (coupon or {}).get('id'), client_profile_id),
+                    client_id=client_profile_id,
                 )
                 if evalr['valid'] and evalr['discount_amount'] > 0:
                     backend_discount = evalr['discount_amount']
@@ -1144,6 +1145,7 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
         evalr = evaluate_coupon(
             coupon, subtotal, delivery_fee, restaurant_id=restaurant_id,
             usos_deste_cliente=contar_usos_do_cliente((coupon or {}).get('id'), client_id),
+            client_id=client_id,
         )
         if evalr['valid'] and evalr['discount_amount'] > 0:
             desconto = evalr['discount_amount']

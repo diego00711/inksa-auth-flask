@@ -72,11 +72,8 @@ def _pagar_indicacao(client_id, order_id):
         if not r or not r.get("cupom"):
             return
         valor = f"R$ {r['valor']:.2f}".replace(".", ",")
-        corpo = f"Sua indicação virou {valor} em cupom: {r['cupom']}"
-        if r.get("marco"):
-            bonus = f"R$ {r['valor_marco']:.2f}".replace(".", ",")
-            corpo += (f" — e você chegou a {r['total_indicacoes']} indicações: "
-                      f"mais {bonus} no cupom {r['marco']}")
+        corpo = (f"Sua indicação virou {valor} em cupom ({r['cupom']}). "
+                 "Ele também está salvo no app, em Indique e ganhe.")
         _conn = get_db_connection()
         if not _conn:
             return

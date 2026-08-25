@@ -217,7 +217,7 @@ def validate_coupon():
             cur.execute("""
                 SELECT id, code, discount_type, discount_value, min_order_value,
                        max_uses, uses_count, max_uses_per_client, valid_until,
-                       is_active, restaurant_id, paid_by
+                       is_active, restaurant_id, paid_by, owner_client_id
                 FROM public.coupons
                 WHERE UPPER(code) = %s
                   AND (restaurant_id IS NULL OR restaurant_id = %s)
@@ -231,6 +231,7 @@ def validate_coupon():
             # app quebrou. O token é opcional aqui — sem ele, conta 0 e a trava
             # real continua sendo a do fechamento.
             usos = 0
+            cliente_id = None
             if coupon is not None:
                 try:
                     uid, utype, err = get_user_id_from_token(request.headers.get('Authorization'))
@@ -238,13 +239,15 @@ def validate_coupon():
                         cur.execute("SELECT id FROM client_profiles WHERE user_id = %s", (uid,))
                         perfil = cur.fetchone()
                         if perfil:
+                            cliente_id = perfil['id']
                             usos = contar_usos_do_cliente(coupon['id'], perfil['id'], cur)
                 except Exception:
                     usos = 0
 
         # Validação/cálculo centralizado (mesma lógica do fechamento do pedido)
         result = evaluate_coupon(dict(coupon) if coupon else None, order_total, delivery_fee,
-                                 restaurant_id=restaurant_id, usos_deste_cliente=usos)
+                                 restaurant_id=restaurant_id, usos_deste_cliente=usos,
+                                 client_id=cliente_id)
         if not result["valid"]:
             return jsonify({"valid": False, "message": result["message"]}), 200
 
