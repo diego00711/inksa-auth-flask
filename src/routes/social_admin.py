@@ -445,6 +445,61 @@ def minha_indicacao():
             pass
 
 
+@social_admin_bp.route("/nominations/lista", methods=["GET", "OPTIONS"])
+def lista_publica_indicacoes():
+    """Instituições já indicadas — só nome e quantos votos. Para o app.
+
+    POR QUE EXISTE: `_chave_do_nome` agrupa maiúscula, acento e pontuação, mas
+    não agrupa REDAÇÃO diferente. "Lar São Vicente", "Lar de Idosos São
+    Vicente" e "Asilo São Vicente" viram três linhas de um voto cada, e o
+    ranking — que é a única coisa que faz a votação valer — nunca sobe.
+    Mostrar a lista antes de digitar resolve na origem: a pessoa reconhece a
+    que já está lá e clica, em vez de inventar um jeito novo de escrever.
+
+    NÃO devolve `motivo` nem `contato`, de propósito, mesmo tendo os dois na
+    tabela. O motivo é o texto que a pessoa escreveu achando que ia para a
+    Inksa decidir, não para a cidade ler; e o contato é telefone de uma
+    instituição, que não tem por que circular num app de delivery. A lista
+    administrativa (GET /nominations, com _admin_required) continua trazendo
+    tudo — lá o público é outro.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+
+    # Exige estar logado: a lista não é segredo, mas é resultado parcial de uma
+    # votação em curso. Aberta a anônimo, vira alvo fácil de raspagem e de
+    # empurrão coordenado numa instituição.
+    _uid, _utype, err = get_user_id_from_token(request.headers.get("Authorization"))
+    if err:
+        return err
+
+    conn = get_db_connection()
+    if not conn:
+        # Falha aqui não pode travar a caixa de indicação: sem lista, o
+        # formulário continua funcionando do jeito de sempre.
+        return jsonify({"itens": []}), 200
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT MIN(nome)      AS nome,
+                       count(*)::int  AS votos
+                  FROM social_nominations
+                 GROUP BY nome_chave
+                 ORDER BY count(*) DESC, MIN(nome) ASC
+                 LIMIT 100
+            """)
+            itens = [{"nome": r["nome"], "votos": int(r["votos"])} for r in cur.fetchall()]
+        return jsonify({"itens": itens}), 200
+    except Exception:
+        logger.exception("Erro ao listar indicações para o app")
+        return jsonify({"itens": []}), 200
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @social_admin_bp.delete("/nominations")
 @_admin_required
 def limpar_indicacoes():
