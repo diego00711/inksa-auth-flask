@@ -423,3 +423,49 @@ class CustomJSONEncoder(json.JSONEncoder):
 
 def serialize_data(data):
     return json.loads(json.dumps(data, cls=CustomJSONEncoder))
+
+
+# ── API admin do GoTrue, sem passar pelo SDK ────────────────────────────────
+# POR QUE ISTO EXISTE: `supabase_admin.auth.admin.*` NÃO é confiável neste
+# backend. O cliente supabase-py guarda sessão internamente e, num processo
+# único que atende todo mundo, ele acaba mandando o token do último usuário
+# que fez login em vez da service_role. O GoTrue responde 403
+# "this token needs to have one of the following roles: supabase_admin,
+# service_role" e a operação falha — de forma INTERMITENTE, que é o pior tipo
+# de falha: funciona no teste e quebra com usuário real.
+#
+# Já mordeu duas vezes:
+#   • 2026-07-14 — exclusão de usuário no admin ("not_admin"/"bad_jwt").
+#     Resolvido ali com requests direto (ver admin_users.py).
+#   • 2026-08-27 — redefinição de senha. O sogro do Diego recebeu o e-mail,
+#     abriu o link, e o POST /reset-password devolveu o erro genérico porque
+#     o PUT em /admin/users/<id> voltou 403. Confirmado nos auth_logs do
+#     Supabase às 00:13:42 e 00:14:08 UTC.
+#
+# Mandando a service_role EXPLICITAMENTE no header não existe sessão pra
+# poluir. Use SEMPRE esta função para auth.admin.*; o SDK fica só para leitura.
+def gotrue_admin(metodo, caminho, payload=None, timeout=10):
+    """Chama /auth/v1/admin/<caminho> com a service_role no header.
+
+    Devolve o objeto Response do requests. Levanta RuntimeError se faltar
+    configuração — falhar alto aqui é melhor que devolver 403 silencioso.
+    """
+    import requests  # local: helpers é importado cedo, requests nem sempre é usado
+
+    service_key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+                   or os.environ.get("SUPABASE_SERVICE_KEY"))
+    base_url = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+    if not service_key or not base_url:
+        raise RuntimeError("SUPABASE_URL/SERVICE_KEY ausentes para chamada admin")
+
+    return requests.request(
+        metodo,
+        f"{base_url}/auth/v1/admin/{caminho.lstrip('/')}",
+        headers={
+            "apikey": service_key,
+            "Authorization": f"Bearer {service_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=timeout,
+    )

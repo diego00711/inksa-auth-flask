@@ -14,7 +14,7 @@ import psycopg2.extras
 
 from gotrue.errors import AuthApiError
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, _extract_bearer_token
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, _extract_bearer_token, gotrue_admin
 from ..utils.audit import log_admin_action, log_admin_action_auto
 from ..utils.email_service import send_email, render_simple
 from ..utils.platform_settings import get_settings
@@ -1453,7 +1453,10 @@ def change_admin_password():
         if not user:
             return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
 
-        supabase_admin.auth.admin.update_user_by_id(str(user.id), {"password": new_password})
+        r = gotrue_admin("PUT", f"users/{user.id}", {"password": new_password})
+        if r.status_code not in (200, 204):
+            logger.error("Admin trocar senha: GoTrue %s — %s", r.status_code, (r.text or "")[:300])
+            return jsonify({"status": "error", "message": "Não foi possível alterar a senha"}), 502
         log_admin_action_auto("ChangePassword", "Admin alterou sua senha")
         return jsonify({"status": "success", "message": "Senha alterada com sucesso"}), 200
     except Exception as e:

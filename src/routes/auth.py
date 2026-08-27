@@ -5,7 +5,7 @@ import logging
 import re
 import requests
 from flask import Blueprint, request, jsonify
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, gotrue_admin
 from src.extensions import limiter
 
 auth_bp = Blueprint('auth_bp', __name__)
@@ -214,7 +214,7 @@ def google_login():
             is_new = True
             try:
                 new_meta = dict(meta); new_meta['user_type'] = 'client'
-                supabase_admin.auth.admin.update_user_by_id(str(user_id), {"user_metadata": new_meta})
+                gotrue_admin("PUT", f"users/{user_id}", {"user_metadata": new_meta})
             except Exception as e:
                 logger.warning("google_login: falha ao gravar user_type de %s: %s", user_id, e)
             _ensure_client_profile(str(user_id), meta)
@@ -653,9 +653,23 @@ def reset_password():
         if not user:
             return jsonify({"status": "error", "error": "Link expirado ou inválido. Solicite um novo."}), 401
 
-        # Atualiza a senha via admin API (service_role) — cliente dedicado, para
-        # não herdar sessão poluída por sign_in de usuário no cliente global.
-        supabase_admin.auth.admin.update_user_by_id(user.id, {"password": new_password})
+        # Atualiza a senha mandando a service_role NO HEADER.
+        #
+        # Aqui morava o bug: `supabase_admin.auth.admin.update_user_by_id` parecia
+        # certo (é o cliente dedicado), mas o supabase-py reaproveita sessão e
+        # mandava o token do último usuário logado. O GoTrue devolvia 403 e a
+        # exceção caía no `except` lá embaixo, virando "Erro ao redefinir a
+        # senha" — genérico, sem pista nenhuma pra quem estava tentando trocar.
+        resp = gotrue_admin("PUT", f"users/{user.id}", {"password": new_password})
+        if resp.status_code not in (200, 204):
+            logger.error(
+                "Falha ao redefinir senha do usuário %s: GoTrue %s — %s",
+                user.id, resp.status_code, (resp.text or "")[:300],
+            )
+            return jsonify({
+                "status": "error",
+                "error": "Não foi possível redefinir a senha. Tente novamente ou fale com o suporte.",
+            }), 502
         logger.info(f"Senha redefinida com sucesso para o usuário {user.id}")
         return jsonify({
             "status": "success",
