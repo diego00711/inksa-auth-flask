@@ -21,8 +21,8 @@ def public_support_info():
     if not conn:
         return jsonify({
             "email": "suporte@inksadelivery.com.br",
-            "whatsapp": "5549999679697",
-            "phone": "(49) 99967-9697",
+            "whatsapp": "5549998292320",
+            "phone": "(49) 99829-2320",
             "hours": "Seg a Sex, 8h às 18h",
             "platform_name": "Inksa Delivery",
         }), 200
@@ -33,8 +33,8 @@ def public_support_info():
             rows = {r["key"]: r["value"] for r in cur.fetchall()}
         return jsonify({
             "email": rows.get("contact_email") or "suporte@inksadelivery.com.br",
-            "whatsapp": rows.get("contact_whatsapp") or "5549999679697",
-            "phone": rows.get("contact_phone") or "(49) 99967-9697",
+            "whatsapp": rows.get("contact_whatsapp") or "5549998292320",
+            "phone": rows.get("contact_phone") or "(49) 99829-2320",
             "hours": rows.get("support_hours") or "Seg a Sex, 8h às 18h",
             "platform_name": rows.get("platform_name") or "Inksa Delivery",
         }), 200
@@ -42,8 +42,8 @@ def public_support_info():
         logger.exception("Erro em public_support_info")
         return jsonify({
             "email": "suporte@inksadelivery.com.br",
-            "whatsapp": "5549999679697",
-            "phone": "(49) 99967-9697",
+            "whatsapp": "5549998292320",
+            "phone": "(49) 99829-2320",
             "hours": "Seg a Sex, 8h às 18h",
             "platform_name": "Inksa Delivery",
         }), 200

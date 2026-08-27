@@ -38,10 +38,11 @@ def so_digitos(valor) -> str:
 def chave_de_busca(telefone) -> str:
     """Últimos 8 dígitos — é o que dá pra comparar com segurança.
 
-    O WhatsApp entrega '5549998292320' (com país). No cadastro o telefone vem
-    como '49999679697', às vezes com máscara e espaço ('4999934-6405 '), e
-    números antigos podem estar sem o 9 na frente. Comparar tudo dá falso
-    negativo; os últimos 8 dígitos são estáveis nos três casos.
+    O MESMO número chega escrito de jeitos diferentes: o WhatsApp entrega
+    '5549998292320' (com país) e no cadastro ele vem como '49998292320', às
+    vezes com máscara e espaço ('4999829-2320 '). Números antigos podem estar
+    sem o 9 na frente. Comparar tudo dá falso negativo; os últimos 8 dígitos
+    são estáveis nos três casos.
     """
     d = so_digitos(telefone)
     return d[-8:] if len(d) >= 8 else d
