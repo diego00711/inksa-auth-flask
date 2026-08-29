@@ -304,10 +304,23 @@ def handle_orders():
                        rp.restaurant_name,
                        rp.logo_url as restaurant_logo,
                        cp.first_name as client_first_name,
-                       cp.last_name as client_last_name
+                       cp.last_name as client_last_name,
+                       -- QUEM VEM BUSCAR. A coluna orders.deliveryman_name
+                       -- existe mas nasce NULA (ninguém escreve nela), então o
+                       -- parceiro não fazia ideia de quem ia aparecer no
+                       -- balcão. Vem do JOIN, que está sempre certo, em vez de
+                       -- um campo copiado que alguém precisa lembrar de
+                       -- preencher.
+                       dp.first_name    AS courier_first_name,
+                       dp.last_name     AS courier_last_name,
+                       dp.avatar_url    AS courier_avatar,
+                       dp.vehicle_type  AS courier_vehicle,
+                       dp.vehicle_plate AS courier_plate,
+                       dp.rating        AS courier_rating
                 FROM orders o
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 LEFT JOIN client_profiles cp ON o.client_id = cp.id
+                LEFT JOIN delivery_profiles dp ON o.delivery_id = dp.id
                 WHERE 1=1
             """
             params = []
