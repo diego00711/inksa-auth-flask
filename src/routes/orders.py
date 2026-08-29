@@ -10,6 +10,7 @@ import psycopg2
 import psycopg2.extras
 import logging
 import sentry_sdk
+import threading
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from src.extensions import limiter
 
@@ -46,7 +47,23 @@ def _get_fcm_token(cur, table: str, user_id: str):
 
 
 def _notify(token, title, body, data=None, urgente=False):
-    """Dispara push notification de forma defensiva — nunca propaga exceções.
+    """Dispara push notification SEM SEGURAR A RESPOSTA — e nunca propaga exceção.
+
+    ⚠️ EM THREAD, DE PROPÓSITO.
+
+    O envio ao FCM é uma chamada de rede a um serviço de fora, e leva de um a
+    três segundos. Estava no caminho crítico: a rota /complete validava o
+    código, fechava a entrega, liquidava o dinheiro e SÓ ENTÃO respondia — com
+    o push no meio. O entregador ficava olhando o modal girar depois de o
+    pedido já constar como entregue no app do parceiro e no do cliente.
+    Relatado pelo Diego no pedido #1002.
+
+    Push é aviso, não é o fato. Se falhar, o pedido continua entregue; se
+    demorar, ninguém deveria esperar por ele de pé na porta do cliente.
+
+    Thread daemon: morre com o processo, não segura desligamento do worker.
+    Não toca em banco — só fala com o FCM —, então não precisa de contexto de
+    aplicação nem de conexão emprestada.
 
     `urgente=True` manda pelo canal de alta importância do Android (som,
     vibração e heads-up mesmo com o app fechado ou com outro app por cima).
@@ -58,10 +75,19 @@ def _notify(token, title, body, data=None, urgente=False):
     """
     if not _send_push or not token:
         return
+
+    def _envia():
+        try:
+            _send_push(token, title, body, data or {}, urgente=urgente)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
+
     try:
-        _send_push(token, title, body, data or {}, urgente=urgente)
+        threading.Thread(target=_envia, daemon=True).start()
     except Exception as e:
-        logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
+        # Sem thread disponível, manda na hora: melhor lento que mudo.
+        logging.getLogger(__name__).warning(f"FCM sem thread, enviando inline: {e}")
+        _envia()
 
 
 def _pagar_indicacao(client_id, order_id):
