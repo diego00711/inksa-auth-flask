@@ -188,9 +188,22 @@ def _build_dashboard_payload(conn, date_from=None, date_to=None, limit=10, with_
     payload["kpis"]["newClientsToday"] = _safe_int(_fetchval(
         conn, f"SELECT COUNT(*)::int FROM {CLIENTS_TABLE} WHERE {_HOJE_SP('created_at')}", default=0))
 
+    # "Em andamento" = TODO estado em voo, não só o preparo.
+    #
+    # A lista antiga era ('preparing','on_the_way','in_progress'). Os dois
+    # últimos NUNCA existiram no sistema — o vocabulário real está no
+    # STATUS_DISPLAY_MAP do orders.py, e lá o "saiu para entrega" chama
+    # `delivering`. Resultado: dos seis estados em voo o painel enxergava um
+    # só, e um pedido aceito, pronto, aguardando retirada ou já na rua
+    # aparecia como zero. Foi o que aconteceu no primeiro pedido real.
+    #
+    # Ao mexer aqui, conferir contra o STATUS_DISPLAY_MAP: quem inventar
+    # status novo e esquecer desta lista some do painel sem avisar ninguém.
     row = _fetchrow(conn, f"""
         SELECT
-          SUM(CASE WHEN status IN ('preparing','on_the_way','in_progress') THEN 1 ELSE 0 END)::int AS in_progress,
+          SUM(CASE WHEN status IN ('pending','accepted','preparing','ready',
+                                   'accepted_by_delivery','delivering')
+                   THEN 1 ELSE 0 END)::int AS in_progress,
           SUM(CASE WHEN status IN ('cancelled','canceled') THEN 1 ELSE 0 END)::int AS canceled
         FROM {ORDERS_TABLE}
     """) or {}

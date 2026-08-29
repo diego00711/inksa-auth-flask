@@ -48,6 +48,96 @@ def delivery_token_required(f):
     return decorated_function
 
 # ==============================================
+# PERFIL PÚBLICO DO ENTREGADOR (quem vê é o cliente que está recebendo)
+# ==============================================
+@delivery_auth_profile_bp.route('/public-profile/<uuid:delivery_id>', methods=['GET', 'OPTIONS'])
+def delivery_public_profile(delivery_id):
+    """Nome, foto, nota e placa do entregador de um pedido em andamento.
+
+    POR QUE ESTA ROTA NASCEU DEPOIS DA TELA QUE A USA
+
+    O app do cliente já chamava `/api/delivery/public-profile/<id>` desde
+    sempre, mas ela NUNCA existiu no backend. A chamada respondia 404 e o
+    código do cliente engolia em silêncio (`.catch(() => null)` seguido de
+    `if (dr?.ok)`), então o card "Seu Entregador" simplesmente nunca aparecia
+    e ninguém via erro nenhum. Descoberto no primeiro pedido real, 29/08/2026.
+
+    A LIÇÃO: chamada de rede com falha silenciosa esconde o defeito em vez de
+    mostrá-lo. Um 404 aqui deveria ter aparecido em algum lugar no primeiro
+    dia.
+
+    SÓ DEVOLVE O QUE A TELA DESENHA. `cpf`, `cnh`, coordenada e situação
+    financeira não saem daqui — a tela não usa, e dado que não sai não vaza.
+
+    TRAVA DE DONO: só o cliente, o restaurante ou o entregador daquele pedido
+    (ou um admin) enxergam. Sem isso, qualquer pessoa logada poderia varrer a
+    tabela de entregadores atrás de telefone. É a mesma trava do
+    tracking_routes.py, e pelo mesmo motivo.
+    """
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
+
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if user_type != 'admin':
+                # Existe pedido ligando QUEM PERGUNTA a ESTE entregador?
+                tabela = {'client': 'client_profiles',
+                          'restaurant': 'restaurant_profiles',
+                          'delivery': 'delivery_profiles'}.get(user_type)
+                coluna = {'client': 'client_id',
+                          'restaurant': 'restaurant_id',
+                          'delivery': 'delivery_id'}.get(user_type)
+                if not tabela:
+                    return jsonify({"error": "Acesso não autorizado"}), 403
+
+                cur.execute(
+                    f"""SELECT 1 FROM orders o
+                         JOIN {tabela} p ON p.id = o.{coluna}
+                        WHERE o.delivery_id = %s AND p.user_id = %s
+                        LIMIT 1""",
+                    (str(delivery_id), str(user_id)),
+                )
+                if not cur.fetchone():
+                    return jsonify({"error": "Este entregador não é de um pedido seu"}), 403
+
+            cur.execute(
+                """SELECT first_name, last_name, avatar_url, rating,
+                          vehicle_plate, vehicle_type, phone
+                     FROM delivery_profiles WHERE id = %s""",
+                (str(delivery_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Entregador não encontrado"}), 404
+
+            d = dict(row)
+            return jsonify({"status": "success", "data": {
+                "first_name":    d.get('first_name'),
+                "last_name":     d.get('last_name'),
+                "avatar_url":    d.get('avatar_url'),
+                "rating":        float(d['rating']) if d.get('rating') is not None else 5.0,
+                "vehicle_plate": d.get('vehicle_plate'),
+                "vehicle_type":  d.get('vehicle_type'),
+                "phone":         d.get('phone'),
+            }}), 200
+    except Exception as e:
+        logging.exception("Erro no perfil público do entregador %s: %s", delivery_id, e)
+        return jsonify({"error": "Erro ao buscar entregador"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+# ==============================================
 # HEARTBEAT
 # ==============================================
 @delivery_auth_profile_bp.route('/heartbeat', methods=['POST', 'OPTIONS'])
