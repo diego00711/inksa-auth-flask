@@ -32,6 +32,24 @@ _DEFAULTS: dict[str, Decimal] = {
     "fixed_delivery_fee":         Decimal("3.00"),
     "per_km_delivery_fee":        Decimal("1.50"),
     "free_delivery_threshold_km": Decimal("2.00"),
+    # FATOR DE RUA — converte a distância em LINHA RETA na distância que a moto
+    # realmente roda.
+    #
+    # O frete é calculado com Haversine, que é a distância que um pássaro voa.
+    # Ninguém entrega em linha reta: contorna quarteirão, respeita mão única,
+    # atravessa em ponte. Sem correção, TODO frete sai barato — sempre, e mais
+    # ainda nas entregas curtas, que são a maioria numa cidade do porte de Lages.
+    #
+    # Medido na rua pelo Diego em 29/08/2026: Yo!Frango -> Rua Dr. Jorge Bleyer
+    # deu 1,00 km em linha reta e MAIS DE 1,5 km de percurso real. Erro de 50%.
+    # E como o primeiro km é grátis, aquele 1,00 km caía exatamente na faixa que
+    # zera o adicional: o pedido saiu com o frete base cravado.
+    #
+    # 1.4 é o número que a logística urbana usa pra malha de cidade. É
+    # aproximação, não verdade: quem acerta é roteamento de verdade (o que o
+    # Uber faz). Fica editável justamente pra calibrar com medições reais em vez
+    # de discutir o valor no código.
+    "road_distance_factor":       Decimal("1.40"),
     "commission_rate":            Decimal("0.10"),  # 0..1, não 10
     "delivery_base_fee":          Decimal("5.00"),  # legado (modelo antigo de repasse)
     "delivery_per_km_fee":        Decimal("1.00"),  # legado (modelo antigo de repasse)

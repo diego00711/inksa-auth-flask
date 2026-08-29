@@ -13,6 +13,39 @@ logger = logging.getLogger(__name__)
 delivery_calculator_bp = Blueprint('delivery_calculator', __name__)
 CORS(delivery_calculator_bp)  # Habilita CORS para este blueprint
 
+def distancia_de_rua(lat1, lon1, lat2, lon2, settings=None):
+    """Distância que a moto REALMENTE roda entre dois pontos, em km.
+
+    Haversine devolve a linha reta — a distância que um pássaro voa. Ninguém
+    entrega assim: contorna quarteirão, respeita mão única, atravessa em ponte.
+    Cobrar pela linha reta é cobrar a menos em TODA entrega, sempre.
+
+    Medido na rua pelo Diego em 29/08/2026: Yo!Frango -> Rua Dr. Jorge Bleyer
+    deu 1,00 km reto e mais de 1,5 km de percurso. Erro de 50% — e como o
+    primeiro km é grátis, esse 1,00 km caía justamente na faixa que zera o
+    adicional, e o pedido saiu com o frete base cravado.
+
+    O fator vem do platform_settings (road_distance_factor, padrão 1,40) pra
+    ser calibrado com medição real em vez de discutido no código.
+
+    ⚠️ ISTO É APROXIMAÇÃO, NÃO VERDADE. Quem acerta é roteamento de malha
+    viária, que é o que o Uber faz. Quando entrar um provedor de rota, ele
+    substitui o corpo desta função e mais nada muda de lugar — foi por isso que
+    as duas chamadas cruas de haversine viraram esta função só.
+    """
+    reta = haversine_distance(lat1, lon1, lat2, lon2)
+    try:
+        s = settings if settings is not None else get_settings()
+        fator = float(s.get("road_distance_factor") or 1.4)
+    except Exception:
+        fator = 1.4
+    # Fator abaixo de 1 encurtaria o percurso, o que é impossível: linha reta é
+    # o mínimo geométrico entre dois pontos.
+    if fator < 1:
+        fator = 1.0
+    return round(reta * fator, 2)
+
+
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calcula a distância entre duas coordenadas usando a fórmula de Haversine"""
     R = 6371  # Raio da Terra em km
@@ -149,7 +182,10 @@ def calculate_delivery_fee():
             r_lat = restaurant_data.get('latitude')
             r_lon = restaurant_data.get('longitude')
             if raio and r_lat and r_lon:
-                distance_km = haversine_distance(
+                # Entrega própria: o raio da loja também passa a valer sobre
+                # o percurso, não sobre a linha reta. Senão a loja diz "atendo
+                # até 3 km" e o entregador dela roda 4,2.
+                distance_km = distancia_de_rua(
                     float(r_lat), float(r_lon),
                     float(client_latitude), float(client_longitude)
                 )
@@ -189,9 +225,10 @@ def calculate_delivery_fee():
                 calculation_method = f"Taxa base R$ {fixed_fee:.2f} (restaurante sem localização cadastrada)"
             else:
                 # Calcular distância
-                distance_km = haversine_distance(
+                distance_km = distancia_de_rua(
                     float(restaurant_latitude), float(restaurant_longitude),
-                    float(client_latitude), float(client_longitude)
+                    float(client_latitude), float(client_longitude),
+                    settings=s,
                 )
                 logger.info(f"Distância calculada: {distance_km} km")
 
