@@ -18,6 +18,7 @@ import psycopg2.extras
 from flask import Blueprint, request, jsonify
 
 from ..utils.helpers import get_db_connection
+from ..utils.precos import preco_vigente, em_promocao, percentual_desconto
 
 logger = logging.getLogger(__name__)
 
@@ -518,6 +519,7 @@ def get_restaurant_menu(restaurant_id):
                     name,
                     description,
                     price,
+                    promo_price,
                     COALESCE(category, 'Outros') AS category,
                     is_available                 AS available,
                     image_url
@@ -528,7 +530,29 @@ def get_restaurant_menu(restaurant_id):
                 """,
                 (str(restaurant_id),),
             )
-            items = [_serialize(dict(r)) for r in cur.fetchall()]
+            # PROMOÇÃO — `price` sai daqui já valendo "o que você paga".
+            #
+            # Isso é de propósito e é o contrário do que parece natural. Se
+            # `price` continuasse sendo o cheio e a promoção viesse só num
+            # campo novo, todo lugar do app que já lê `price` (carrinho,
+            # total, "pedir de novo") cobraria o valor antigo — e o servidor,
+            # que valida com preco_vigente(), recusaria o pedido por
+            # divergência. O cliente veria "Preço dos itens inválido" sem ter
+            # feito nada. Ver utils/precos.py.
+            items = []
+            for r in cur.fetchall():
+                bruto = dict(r)
+                vigente = preco_vigente(bruto)
+                promo = em_promocao(bruto)
+                item = _serialize(bruto)
+                item['price'] = vigente
+                # Só existe quando a promoção vale de verdade: assim a tela
+                # não precisa decidir se desenha o riscado, ela só pergunta
+                # se o campo veio.
+                item['original_price'] = float(bruto['price']) if promo else None
+                item['discount_percent'] = percentual_desconto(bruto) if promo else 0
+                item.pop('promo_price', None)
+                items.append(item)
 
         # Group by category in Python — preserves insertion order (Python 3.7+)
         grouped: dict[str, list] = {}

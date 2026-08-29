@@ -11,6 +11,7 @@ import logging
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from functools import wraps
 from flask_cors import CORS
+from ..utils.precos import normalizar_promo
 
 logging.basicConfig(level=logging.INFO)
 menu_bp = Blueprint('menu_bp', __name__)
@@ -108,7 +109,7 @@ def get_menu_items(conn):
         # desenhar uma linha de texto.
         cur.execute(
             """SELECT mi.id, mi.name, mi.description, mi.price, mi.category,
-                      mi.is_available, mi.image_url,
+                      mi.is_available, mi.image_url, mi.promo_price,
                       COALESCE((
                         SELECT array_agg(g.nome ORDER BY g.ordem, g.created_at)
                           FROM menu_item_option_groups g
@@ -156,11 +157,20 @@ def add_menu_item(conn):
                                "se o pedido cabe numa moto ou precisa de carro.",
                 }), 400
 
+            # PROMOÇÃO — validada no servidor, não no navegador. Campo vazio
+            # apaga a promoção; valor maior ou igual ao preço normal é recusado
+            # com texto pronto pra mostrar. A regra está em utils/precos.py.
+            try:
+                promo = normalizar_promo(data.get('promo_price'), data.get('price'))
+            except ValueError as e:
+                return jsonify({"status": "error", "error": "promo_invalida",
+                                "message": str(e)}), 400
+
             # Inserir o item com o restaurant_id correto
             cur.execute(
-                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), peso)
+                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg, promo_price) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), peso, promo)
             )
             new_item = make_serializable(dict(cur.fetchone()))
             conn.commit()
@@ -197,16 +207,25 @@ def update_menu_item(conn, item_id):
                            "se o pedido cabe numa moto ou precisa de carro.",
             }), 400
 
+        # Mesma validação da criação. Sem ela aqui, bastava criar o item sem
+        # promoção e depois editar pra escapar da regra — foi exatamente assim
+        # que o peso vazava antes de ganhar a checagem nos dois lugares.
+        try:
+            promo = normalizar_promo(data.get('promo_price'), data.get('price'))
+        except ValueError as e:
+            return jsonify({"status": "error", "error": "promo_invalida",
+                            "message": str(e)}), 400
+
         # Atualizar o item
         cur.execute(
             """
             UPDATE menu_items
             SET name = %s, description = %s, price = %s, category = %s, is_available = %s, image_url = %s,
-                peso_kg = %s
+                peso_kg = %s, promo_price = %s
             WHERE id = %s
             RETURNING *
             """,
-            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), peso, str(item_id))
+            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), peso, promo, str(item_id))
         )
         updated_item = make_serializable(dict(cur.fetchone()))
         conn.commit()

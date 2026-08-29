@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Helpers de cálculo (admin-configuráveis via platform_settings)
 from ..utils.platform_settings import calculate_courier_payout, calculate_platform_commission
+from ..utils.precos import preco_vigente
 from ..utils.helpers import get_user_id_from_token, supabase_admin
 from .orders import generate_verification_code
 from ..utils.coupons import evaluate_coupon, consume_coupon, contar_usos_do_cliente
@@ -797,13 +798,19 @@ def criar_preferencia_mercado_pago():
                     continue
 
                 # Itens COM menu_item_id — validar preço contra o banco
-                db_result = supabase_client.table('menu_items').select('price, name').eq('id', menu_item_id).execute()
+                db_result = supabase_client.table('menu_items').select('price, promo_price, name').eq('id', menu_item_id).execute()
                 if not db_result.data:
                     logging.error(f"❌ Item {menu_item_id} não encontrado no banco — pedido rejeitado")
                     supabase_client.table('orders').delete().eq('id', pedido_id).execute()
                     return jsonify({"erro": f"Item de cardápio inválido: {titulo}"}), 400
 
-                preco_real = float(db_result.data[0]['price'])
+                # Promoção do item entra AQUI, pelo mesmo resolvedor que o
+                # outro caminho usa. Ler 'price' cru neste ponto faria o
+                # servidor cobrar o preço cheio de um item anunciado com
+                # desconto — e como ele COMPARA com o que o app mandou, o
+                # pedido seria recusado com "Preço dos itens inválido" sem o
+                # cliente ter feito nada errado.
+                preco_real = preco_vigente(db_result.data[0])
                 # Opções (corte, molho, adicional) somam ao preço do item, com
                 # valor lido do banco. Sem isto aqui, o pedido ONLINE cobraria
                 # o item pelado e a loja entregaria o adicional de graça — a
@@ -1126,10 +1133,12 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
         if not menu_item_id:
             # Itens sem id (ex.: taxa) sao ignorados no subtotal de produtos
             continue
-        db = supabase_client.table('menu_items').select('price').eq('id', menu_item_id).execute()
+        db = supabase_client.table('menu_items').select('price, promo_price').eq('id', menu_item_id).execute()
         if not db.data:
             raise ValueError("Item de cardápio inválido.")
-        preco_real = float(db.data[0]['price'])
+        # Mesmo resolvedor do fluxo online. Ver utils/precos.py — o motivo de
+        # ser função e não duas linhas soltas está escrito lá.
+        preco_real = preco_vigente(db.data[0])
         # Opções escolhidas (corte, molho, adicional) entram no preço AQUI,
         # com valor lido do banco. Ver preco_extra_das_opcoes.
         extra, _desc = preco_extra_das_opcoes(menu_item_id, item.get('opcoes'))
