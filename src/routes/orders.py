@@ -776,9 +776,23 @@ def complete_order(order_id):
                     return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
                 confirmado_por, nota_confirmacao = 'partner_no_code', motivo_sem_codigo[:300]
 
+            # completed_at = A HORA EM QUE A ENTREGA FECHOU, e nada mais.
+            #
+            # A coluna existia e ninguém escrevia nela. Sem ela, a tela do
+            # parceiro caía no `updated_at` pra dizer quanto o pedido levou — e
+            # `updated_at` muda toda vez que QUALQUER coisa toca a linha
+            # (gerador de repasses, arquivamento, um job de madrugada). O
+            # resultado: o pedido #1000 levou 9 minutos e a tela dizia
+            # "levou 240min", crescendo a cada rotina de fundo. Parecia um
+            # cronômetro que não parava; era um carimbo errado sendo
+            # empurrado pra frente.
+            #
+            # Só grava se ainda estiver vazio (COALESCE): se um dia esta rota
+            # for chamada duas vezes, a hora da PRIMEIRA conclusão é a certa.
             cur.execute(
                 "UPDATE orders SET status = 'delivered', delivery_confirmed_by = %s, "
-                "delivery_confirm_note = %s, updated_at = NOW() WHERE id = %s",
+                "delivery_confirm_note = %s, completed_at = COALESCE(completed_at, NOW()), "
+                "updated_at = NOW() WHERE id = %s",
                 (confirmado_por, nota_confirmacao, str(order_id))
             )
             # Busca client_id, delivery_id e restaurant_id antes de fechar o cursor
@@ -981,7 +995,10 @@ def report_delivery_incident(order_id):
             return_code = generate_verification_code() if bot_outcome == 'awaiting_restaurant' else None
 
             cur.execute(
-                "UPDATE orders SET status = 'delivery_failed', cancellation_reason = %s, updated_at = NOW() WHERE id = %s",
+                # completed_at também aqui: entrega não realizada É um desfecho.
+                # Sem o carimbo, a tela cai no updated_at e mente o tempo.
+                "UPDATE orders SET status = 'delivery_failed', cancellation_reason = %s, "
+                "completed_at = COALESCE(completed_at, NOW()), updated_at = NOW() WHERE id = %s",
                 (f"delivery_incident:{reason}", str(order_id)),
             )
             cur.execute(
@@ -2440,6 +2457,7 @@ def cancel_order_by_client(order_id):
                 UPDATE orders
                    SET status = 'cancelled',
                        cancellation_reason = 'cancelled_by_client',
+                       completed_at = COALESCE(completed_at, NOW()),
                        updated_at = NOW()
                  WHERE id = %s AND status IN ('awaiting_payment', 'pending')
                 RETURNING id
