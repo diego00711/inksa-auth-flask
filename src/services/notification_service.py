@@ -70,22 +70,38 @@ def status_firebase() -> dict:
     }
 
 
-def enviar_teste(token: str) -> dict:
+def enviar_teste(token: str, user_type: str = "client") -> dict:
     """Push de teste com o motivo da falha DE VOLTA, não só um bool.
 
     send_push_notification devolve True/False e joga a exceção no log. Pra
     diagnosticar um envio que não chega, o texto do erro do FCM é a única
     coisa que importa — então aqui ele sobe junto.
+
+    O TESTE SAI IGUAL AO REAL, e isso é o ponto.
+
+    Antes ele mandava {"tipo": "teste"} sem urgência: ia pro canal padrão do
+    Android (silencioso) e sem o `type` que o service worker do web usa pra
+    decidir se o aviso fica na tela. Ou seja, testava um caminho que nenhum
+    pedido percorre — dava "enviado com sucesso" e não dizia nada sobre o que
+    acontece quando um pedido chega de verdade.
+
+    Agora, pra restaurante e entregador, o teste vai pelo MESMO caminho
+    urgente do pedido novo: canal de alta importância no APK, e
+    requireInteraction + vibração no web. Se tocar aqui, toca no pedido.
     """
     st = status_firebase()
     if not st["pode_enviar"]:
         return {"enviado": False, "erro": st["motivo"], "status": st}
     try:
+        # Mesmo `type` que o pedido real manda, pra o service worker do web
+        # tratar igual. Ver o worker: requireInteraction: d.type === 'new_order'.
+        tipo_evento = {"restaurant": "new_order", "delivery": "new_delivery"}.get(user_type)
         message_id = messaging.send(_montar_mensagem(
             token,
-            "Inksa — teste de notificação",
-            "Se você está lendo isso, o push está funcionando de ponta a ponta.",
-            {"tipo": "teste"},
+            "Inksa — teste de alarme",
+            "Se você ouviu isto, o aviso de pedido novo vai funcionar igual.",
+            {"tipo": "teste", **({"type": tipo_evento} if tipo_evento else {})},
+            urgente=bool(tipo_evento),
         ))
         return {"enviado": True, "message_id": message_id, "status": st}
     except messaging.UnregisteredError:

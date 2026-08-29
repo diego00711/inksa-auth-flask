@@ -1869,7 +1869,8 @@ def test_push_send():
     if not token:
         return jsonify({"status": "error", "message": "Esse usuário não tem token salvo — o aparelho dele nunca registrou."}), 404
 
-    resultado = enviar_teste(token)
+    # Passa o tipo pra o teste sair igual ao push real daquele perfil.
+    resultado = enviar_teste(token, user_type)
     log_admin_action_auto(
         "PushTest",
         f"{user_type} {user_id} — enviado={resultado.get('enviado')} {resultado.get('erro') or ''}".strip(),
