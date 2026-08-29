@@ -798,7 +798,7 @@ def criar_preferencia_mercado_pago():
                     continue
 
                 # Itens COM menu_item_id — validar preço contra o banco
-                db_result = supabase_client.table('menu_items').select('price, promo_price, name').eq('id', menu_item_id).execute()
+                db_result = supabase_client.table('menu_items').select('price, promo_price, name, is_available').eq('id', menu_item_id).execute()
                 if not db_result.data:
                     logging.error(f"❌ Item {menu_item_id} não encontrado no banco — pedido rejeitado")
                     supabase_client.table('orders').delete().eq('id', pedido_id).execute()
@@ -810,6 +810,23 @@ def criar_preferencia_mercado_pago():
                 # desconto — e como ele COMPARA com o que o app mandou, o
                 # pedido seria recusado com "Preço dos itens inválido" sem o
                 # cliente ter feito nada errado.
+                # ITEM ESGOTADO NÃO FECHA PEDIDO.
+                #
+                # Desde que o cardápio passou a MOSTRAR o esgotado (cinza, sem
+                # botão), esta virou a única barreira que não depende de o app
+                # estar certo: carrinho montado antes de a loja marcar como
+                # esgotado, tela em cache, ou app com defeito. Sem isto, a
+                # cozinha recebe um pedido que não tem como preparar e quem
+                # descobre é o cliente, esperando.
+                if db_result.data[0].get('is_available') is False:
+                    logging.warning("Item esgotado no fechamento: %s (%s)", titulo, menu_item_id)
+                    supabase_client.table('orders').delete().eq('id', pedido_id).execute()
+                    return jsonify({
+                        "erro": f"'{titulo}' acabou de ficar indisponível nesta loja. "
+                                "Volte ao carrinho e remova o item pra continuar.",
+                        "item": titulo,
+                    }), 409
+
                 preco_real = preco_vigente(db_result.data[0])
                 # Opções (corte, molho, adicional) somam ao preço do item, com
                 # valor lido do banco. Sem isto aqui, o pedido ONLINE cobraria
@@ -1133,9 +1150,15 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
         if not menu_item_id:
             # Itens sem id (ex.: taxa) sao ignorados no subtotal de produtos
             continue
-        db = supabase_client.table('menu_items').select('price, promo_price').eq('id', menu_item_id).execute()
+        db = supabase_client.table('menu_items').select('price, promo_price, is_available').eq('id', menu_item_id).execute()
         if not db.data:
             raise ValueError("Item de cardápio inválido.")
+        # Mesma recusa do fluxo online. Os DOIS caminhos criam pedido; regra
+        # que entra só num deles vira buraco — é a lição deste arquivo.
+        if db.data[0].get('is_available') is False:
+            raise ValueError("Um item do seu carrinho ficou indisponível. "
+                             "Volte ao carrinho e remova o item pra continuar.")
+
         # Mesmo resolvedor do fluxo online. Ver utils/precos.py — o motivo de
         # ser função e não duas linhas soltas está escrito lá.
         preco_real = preco_vigente(db.data[0])

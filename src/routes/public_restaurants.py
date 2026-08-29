@@ -525,11 +525,29 @@ def get_restaurant_menu(restaurant_id):
                     image_url
                 FROM menu_items
                 WHERE restaurant_id = %s
-                  AND is_available = TRUE
-                ORDER BY category, name
+                ORDER BY category, is_available DESC, name
                 """,
                 (str(restaurant_id),),
             )
+            # ITEM ESGOTADO APARECE, CINZA — não some mais.
+            #
+            # Antes havia `AND is_available = TRUE` aqui: o item simplesmente
+            # desaparecia do cardápio. Some do cliente, mas some também a
+            # informação de que a loja TEM aquilo — um cardápio de 40 itens com
+            # 12 esgotados parecia um cardápio de 28, e a loja menor do que é.
+            #
+            # Agora vêm todos, com o campo `available`, e a tela desenha o
+            # esgotado apagado e sem botão. A ordenação põe os disponíveis
+            # primeiro DENTRO de cada categoria — quem está comprando não
+            # deveria rolar por cima do que não pode comprar.
+            #
+            # ⚠️ ISTO NÃO É SÓ VISUAL. Com o item visível, três lugares que
+            # dependiam de ele não existir passam a importar:
+            #   1. o carrinho pode receber esgotado (a tela bloqueia o toque);
+            #   2. o "pedir de novo" precisa filtrar (usePedirDeNovo);
+            #   3. o servidor precisa RECUSAR no fechamento do pedido — é a
+            #      única barreira que não depende de o app estar certo.
+            # Os três foram tratados junto com esta mudança.
             # PROMOÇÃO — `price` sai daqui já valendo "o que você paga".
             #
             # Isso é de propósito e é o contrário do que parece natural. Se
