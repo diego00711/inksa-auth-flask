@@ -441,7 +441,15 @@ def handle_orders():
                     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
                         rest_token = _get_fcm_token(_ncur, 'restaurant_profiles', new_order['restaurant_id'])
                     _notify(rest_token, "Novo pedido recebido!", "Voce tem um novo pedido para confirmar",
-                            {"order_id": new_order['id']}, urgente=True)
+                            # `type` NÃO é enfeite: o service worker do web usa
+                            # ele pra decidir requireInteraction, que é o que
+                            # faz o aviso FICAR na tela em vez de sumir em
+                            # segundos. O worker esperava 'new_order' e o
+                            # backend nunca mandava type nenhum — então a
+                            # notificação do pedido novo se apagava sozinha,
+                            # justamente a que precisa insistir.
+                            {"order_id": new_order['id'], "type": "new_order"},
+                            urgente=True)
                 except Exception as _e:
                     logger.warning(f"FCM pedido criado: {_e}")
 
@@ -611,7 +619,10 @@ def update_order_status(order_id):
                                 for _tk in _tokens:
                                     _notify(_tk, "Entrega disponivel! 🛵",
                                             "Um pedido esta pronto para coleta",
-                                            {"order_id": str(order_id), "status": "ready"},
+                                            {"order_id": str(order_id), "status": "ready",
+                                             # idem: o worker do entregador
+                                             # espera 'new_delivery'.
+                                             "type": "new_delivery"},
                                             urgente=True)
                         except Exception:
                             logger.warning("Push de entrega disponível falhou", exc_info=True)
