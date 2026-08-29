@@ -215,8 +215,8 @@ DELIVERY_INCIDENT_POLICY = {
     'payment_issue':      {'fault': 'none',       'pay_restaurant': False, 'pay_courier': False, 'refund_client': False},
 }
 
-def generate_verification_code(length=4):
-    """Código de 4 caracteres que autoriza retirada e entrega.
+def generate_verification_code(length=6):
+    """Código NUMÉRICO de 6 dígitos que autoriza retirada e entrega.
 
     secrets, NÃO random: o `random` do Python é Mersenne Twister, previsível
     depois de observar saídas suficientes. E estes códigos não são enfeite —
@@ -224,14 +224,28 @@ def generate_verification_code(length=4):
     retirada é o que tira o pedido do balcão. Quem consegue prever a sequência
     fecha entrega sem entregar.
 
-    Alfabeto sem I/O/0/1 pra não confundir na leitura em voz alta: 32
-    caracteres, 1.048.576 combinações. O tamanho sozinho não protege — quem
-    protege é isto somado ao limite de tentativas nas rotas /pickup e
-    /complete.
+    POR QUE 6 DÍGITOS, E NÃO 4
+
+    Era 4 caracteres de um alfabeto de 32 (letras e números, sem I/O/0/1):
+    1.048.576 combinações. Passar pra número puro facilita a vida de quem
+    digita — teclado numérico, sem confundir O com zero, fácil de falar em voz
+    alta —, mas encurta o espaço de busca de um jeito perigoso.
+
+    A conta, contra o limite de 10 tentativas/min das rotas /pickup e
+    /complete, e considerando que um pedido vive cerca de uma hora:
+
+        4 dígitos  =    10.000 -> 600 tentativas na janela = 6% de chance
+        6 dígitos  = 1.000.000 -> 600 tentativas na janela = 0,06% de chance
+
+    Seis dígitos devolvem a segurança que os 4 alfanuméricos tinham. Quatro
+    dígitos numéricos NÃO servem aqui: 6% por pedido é alto demais pra uma
+    fraude que fecha entrega sem entregar.
+
+    ⚠️ O que protege não é o tamanho sozinho — é o tamanho SOMADO ao limite de
+    tentativas. Se um dia alguém tirar o @limiter dessas rotas, isto aqui vira
+    vidraça.
     """
-    chars = string.ascii_uppercase.replace('I', '').replace('O', '')
-    chars += string.digits.replace('0', '').replace('1', '')
-    return ''.join(secrets.choice(chars) for _ in range(length))
+    return ''.join(secrets.choice(string.digits) for _ in range(length))
 
 def is_valid_status_transition(current_status, new_status):
     valid_transitions = {

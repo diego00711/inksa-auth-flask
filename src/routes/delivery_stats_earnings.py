@@ -206,7 +206,7 @@ def get_dashboard_stats():
             logger.info(f"🚚 Buscando pedidos ativos para profile_id: {profile_id}")
             cur.execute("""
                 SELECT
-                    o.id, o.status, o.total_amount, o.delivery_fee, o.created_at,
+                    o.id, o.numero, o.status, o.total_amount, o.delivery_fee, o.created_at,
                     o.valor_repassado_entregador,
                     o.delivery_address, o.pickup_code,
                     o.payment_method, o.change_for,
@@ -228,6 +228,7 @@ def get_dashboard_stats():
             for order in cur.fetchall():
                 active_orders.append({
                     'id': str(order['id']),
+                    'numero': order.get('numero'),
                     'status': order['status'],
                     'total_amount': float(order.get('total_amount') or 0.0),
                     'delivery_fee': float(order.get('delivery_fee') or 0.0),
@@ -344,7 +345,7 @@ def get_earnings_history():
             # Entregas detalhadas
             cur.execute("""
                 SELECT
-                    o.id, o.status, o.total_amount,
+                    o.id, o.numero, o.status, o.total_amount,
                     COALESCE(o.valor_repassado_entregador, o.delivery_fee) AS delivery_fee,
                     o.created_at,
                     o.delivery_address,
