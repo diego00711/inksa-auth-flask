@@ -10,7 +10,6 @@ import psycopg2
 import psycopg2.extras
 import logging
 import sentry_sdk
-import threading
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from src.extensions import limiter
 
@@ -47,23 +46,23 @@ def _get_fcm_token(cur, table: str, user_id: str):
 
 
 def _notify(token, title, body, data=None, urgente=False):
-    """Dispara push notification SEM SEGURAR A RESPOSTA — e nunca propaga exceção.
+    """Dispara push notification de forma defensiva — nunca propaga exceções.
 
-    ⚠️ EM THREAD, DE PROPÓSITO.
+    ⚠️ ENVIO SÍNCRONO, E ISSO É DELIBERADO.
 
-    O envio ao FCM é uma chamada de rede a um serviço de fora, e leva de um a
-    três segundos. Estava no caminho crítico: a rota /complete validava o
-    código, fechava a entrega, liquidava o dinheiro e SÓ ENTÃO respondia — com
-    o push no meio. O entregador ficava olhando o modal girar depois de o
-    pedido já constar como entregue no app do parceiro e no do cliente.
-    Relatado pelo Diego no pedido #1002.
+    Em 29/08/2026 eu troquei isto por uma thread daemon, pra que a rota
+    /complete respondesse sem esperar o FCM (o entregador via o modal girar
+    ~2s depois de o pedido já constar entregue nos outros apps).
 
-    Push é aviso, não é o fato. Se falhar, o pedido continua entregue; se
-    demorar, ninguém deveria esperar por ele de pé na porta do cliente.
+    REVERTIDO NO MESMO DIA: logo após o deploy, os pushes de "pedido aceito" e
+    "pedido retirado" pararam de chegar. Não consegui provar a causa — a
+    configuração do worker fica no painel do Render e eu não a enxergo —, mas
+    o fato é que funcionava antes e parou depois.
 
-    Thread daemon: morre com o processo, não segura desligamento do worker.
-    Não toca em banco — só fala com o FCM —, então não precisa de contexto de
-    aplicação nem de conexão emprestada.
+    A troca estava errada de qualquer jeito: dois segundos de espera incomodam;
+    aviso que não chega faz o cliente achar que o pedido sumiu. Se um dia isso
+    voltar a incomodar, o caminho certo é fila de verdade (worker separado),
+    não thread solta dentro do processo web.
 
     `urgente=True` manda pelo canal de alta importância do Android (som,
     vibração e heads-up mesmo com o app fechado ou com outro app por cima).
@@ -75,19 +74,10 @@ def _notify(token, title, body, data=None, urgente=False):
     """
     if not _send_push or not token:
         return
-
-    def _envia():
-        try:
-            _send_push(token, title, body, data or {}, urgente=urgente)
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
-
     try:
-        threading.Thread(target=_envia, daemon=True).start()
+        _send_push(token, title, body, data or {}, urgente=urgente)
     except Exception as e:
-        # Sem thread disponível, manda na hora: melhor lento que mudo.
-        logging.getLogger(__name__).warning(f"FCM sem thread, enviando inline: {e}")
-        _envia()
+        logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
 
 
 def _pagar_indicacao(client_id, order_id):
