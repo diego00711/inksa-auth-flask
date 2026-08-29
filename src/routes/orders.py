@@ -45,12 +45,21 @@ def _get_fcm_token(cur, table: str, user_id: str):
         return None
 
 
-def _notify(token, title, body, data=None):
-    """Dispara push notification de forma defensiva — nunca propaga exceções."""
+def _notify(token, title, body, data=None, urgente=False):
+    """Dispara push notification de forma defensiva — nunca propaga exceções.
+
+    `urgente=True` manda pelo canal de alta importância do Android (som,
+    vibração e heads-up mesmo com o app fechado ou com outro app por cima).
+
+    Só DOIS eventos são urgentes: "novo pedido" pro parceiro e "entrega
+    disponível" pro entregador. São os únicos em que alguém está parado
+    esperando o aviso pra agir. Se tudo virar urgente, nada é — e a primeira
+    coisa que a pessoa faz é desligar a notificação do app inteiro.
+    """
     if not _send_push or not token:
         return
     try:
-        _send_push(token, title, body, data or {})
+        _send_push(token, title, body, data or {}, urgente=urgente)
     except Exception as e:
         logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
 
@@ -405,7 +414,7 @@ def handle_orders():
                     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
                         rest_token = _get_fcm_token(_ncur, 'restaurant_profiles', new_order['restaurant_id'])
                     _notify(rest_token, "Novo pedido recebido!", "Voce tem um novo pedido para confirmar",
-                            {"order_id": new_order['id']})
+                            {"order_id": new_order['id']}, urgente=True)
                 except Exception as _e:
                     logger.warning(f"FCM pedido criado: {_e}")
 
@@ -575,7 +584,8 @@ def update_order_status(order_id):
                                 for _tk in _tokens:
                                     _notify(_tk, "Entrega disponivel! 🛵",
                                             "Um pedido esta pronto para coleta",
-                                            {"order_id": str(order_id), "status": "ready"})
+                                            {"order_id": str(order_id), "status": "ready"},
+                                            urgente=True)
                         except Exception:
                             logger.warning("Push de entrega disponível falhou", exc_info=True)
             except Exception as _e:

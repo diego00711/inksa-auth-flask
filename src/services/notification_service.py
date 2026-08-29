@@ -94,7 +94,25 @@ def enviar_teste(token: str) -> dict:
         return {"enviado": False, "erro": f"{type(e).__name__}: {e}", "status": st}
 
 
-def _montar_mensagem(token: str, title: str, body: str, data: dict = None):
+# Canal URGENTE do Android. Existe pra dois eventos e só dois: "novo pedido"
+# pro parceiro e "nova entrega" pro entregador. São os únicos em que alguém
+# está esperando o aviso pra AGIR — o resto (aceito, a caminho, entregue) é
+# informativo e não merece furar a atenção de ninguém.
+#
+# POR QUE UM CANAL, E NÃO SÓ "sound" NA MENSAGEM
+# No Android 8+ quem manda no som, na vibração e no heads-up é o CANAL, não a
+# mensagem. Mandar `sound` numa notificação cujo canal não existe não faz
+# barulho nenhum — cai no canal padrão, que é justamente o silencioso. O canal
+# precisa ser criado pelo app (PushNotifications.createChannel) com o MESMO id
+# daqui, senão isto vira enfeite.
+#
+# ⚠️ O id é contrato entre este arquivo e o JS dos apps. Mudar de um lado só
+# faz o som sumir sem erro nenhum em lugar nenhum.
+CANAL_URGENTE = 'inksa_urgente'
+
+
+def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
+                     urgente: bool = False):
     """Monta a Message do FCM. Existe pra corrigir o PUSH DUPLICADO.
 
     O bug: a mensagem ia com `notification=` no nível de cima. No WEB, isso faz
@@ -118,11 +136,23 @@ def _montar_mensagem(token: str, title: str, body: str, data: dict = None):
     """
     extra = {k: str(v) for k, v in (data or {}).items()}
     corpo_dados = {**extra, "title": title, "body": body}
+    notif = messaging.AndroidNotification(title=title, body=body)
+    config = {}
+    if urgente:
+        # priority='high' acorda o aparelho em Doze; sem isso o push pode
+        # esperar a próxima janela de sincronismo e chegar minutos depois —
+        # inútil pra um pedido esperando aceite.
+        notif = messaging.AndroidNotification(
+            title=title, body=body,
+            channel_id=CANAL_URGENTE,
+            sound='default',
+            default_vibrate_timings=True,
+        )
+        config['priority'] = 'high'
+
     return messaging.Message(
-        data=corpo_dados,
-        android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(title=title, body=body),
-        ),
+        data={**corpo_dados, 'urgente': '1' if urgente else '0'},
+        android=messaging.AndroidConfig(notification=notif, **config),
         token=token,
     )
 
@@ -167,7 +197,8 @@ def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> d
     return resultado
 
 
-def send_push_notification(token: str, title: str, body: str, data: dict = None) -> bool:
+def send_push_notification(token: str, title: str, body: str, data: dict = None,
+                           urgente: bool = False) -> bool:
     """Envia push notification via FCM usando firebase_admin. Retorna True se sucesso."""
     if not token:
         logger.warning("FCM: token ausente, notificacao ignorada")
@@ -177,7 +208,7 @@ def send_push_notification(token: str, title: str, body: str, data: dict = None)
         return False
 
     try:
-        response = messaging.send(_montar_mensagem(token, title, body, data))
+        response = messaging.send(_montar_mensagem(token, title, body, data, urgente=urgente))
         logger.info("FCM: notificacao enviada — message_id=%s token=%s...", response, token[:10])
         return True
     except messaging.UnregisteredError:
