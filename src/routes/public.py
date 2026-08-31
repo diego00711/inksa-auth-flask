@@ -84,6 +84,106 @@ def public_app_config():
         conn.close()
 
 
+@public_bp.get("/tarifa-entrega")
+def public_tarifa_entrega():
+    """A tabela do frete, pra quem quiser mostrar a conta. Sem autenticacao.
+
+    Existe por causa de um erro concreto: a landing page ganhou uma balanca
+    interativa que demonstra "o frete acompanha o peso", e os numeros foram
+    CRAVADOS no HTML, copiados dos padroes do codigo. No mesmo dia ja estavam
+    errados em tres pontos, porque o admin tinha valores diferentes (primeiro
+    km gratis 0 e nao 1, fator de rua 1,3 e nao 1,4, adicional de utilitario
+    R$ 15 e nao R$ 25). Uma demonstracao que mente sobre o proprio preco e
+    pior que nao ter demonstracao.
+
+    Nao ha segredo aqui: e a mesma conta que o cliente ve no carrinho, e o
+    site ja publica a comissao. O que este endpoint evita e a copia divergir.
+
+    As chaves e os padroes sao os MESMOS que utils/frete.py e utils/carga.py
+    usam — se um dia mudarem la, mudam aqui junto, porque saem do mesmo
+    platform_settings. O que nao da pra evitar por codigo e a duplicacao dos
+    valores de fallback; por isso eles apontam pros modulos de origem.
+    """
+    from ..utils.carga import capacidades
+
+    # Padroes iguais aos de utils/frete.py (base/km/livre) e utils/carga.py
+    # (adicionais e raios). Servem so pra quando o banco nao responde.
+    padrao = {
+        "fixed_delivery_fee": 5.0,
+        "per_km_delivery_fee": 1.5,
+        "free_delivery_threshold_km": 1.0,
+        "road_distance_factor": 1.4,
+        "frete_adicional_carro": 8.0,
+        "frete_km_carro": 2.5,
+        "frete_adicional_utilitario": 25.0,
+        "frete_km_utilitario": 3.5,
+        "platform_max_delivery_radius": 15.0,
+        "delivery_radius_bike_km": 0.0,
+        "delivery_radius_moto_km": 0.0,
+        "delivery_radius_carro_km": 0.0,
+        "delivery_radius_utilitario_km": 0.0,
+    }
+
+    def _f(bruto, default):
+        try:
+            v = float(str(bruto).replace(",", "."))
+        except (TypeError, ValueError):
+            return default
+        return v
+
+    valores = dict(padrao)
+    bruto_settings = {}
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    "SELECT key, value FROM platform_settings WHERE key = ANY(%s)",
+                    (list(padrao.keys()) + [f"capacidade_kg_{v}" for v in
+                     ("bike", "moto", "carro", "utilitario")],),
+                )
+                for row in cur.fetchall():
+                    bruto_settings[row["key"]] = row["value"]
+            for chave, default in padrao.items():
+                valores[chave] = _f(bruto_settings.get(chave), default)
+        except Exception:
+            logger.exception("Erro em public_tarifa_entrega — devolvendo padroes")
+        finally:
+            conn.close()
+
+    caps = capacidades(bruto_settings)
+    raio_global = valores["platform_max_delivery_radius"]
+
+    def _raio(chave):
+        v = valores.get(f"delivery_radius_{chave}_km") or 0.0
+        return v if v > 0 else raio_global
+
+    return jsonify({
+        "base": valores["fixed_delivery_fee"],
+        "por_km": valores["per_km_delivery_fee"],
+        "km_gratis": valores["free_delivery_threshold_km"],
+        "fator_rua": valores["road_distance_factor"],
+        "veiculos": [
+            {"chave": "bike", "rotulo": "bicicleta",
+             "ate_kg": caps["bike"], "adicional": 0.0, "km": None,
+             "raio_coleta_km": _raio("bike")},
+            {"chave": "moto", "rotulo": "moto",
+             "ate_kg": caps["moto"], "adicional": 0.0, "km": None,
+             "raio_coleta_km": _raio("moto")},
+            {"chave": "carro", "rotulo": "carro",
+             "ate_kg": caps["carro"],
+             "adicional": valores["frete_adicional_carro"],
+             "km": valores["frete_km_carro"],
+             "raio_coleta_km": _raio("carro")},
+            {"chave": "utilitario", "rotulo": "utilitário",
+             "ate_kg": caps["utilitario"],
+             "adicional": valores["frete_adicional_utilitario"],
+             "km": valores["frete_km_utilitario"],
+             "raio_coleta_km": _raio("utilitario")},
+        ],
+    }), 200
+
+
 @public_bp.get("/social-day")
 def public_social_day():
     """
