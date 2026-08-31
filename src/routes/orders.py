@@ -617,7 +617,8 @@ def update_order_status(order_id):
                             from ..utils.platform_settings import get_settings as _gs
 
                             _ncur.execute("""
-                                SELECT o.items, rp.latitude, rp.longitude
+                                SELECT o.items, o.delivery_distance_km,
+                                       rp.latitude, rp.longitude
                                   FROM orders o
                                   JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
                                  WHERE o.id = %s
@@ -628,8 +629,13 @@ def update_order_status(order_id):
                                     _peso = float(peso_do_pedido(_ncur, _o['items']) or 0)
                                 except Exception:
                                     _peso = 0.0
+                                # A distancia entra junto: sem ela o push
+                                # acordaria a bicicleta pra uma entrega que a
+                                # lista dela ja nao mostra. Push que leva a uma
+                                # tela vazia e pior que push nenhum.
                                 _tokens = tokens_para_avisar(
-                                    _peso, _o['latitude'], _o['longitude'], _gs())
+                                    _peso, _o['latitude'], _o['longitude'], _gs(),
+                                    distancia_km=_o.get('delivery_distance_km'))
                                 logger.info("Push 'entrega disponível': %d entregador(es) aptos e online (peso %.0f kg)",
                                             len(_tokens), _peso)
                                 for _tk in _tokens:
@@ -1741,10 +1747,21 @@ def _run_dispatch_tick(cur, settings):
     # se ele ofertar 60 kg a quem está de bicicleta, o filtro de carga em
     # get_available_orders esconde o pedido do próprio destinatário — a oferta
     # queima o prazo inteiro sem ninguém sequer ver, e o pedido fica em limbo.
-    from ..utils.carga import capacidades as _capacidades
+    from ..utils.carga import capacidades as _capacidades, alcance_km as _alcance_km
     _caps = _capacidades(settings)
     c_bike, c_moto, c_carro = _caps['bike'], _caps['moto'], _caps['carro']
     c_util = _caps['utilitario']
+
+    # ALCANCE por veículo (loja → cliente). Tem que estar AQUI e no gate de
+    # get_available_orders, pelo mesmo motivo que a capacidade: se o motor
+    # ofertar uma entrega de 12 km a quem está de bicicleta, o gate da lista
+    # esconde o pedido do próprio destinatário e a oferta queima o prazo
+    # inteiro sem ninguém ver. Meia-trava é pior que trava nenhuma, porque
+    # produz pedido em limbo em vez de erro visível.
+    # 0 = sem limite (é o padrão de moto, carro e utilitário).
+    _alc = _alcance_km(settings)
+    a_bike, a_moto = _alc['bike'], _alc['moto']
+    a_carro, a_util = _alc['carro'], _alc['utilitario']
 
     # Pesos da nota composta (admin). Se todos vierem 0, cai em "só distância"
     # — assim uma configuração zerada por engano não trava o dispatch.
@@ -1763,6 +1780,7 @@ def _run_dispatch_tick(cur, settings):
         """
         SELECT o.id, o.offer_courier_id, o.offer_expires_at, o.offer_passed_ids,
                COALESCE(o.peso_total_kg, 0) AS peso_total_kg,
+               COALESCE(o.delivery_distance_km, 0) AS dist_entrega_km,
                rp.latitude AS r_lat, rp.longitude AS r_lng
           FROM orders o
           JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
@@ -1851,6 +1869,24 @@ def _run_dispatch_tick(cur, settings):
                         WHEN dp.vehicle_type IN ('carro','car')        THEN %s
                         WHEN dp.vehicle_type = 'utilitario'            THEN %s
                         ELSE 0 END) >= %s
+                 -- ALCANCE: o veículo tem que ir até onde a entrega vai.
+                 -- Pergunta diferente da de cima (o que ele CARREGA) e do raio
+                 -- (que mede entregador→loja): esta mede loja→cliente.
+                 -- Teto 0 = sem limite. Distância 0/NULL passa (fail-open,
+                 -- igual ao peso) — dado faltando não pode parar a operação.
+                 AND (%s <= 0
+                      OR (CASE
+                            WHEN dp.vehicle_type IN ('bike','bicicleta')   THEN %s
+                            WHEN dp.vehicle_type IN ('moto','motorcycle')  THEN %s
+                            WHEN dp.vehicle_type IN ('carro','car')        THEN %s
+                            WHEN dp.vehicle_type = 'utilitario'            THEN %s
+                            ELSE 0 END) <= 0
+                      OR (CASE
+                            WHEN dp.vehicle_type IN ('bike','bicicleta')   THEN %s
+                            WHEN dp.vehicle_type IN ('moto','motorcycle')  THEN %s
+                            WHEN dp.vehicle_type IN ('carro','car')        THEN %s
+                            WHEN dp.vehicle_type = 'utilitario'            THEN %s
+                            ELSE 0 END) >= %s)
                  AND NOT (dp.user_id = ANY(%s::uuid[]))
                  -- Quem já está com uma entrega na rua sai dos candidatos.
                  -- Sem isso o motor oferecia pedido pra quem estava no meio de
@@ -1878,6 +1914,11 @@ def _run_dispatch_tick(cur, settings):
              default_rating,
              # capacidade por veículo + peso do pedido (filtro de carga)
              c_bike, c_moto, c_carro, c_util, od['peso_total_kg'],
+             # alcance: distância da entrega, tetos (duas vezes: o teste de
+             # "sem limite" e a comparação) e a distância de novo
+             od['dist_entrega_km'],
+             a_bike, a_moto, a_carro, a_util,
+             a_bike, a_moto, a_carro, a_util, od['dist_entrega_km'],
              passed,
              w_dist, w_idle, idle_target, w_rating, w_balance, daily_target),
         )
@@ -2043,7 +2084,7 @@ def get_available_orders():
             # Pedido sem peso informado (NULL ou 0) passa: é o caso normal de
             # comida, e travar isso pararia a operação inteira por um dado que
             # o parceiro de restaurante não tem motivo pra preencher.
-            from ..utils.carga import capacidades, normalizar_veiculo
+            from ..utils.carga import capacidades, normalizar_veiculo, alcance_km
             _chave_veic = normalizar_veiculo(_dp['vehicle_type'])
             if not _chave_veic:
                 # Veículo irreconhecível: não dá pra afirmar que ele comporta
@@ -2053,6 +2094,27 @@ def get_available_orders():
             _capacidade = capacidades(_settings)[_chave_veic]
             carga_clause = " AND COALESCE(o.peso_total_kg, 0) <= %s"
             params.append(float(_capacidade))
+
+            # ALCANCE: o pedido só aparece pra quem entrega ATÉ AQUELA DISTÂNCIA.
+            #
+            # É outra pergunta que a de cima. A capacidade diz o que o veículo
+            # CARREGA; esta diz até onde ele VAI. E é diferente do raio logo
+            # acima, que mede entregador→loja (coleta) — aqui é loja→cliente.
+            # Sem esta trava, nada impedia uma bicicleta parada na porta do
+            # restaurante de aceitar uma entrega de 12 km: passava no peso,
+            # passava no raio de coleta, e só encarecia o frete.
+            #
+            # Mesmo fail-open do peso: distância NULL ou 0 passa. Distância
+            # faltando é buraco de dado, e recusar tudo por campo vazio pararia
+            # a operação em vez de proteger alguém.
+            _teto_km = alcance_km(_settings)[_chave_veic]
+            alcance_clause = ""
+            if _teto_km > 0:
+                alcance_clause = (
+                    " AND (COALESCE(o.delivery_distance_km, 0) <= 0"
+                    "      OR o.delivery_distance_km <= %s)"
+                )
+                params.append(float(_teto_km))
 
             # No modo atribuição, o entregador vê SÓ o pedido ofertado a ele e
             # ainda dentro do prazo (o resto do WHERE segue igual).
@@ -2090,7 +2152,7 @@ def get_available_orders():
                     -- Pedido de loja com ENTREGA PRÓPRIA nunca aparece pro
                     -- entregador Inksa. Mesma trava do motor de despacho.
                     AND COALESCE(rp.delivery_type, 'platform') <> 'own'
-                    {radius_clause}{carga_clause}{offer_clause}
+                    {radius_clause}{carga_clause}{alcance_clause}{offer_clause}
                 ORDER BY o.created_at ASC;
             """
             cur.execute(sql_query, params)

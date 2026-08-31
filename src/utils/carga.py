@@ -247,11 +247,74 @@ def frete_da_carga(peso_kg, settings=None):
     return (fixo, km, chave, rotulo)
 
 
-def _aptos(peso_kg, rest_lat, rest_lng, settings=None):
+# ── ALCANCE: QUÃO LONGE CADA VEÍCULO ACEITA ENTREGAR ───────────────────────
+#
+# ⚠️ NÃO CONFUNDIR COM `delivery_radius_<veiculo>_km`. São duas medidas
+# diferentes e a confusão entre elas foi o motivo desta trava existir:
+#
+#   delivery_radius_*_km  →  ENTREGADOR até a LOJA. Raio de COLETA: quem está
+#                            longe demais da loja não recebe a oferta.
+#   entrega_max_km_*      →  LOJA até o CLIENTE. Comprimento da ENTREGA.
+#
+# O Diego achava, em 31/08/2026, que a distância já separava bicicleta de moto.
+# Não separava: o raio de 5 km da bicicleta media a distância dela até a LOJA,
+# e nada impedia um entregador de bicicleta parado na porta do restaurante de
+# aceitar uma entrega de 12 km. A conta do frete não protege isso — ela só
+# cobra mais caro por uma corrida que a bicicleta não deveria estar fazendo.
+#
+# 0 = sem limite. É o padrão de moto, carro e utilitário: eles já são limitados
+# pelo raio da plataforma, e um teto a mais só criaria pedido que ninguém vê.
+_PADRAO_ALCANCE_KM = {'bike': 5.0, 'moto': 0.0, 'carro': 0.0, 'utilitario': 0.0}
+
+
+def alcance_km(settings=None):
+    """Distância máxima de ENTREGA que cada veículo aceita, em km. 0 = livre."""
+    settings = settings or {}
+    fora = {}
+    for chave in _ORDEM:
+        bruto = settings.get(f'entrega_max_km_{chave}')
+        try:
+            valor = float(str(bruto).replace(',', '.')) if bruto not in (None, '') else None
+        except (TypeError, ValueError):
+            valor = None
+        # Negativo é configuração sem sentido: cai no padrão, não vira "0 = livre"
+        # por acidente — senão um "-1" digitado por engano abriria a trava.
+        fora[chave] = valor if (valor is not None and valor >= 0) else _PADRAO_ALCANCE_KM[chave]
+    return fora
+
+
+def veiculo_alcanca(vehicle_type, distancia_km, settings=None):
+    """Esse veículo aceita uma entrega desse comprimento?
+
+    Fail-OPEN quando a distância não é conhecida (None ou 0), igual à trava de
+    peso logo acima: distância faltando é buraco de dado, e recusar tudo por um
+    campo vazio pararia a operação inteira em vez de proteger alguém.
+
+    Fail-CLOSED pra veículo irreconhecível, também igual ao peso: se não dá pra
+    afirmar o que ele alcança, não dá pra afirmar que alcança.
+    """
+    chave = normalizar_veiculo(vehicle_type)
+    if not chave:
+        return False
+    try:
+        dist = float(distancia_km or 0)
+    except (TypeError, ValueError):
+        dist = 0.0
+    if dist <= 0:
+        return True
+    teto = alcance_km(settings)[chave]
+    return teto <= 0 or dist <= teto
+
+
+def _aptos(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
     """Entregadores que PODEM levar esta carga, saindo desta loja.
 
     Fonte ÚNICA da regra "quem serve pra este pedido": capacidade do veículo,
-    raio a partir da loja, aprovado e com coordenada conhecida.
+    raio a partir da loja, ALCANCE do veículo pro comprimento da entrega,
+    aprovado e com coordenada conhecida.
+
+    `distancia_km` é o comprimento da ENTREGA (loja → cliente). Quando vem
+    None, o filtro de alcance não roda — ver veiculo_alcanca.
 
     Existe porque a mesma pergunta era respondida em dois lugares com regras
     diferentes. O aviso do carrinho usava tudo isso; o PUSH de "entrega
@@ -311,6 +374,14 @@ def _aptos(peso_kg, rest_lat, rest_lng, settings=None):
                     WHEN dp.vehicle_type IN ('carro','car')       THEN %s
                     WHEN dp.vehicle_type = 'utilitario'           THEN %s
                     ELSE %s END AS raio_km,
+                  -- chave normalizada, pros mesmos apelidos valerem no
+                  -- filtro de alcance que roda em Python logo abaixo
+                  CASE
+                    WHEN dp.vehicle_type IN ('bike','bicicleta')  THEN 'bike'
+                    WHEN dp.vehicle_type IN ('moto','motorcycle') THEN 'moto'
+                    WHEN dp.vehicle_type IN ('carro','car')       THEN 'carro'
+                    WHEN dp.vehicle_type = 'utilitario'           THEN 'utilitario'
+                    ELSE '' END AS chave_veiculo,
                   earth_distance(
                     ll_to_earth(COALESCE(dp.current_lat, dp.latitude),
                                 COALESCE(dp.current_lng, dp.longitude)),
@@ -326,12 +397,26 @@ def _aptos(peso_kg, rest_lat, rest_lng, settings=None):
                   _raio('carro', r_global), _raio('utilitario', r_global), r_global,
                   float(rest_lat), float(rest_lng)))
 
+            tetos = alcance_km(settings)
+            try:
+                dist_entrega = float(distancia_km or 0)
+            except (TypeError, ValueError):
+                dist_entrega = 0.0
+
             saida = []
             for r in cur.fetchall():
                 if float(r['capacidade'] or 0) < peso:
                     continue
                 if float(r['dist_km'] or 0) > float(r['raio_km'] or 0):
                     continue
+                # ALCANCE: o raio acima mediu entregador→loja. Este mede o
+                # comprimento da ENTREGA, que é outra coisa. Sem ele, avisar
+                # e empurrar push pra bicicleta numa corrida de 12 km é
+                # convidar pra uma entrega que ela não deveria fazer.
+                if dist_entrega > 0:
+                    teto = tetos.get(r['chave_veiculo'] or '', 0.0)
+                    if teto > 0 and dist_entrega > teto:
+                        continue
                 saida.append({'id': str(r['id']),
                               'fcm_token': r['fcm_token'],
                               'online': bool(r['online']),
@@ -348,7 +433,7 @@ def _aptos(peso_kg, rest_lat, rest_lng, settings=None):
                 pass
 
 
-def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
+def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
     """(cadastrados, online) entre os aptos. Alimenta o aviso do carrinho.
 
       • cadastrados = existem com veículo suficiente, no raio, aprovados —
@@ -367,7 +452,7 @@ def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
     if rest_lat is None or rest_lng is None:
         return (None, None)
     try:
-        aptos = _aptos(peso_kg, rest_lat, rest_lng, settings)
+        aptos = _aptos(peso_kg, rest_lat, rest_lng, settings, distancia_km)
     except Exception:
         logger.warning("Não deu pra contar entregadores capazes", exc_info=True)
         return (None, None)
@@ -379,7 +464,7 @@ def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None):
 _JANELA_PUSH_HORAS = 3
 
 
-def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None):
+def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
     """Tokens de push de quem deve ser acordado por ESTE pedido.
 
     Apto (capacidade, raio, aprovado) E provavelmente trabalhando. "Provavelmente
@@ -415,5 +500,5 @@ def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None):
             hb = hb.replace(tzinfo=timezone.utc)
         return hb >= corte
 
-    return [a['fcm_token'] for a in _aptos(peso_kg, rest_lat, rest_lng, settings)
+    return [a['fcm_token'] for a in _aptos(peso_kg, rest_lat, rest_lng, settings, distancia_km)
             if a['fcm_token'] and _trabalhando(a)]

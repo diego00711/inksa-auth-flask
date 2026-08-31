@@ -34,6 +34,50 @@ def distancia_km(lat1, lon1, lat2, lon2):
     return 6371.0 * 2 * asin(sqrt(a))
 
 
+def distancia_de_rua(lat1, lon1, lat2, lon2, settings=None):
+    """Distância que a moto REALMENTE roda entre dois pontos, em km.
+
+    Haversine devolve a linha reta — a distância que um pássaro voa. Ninguém
+    entrega assim: contorna quarteirão, respeita mão única, atravessa em ponte.
+    Cobrar pela linha reta é cobrar a menos em TODA entrega, sempre.
+
+    Medido na rua pelo Diego em 29/08/2026: Yo!Frango -> Rua Dr. Jorge Bleyer
+    deu 1,00 km reto e mais de 1,5 km de percurso. Erro de 50% — e como o
+    primeiro km é grátis, esse 1,00 km caía justamente na faixa que zera o
+    adicional, e o pedido saiu com o frete base cravado.
+
+    O fator vem do platform_settings (road_distance_factor, padrão 1,40) pra
+    ser calibrado com medição real em vez de discutido no código.
+
+    MORA AQUI, e não na rota, porque o fechamento do pedido (payment.py)
+    também precisa dela: ele validava o frete com haversine CRU enquanto o
+    carrinho cotava com o percurso, e as duas contas divergiam ~30%. Era o
+    terceiro chamador que esta função nasceu pra unificar, e ficou de fora
+    justamente porque estava dentro de um arquivo de rota.
+
+    ⚠️ ISTO É APROXIMAÇÃO, NÃO VERDADE. Quem acerta é roteamento de malha
+    viária, que é o que o Uber faz. Quando entrar um provedor de rota, ele
+    substitui o corpo desta função e mais nada muda de lugar — foi por isso que
+    as duas chamadas cruas de haversine viraram esta função só.
+    """
+    reta = distancia_km(lat1, lon1, lat2, lon2)
+    if reta is None:
+        return None
+    try:
+        if settings is None:
+            from .platform_settings import get_settings
+            settings = get_settings()
+        s = settings
+        fator = float(s.get("road_distance_factor") or 1.4)
+    except Exception:
+        fator = 1.4
+    # Fator abaixo de 1 encurtaria o percurso, o que é impossível: linha reta é
+    # o mínimo geométrico entre dois pontos.
+    if fator < 1:
+        fator = 1.0
+    return round(reta * fator, 2)
+
+
 def raio_da_loja(delivery_type, own_delivery_radius_km, settings=None):
     """Raio que vale para esta loja, em km.
 

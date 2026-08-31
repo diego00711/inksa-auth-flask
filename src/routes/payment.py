@@ -174,19 +174,32 @@ def _frete_do_servidor(dados_pedido):
     duas contas separadas divergiriam, e a divergência apareceria como frete
     errado cobrado ou pago.
 
-    Devolve None (e o chamador mantém o valor do app) quando não há como
-    recalcular: loja de entrega própria com taxa própria, coordenada faltando,
-    erro de leitura. Fail-open aqui é deliberado — derrubar o checkout de um
-    cliente legítimo por causa de um cadastro incompleto é pior que cobrar o
-    frete errado num pedido, que é reparável.
+    Devolve (frete, distancia_km) — a distância é o PERCURSO, e quem chama
+    grava ela no pedido. Antes o pedido guardava a distância que o APP mandou,
+    sem ninguém conferir; é ela que a trava de alcance por veículo consulta
+    depois, e trava que consulta número do cliente não é trava.
+
+    Qualquer dos dois vem None quando não há como recalcular: loja de entrega
+    própria com taxa própria, coordenada faltando, erro de leitura. Fail-open
+    aqui é deliberado — derrubar o checkout de um cliente legítimo por causa de
+    um cadastro incompleto é pior que cobrar o frete errado num pedido, que é
+    reparável.
+
+    ⚠️ MEDE PERCURSO, NÃO LINHA RETA. Até 31/08/2026 esta função usava
+    haversine cru enquanto o carrinho cotava com `distancia_de_rua` (linha reta
+    × fator de rua, hoje 1,3). O servidor calculava ~30%% a menos em TODA
+    entrega, então a comparação "o servidor cobraria mais?" praticamente nunca
+    disparava: dava pra fechar pedido com frete até 30%% abaixo do certo sem a
+    trava reclamar. A proteção contra frete ZERO continuava valendo — foi por
+    isso que passou despercebido.
     """
     rid = dados_pedido.get('restaurant_id')
     cli_lat = dados_pedido.get('client_latitude')
     cli_lng = dados_pedido.get('client_longitude')
     if not rid or cli_lat is None or cli_lng is None:
-        return None
+        return (None, None)
     try:
-        from ..utils.area_entrega import distancia_km as _dist
+        from ..utils.area_entrega import distancia_de_rua as _percurso
         from ..utils.frete import calcular_frete
         from ..utils.platform_settings import get_settings
 
@@ -194,26 +207,28 @@ def _frete_do_servidor(dados_pedido):
             'latitude, longitude, delivery_type, delivery_fee'
         ).eq('id', str(rid)).limit(1).execute()
         if not r.data:
-            return None
+            return (None, None)
         loja = r.data[0]
 
         # Entrega própria: a taxa é da LOJA, não da plataforma. O valor dela é
         # autoritativo do mesmo jeito — só não passa pela fórmula.
         if (loja.get('delivery_type') or 'platform') == 'own':
             taxa = loja.get('delivery_fee')
-            return round(float(taxa), 2) if taxa not in (None, '') else None
+            return (round(float(taxa), 2) if taxa not in (None, '') else None, None)
 
-        d = _dist(loja.get('latitude'), loja.get('longitude'), cli_lat, cli_lng)
+        _cfg = get_settings()
+        d = _percurso(loja.get('latitude'), loja.get('longitude'),
+                      cli_lat, cli_lng, _cfg)
         if d is None:
-            return None  # loja sem coordenada: a calculadora já trata
+            return (None, None)  # loja sem coordenada: a calculadora já trata
 
         peso = _peso_do_pedido_servidor(dados_pedido.get('itens') or [])
-        valor, _metodo = calcular_frete(d, peso, get_settings())
-        return valor
+        valor, _metodo = calcular_frete(d, peso, _cfg)
+        return (valor, d)
     except Exception:
         logging.warning("Frete do servidor não calculado — mantendo o valor do app",
                         exc_info=True)
-        return None
+        return (None, None)
 
 def _checar_area_entrega(restaurant_id, cli_lat, cli_lng):
     """Recusa pedido fora da área da loja. Devolve (fora, mensagem).
@@ -492,7 +507,7 @@ def criar_preferencia_mercado_pago():
         # log — o cliente NÃO é punido por uma diferença que não é culpa dele
         # (ele pode ter demorado no carrinho e o preço mudou), mas repetição
         # vira sinal.
-        _fee_srv = _frete_do_servidor(dados_pedido)
+        _fee_srv, _dist_srv = _frete_do_servidor(dados_pedido)
         if _fee_srv is not None:
             _fee_app = float(dados_pedido.get('delivery_fee', 0) or 0)
             _dif = round(_fee_srv - _fee_app, 2)
@@ -535,7 +550,9 @@ def criar_preferencia_mercado_pago():
         _fee_create = float(dados_pedido.get('delivery_fee', 0) or 0)
         try:
             _payout_create = float(calculate_courier_payout(
-                dados_pedido.get('delivery_distance_km'), delivery_fee=_fee_create))
+                (_dist_srv if _dist_srv is not None
+                 else dados_pedido.get('delivery_distance_km')),
+                delivery_fee=_fee_create))
         except Exception as _e_payout:
             logging.warning(f"⚠️ calculate_courier_payout na criação falhou ({_e_payout}); usando frete cheio.")
             _payout_create = _fee_create
@@ -584,7 +601,11 @@ def criar_preferencia_mercado_pago():
             'notes': dados_pedido.get('notes', ''),
             'client_latitude': dados_pedido.get('client_latitude'),
             'client_longitude': dados_pedido.get('client_longitude'),
-            'delivery_distance_km': dados_pedido.get('delivery_distance_km'),
+            # Distância do SERVIDOR quando ela existe. É ela que a trava de
+            # alcance por veículo consulta depois — se ficasse a do app, a
+            # trava estaria perguntando ao próprio interessado.
+            'delivery_distance_km': (_dist_srv if _dist_srv is not None
+                                     else dados_pedido.get('delivery_distance_km')),
             'payment_method': payment_method,
             'change_for': change_for,
             'valor_repassado_entregador': round(_payout_create, 2),
@@ -1235,7 +1256,7 @@ def processar_pagamento_cartao():
         # OUTRA função (cartão transparente), então precisa da sua própria
         # chamada — deixar de fora daria um caminho por onde o frete zero ainda
         # passaria, e ninguém notaria porque o online estaria protegido.
-        _fee_srv_card = _frete_do_servidor(d)
+        _fee_srv_card, _dist_srv_card = _frete_do_servidor(d)
         if _fee_srv_card is not None:
             _fee_app_card = float(d.get('delivery_fee', 0) or 0)
             _dif_card = _fee_srv_card - _fee_app_card
@@ -1331,7 +1352,11 @@ def processar_pagamento_cartao():
             'notes': d.get('notes', ''),
             'client_latitude': d.get('client_latitude'),
             'client_longitude': d.get('client_longitude'),
-            'delivery_distance_km': d.get('delivery_distance_km'),
+            # Distância do SERVIDOR quando ela existe. É ela que a trava de
+            # alcance por veículo consulta depois — se ficasse a do app, a
+            # trava estaria perguntando ao próprio interessado.
+            'delivery_distance_km': (_dist_srv_card if _dist_srv_card is not None
+                                     else d.get('delivery_distance_km')),
             'payment_method': payment_method_id,
             # Sem isto o despacho faz COALESCE(peso_total_kg, 0) e oferece um
             # pedido de 120 kg pra quem está de bicicleta. O fluxo online já
@@ -1388,7 +1413,9 @@ def processar_pagamento_cartao():
             # (o que a plataforma retém) só existe com entregador Inksa e pode
             # ser negativa em entregas curtas — é o valor real.
             repasse_rest, courier_payout, margem_frete = _split_online(
-                subtotal_validado, delivery_fee_charged, d.get('delivery_distance_km'),
+                subtotal_validado, delivery_fee_charged,
+                (_dist_srv_card if _dist_srv_card is not None
+                 else d.get('delivery_distance_km')),
                 comissao, desc_parc_card, _entrega_propria(d.get('restaurant_id')))
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante

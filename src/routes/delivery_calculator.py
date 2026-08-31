@@ -5,6 +5,9 @@ import math
 import logging
 from ..utils.helpers import supabase
 from ..utils.platform_settings import get_settings
+# A conta do percurso mora em utils/area_entrega: o fechamento do pedido
+# precisa dela também, e rota não é lugar de regra compartilhada.
+from ..utils.area_entrega import distancia_de_rua
 
 # Configuração do logging
 logging.basicConfig(level=logging.INFO)
@@ -12,39 +15,6 @@ logger = logging.getLogger(__name__)
 
 delivery_calculator_bp = Blueprint('delivery_calculator', __name__)
 CORS(delivery_calculator_bp)  # Habilita CORS para este blueprint
-
-def distancia_de_rua(lat1, lon1, lat2, lon2, settings=None):
-    """Distância que a moto REALMENTE roda entre dois pontos, em km.
-
-    Haversine devolve a linha reta — a distância que um pássaro voa. Ninguém
-    entrega assim: contorna quarteirão, respeita mão única, atravessa em ponte.
-    Cobrar pela linha reta é cobrar a menos em TODA entrega, sempre.
-
-    Medido na rua pelo Diego em 29/08/2026: Yo!Frango -> Rua Dr. Jorge Bleyer
-    deu 1,00 km reto e mais de 1,5 km de percurso. Erro de 50% — e como o
-    primeiro km é grátis, esse 1,00 km caía justamente na faixa que zera o
-    adicional, e o pedido saiu com o frete base cravado.
-
-    O fator vem do platform_settings (road_distance_factor, padrão 1,40) pra
-    ser calibrado com medição real em vez de discutido no código.
-
-    ⚠️ ISTO É APROXIMAÇÃO, NÃO VERDADE. Quem acerta é roteamento de malha
-    viária, que é o que o Uber faz. Quando entrar um provedor de rota, ele
-    substitui o corpo desta função e mais nada muda de lugar — foi por isso que
-    as duas chamadas cruas de haversine viraram esta função só.
-    """
-    reta = haversine_distance(lat1, lon1, lat2, lon2)
-    try:
-        s = settings if settings is not None else get_settings()
-        fator = float(s.get("road_distance_factor") or 1.4)
-    except Exception:
-        fator = 1.4
-    # Fator abaixo de 1 encurtaria o percurso, o que é impossível: linha reta é
-    # o mínimo geométrico entre dois pontos.
-    if fator < 1:
-        fator = 1.0
-    return round(reta * fator, 2)
-
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calcula a distância entre duas coordenadas usando a fórmula de Haversine"""
@@ -285,9 +255,12 @@ def calculate_delivery_fee():
             _cap_total, _cap_online = None, None
         else:
             from ..utils.carga import contar_capazes
+            # `distance_km` aqui ja e o PERCURSO (haversine x fator de rua),
+            # que e a mesma medida que a trava de alcance usa.
             _cap_total, _cap_online = contar_capazes(
                 _peso_resp, restaurant_data.get('latitude'),
-                restaurant_data.get('longitude'), s)
+                restaurant_data.get('longitude'), s,
+                distancia_km=distance_km)
 
         result = {
             "status": "success",
