@@ -50,6 +50,19 @@ _DEFAULTS: dict[str, Decimal] = {
     # Uber faz). Fica editável justamente pra calibrar com medições reais em vez
     # de discutir o valor no código.
     "road_distance_factor":       Decimal("1.40"),
+    # Capacidade de carga por veículo (kg). Estavam SÓ em utils/carga.py, o que
+    # deixava os campos do admin inertes: get_settings() não devolvia a chave e
+    # carga.capacidades() caía no padrão dela. Ninguém notou porque o padrão do
+    # código e o valor do banco eram iguais.
+    "capacidade_kg_bike":         Decimal("8"),
+    "capacidade_kg_moto":         Decimal("20"),
+    "capacidade_kg_carro":        Decimal("80"),
+    "capacidade_kg_utilitario":   Decimal("300"),
+    # Distância máxima da ENTREGA por veículo (km). 0 = sem limite.
+    "entrega_max_km_bike":        Decimal("5"),
+    "entrega_max_km_moto":        Decimal("0"),
+    "entrega_max_km_carro":       Decimal("0"),
+    "entrega_max_km_utilitario":  Decimal("0"),
     "commission_rate":            Decimal("0.10"),  # 0..1, não 10
     "delivery_base_fee":          Decimal("5.00"),  # legado (modelo antigo de repasse)
     "delivery_per_km_fee":        Decimal("1.00"),  # legado (modelo antigo de repasse)
@@ -176,6 +189,21 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               "dispatch_default_rating",
               "frete_adicional_carro", "frete_km_carro",
               "frete_adicional_utilitario", "frete_km_utilitario",
+              # ⚠️ ESTES DOIS FALTAVAM AQUI, e é um tipo de bug que não dá erro:
+              # a chave existe em _DEFAULTS (então é LIDA do banco), mas se não
+              # for copiada nesta lista o valor do banco é descartado e vale o
+              # default cravado. O campo aparece no admin, aceita o valor, salva
+              # no banco — e não muda NADA.
+              #   road_distance_factor: o Diego pôs 1,3 e o servidor seguiu
+              #   cobrando com 1,4 em toda entrega.
+              #   coupon_max_discount_pct: o teto de desconto do parceiro estava
+              #   preso em 30%, qualquer número que o admin mostrasse.
+              "road_distance_factor", "coupon_max_discount_pct",
+              # Capacidade e alcance por veículo, pelo mesmo motivo.
+              "capacidade_kg_bike", "capacidade_kg_moto",
+              "capacidade_kg_carro", "capacidade_kg_utilitario",
+              "entrega_max_km_bike", "entrega_max_km_moto",
+              "entrega_max_km_carro", "entrega_max_km_utilitario",
               "idle_logout_minutes", "cart_reminder_minutes",
               "referral_enabled", "referral_reward_brl", "referral_min_order_brl",
               "referral_validity_days", "referral_monthly_cap",
