@@ -110,6 +110,7 @@ def get_menu_items(conn):
         cur.execute(
             """SELECT mi.id, mi.name, mi.description, mi.price, mi.category,
                       mi.is_available, mi.image_url, mi.promo_price,
+                      mi.age_restricted,
                       COALESCE((
                         SELECT array_agg(g.nome ORDER BY g.ordem, g.created_at)
                           FROM menu_item_option_groups g
@@ -168,9 +169,10 @@ def add_menu_item(conn):
 
             # Inserir o item com o restaurant_id correto
             cur.execute(
-                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg, promo_price) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), peso, promo)
+                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg, promo_price, age_restricted) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), peso, promo,
+                 bool(data.get('age_restricted', False)))
             )
             new_item = make_serializable(dict(cur.fetchone()))
             conn.commit()
@@ -221,11 +223,13 @@ def update_menu_item(conn, item_id):
             """
             UPDATE menu_items
             SET name = %s, description = %s, price = %s, category = %s, is_available = %s, image_url = %s,
-                peso_kg = %s, promo_price = %s
+                peso_kg = %s, promo_price = %s, age_restricted = %s
             WHERE id = %s
             RETURNING *
             """,
-            (data['name'], data.get('description'), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url'), peso, promo, str(item_id))
+            (data['name'], data.get('description'), float(data['price']), data['category'],
+             data.get('is_available', True), data.get('image_url'), peso, promo,
+             bool(data.get('age_restricted', False)), str(item_id))
         )
         updated_item = make_serializable(dict(cur.fetchone()))
         conn.commit()

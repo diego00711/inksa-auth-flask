@@ -2143,7 +2143,10 @@ def get_available_orders():
                     o.items,
                     o.status,
                     o.created_at,
-                    o.offer_expires_at
+                    o.offer_expires_at,
+                    -- Marca de item para maiores: a tela do entregador mostra a
+                    -- instrução de conferir documento. Ver utils/idade.py.
+                    COALESCE(o.age_restricted, false) AS age_restricted
                 FROM orders o
                 LEFT JOIN restaurant_profiles rp ON o.restaurant_id = rp.id
                 WHERE

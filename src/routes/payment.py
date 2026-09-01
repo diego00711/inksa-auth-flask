@@ -74,6 +74,39 @@ def _peso_do_pedido_servidor(itens):
                 pass
 
 
+def _restrito_por_idade(itens):
+    """O pedido tem item que exige maioridade? Lido do CATÁLOGO.
+
+    Mesmo motivo do peso logo acima: se o servidor acreditasse no payload,
+    bastaria um POST com a marca falsa pra sumir com o aviso ao cliente e com
+    a instrução de conferir documento na tela do entregador. Ver utils/idade.py.
+
+    False quando não dá pra apurar — marcar pedido comum como restrito faria
+    o entregador pedir documento pra quem comprou pizza.
+    """
+    if not itens:
+        return False
+    conn = None
+    try:
+        import psycopg2.extras
+        from ..utils.idade import pedido_restrito
+        from ..utils.helpers import get_db_connection
+        conn = get_db_connection()
+        if not conn:
+            return False
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            return bool(pedido_restrito(cur, itens))
+    except Exception:
+        logging.warning("Restrição de idade não apurada no fechamento", exc_info=True)
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _zerar_carrinho(client_profile_id):
     """Zera a foto do carrinho assim que o pedido é gravado.
 
@@ -596,6 +629,9 @@ def criar_preferencia_mercado_pago():
             # gravava esse campo; o fluxo de pagamento (que é por onde os
             # pedidos do app realmente passam) deixava NULL.
             'peso_total_kg': _peso_do_pedido_servidor(dados_pedido.get('itens') or []),
+            # Congela a restrição de idade junto com o peso: os dois vêm do
+            # catálogo e os dois precisam sobreviver a mudanças no cardápio.
+            'age_restricted': _restrito_por_idade(dados_pedido.get('itens') or []),
             'total_amount': dados_pedido.get('total_amount', 0),
             'delivery_address': dados_pedido.get('delivery_address', ''),
             'notes': dados_pedido.get('notes', ''),
@@ -1363,6 +1399,10 @@ def processar_pagamento_cartao():
             # gravava; o cartão não — a mesma coluna faltando em UM dos dois
             # caminhos é o tipo de buraco que só aparece em produção.
             'peso_total_kg': _peso_do_pedido_servidor(items_req or []),
+            # Idem no cartão. Ficar de fora daqui daria um caminho por onde
+            # o pedido restrito passaria sem aviso — foi exatamente assim
+            # que o frete zero sobreviveu num dos fluxos.
+            'age_restricted': _restrito_por_idade(items_req or []),
             'pickup_code': generate_verification_code(),
             'delivery_code': generate_verification_code(),
             'created_at': datetime.utcnow().isoformat(),

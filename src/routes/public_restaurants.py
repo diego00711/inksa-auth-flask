@@ -522,7 +522,11 @@ def get_restaurant_menu(restaurant_id):
                     promo_price,
                     COALESCE(category, 'Outros') AS category,
                     is_available                 AS available,
-                    image_url
+                    image_url,
+                    -- O carrinho precisa saber ANTES de pagar se tem item
+                    -- para maiores: é o que dispara a declaração de idade
+                    -- no checkout (ver utils/idade.py).
+                    COALESCE(age_restricted, false) AS age_restricted
                 FROM menu_items
                 WHERE restaurant_id = %s
                 ORDER BY category, is_available DESC, name
