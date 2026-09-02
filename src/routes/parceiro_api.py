@@ -46,6 +46,7 @@ from flask import Blueprint, jsonify, request
 from src.extensions import limiter
 from ..utils.catalogo import importar_itens
 from ..utils.helpers import get_db_connection, get_user_id_from_token
+from ..utils.pedido_itens import apenas_produtos
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,13 @@ def _pedido_publico(linha):
         except (TypeError, ValueError):
             return 0.0
 
+    # A "Taxa de Entrega" vem DENTRO da lista de itens: o checkout a
+    # acrescenta ali para fechar a conta. Se ela vazasse para o PDV, a cozinha
+    # imprimiria "Taxa de Entrega" como se fosse comida, e a soma dos itens
+    # (84,87) não bateria com o subtotal (74,87). Ela já está em
+    # valores.entrega, que é onde ela pertence.
+    produtos = apenas_produtos(itens)
+
     return {
         "numero": linha.get('numero'),
         "id": str(linha.get('id')),
@@ -205,7 +213,7 @@ def _pedido_publico(linha):
                                       else i.get('price')),
                 "observacao": i.get('notes') or i.get('observacao') or None,
             }
-            for i in itens if isinstance(i, dict)
+            for i in produtos
         ],
         "observacoes": linha.get('notes'),
     }

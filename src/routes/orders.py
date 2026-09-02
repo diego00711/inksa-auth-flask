@@ -12,6 +12,7 @@ import logging
 import sentry_sdk
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
 from src.extensions import limiter
+from ..utils.pedido_itens import eh_linha_de_frete
 
 try:
     from .gamification_routes import (
@@ -152,8 +153,7 @@ def _contar_unidades(items):
         # como 4 itens. O teste exige nome de taxa E ausência de menu_item_id,
         # senão um produto de verdade chamado "frete" (material de construção)
         # sumiria da contagem.
-        _nome = str(it.get('title') or it.get('name') or '').strip().lower()
-        if not it.get('menu_item_id') and _nome in ('taxa de entrega', 'frete'):
+        if eh_linha_de_frete(it):
             continue
         try:
             total += int(it.get('quantity') or it.get('qty') or 1)

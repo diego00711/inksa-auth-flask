@@ -8,6 +8,7 @@ from datetime import datetime, timedelta  # ✅ Import no lugar correto!
 from functools import wraps
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token
+from ..utils.pedido_itens import eh_linha_de_frete
 
 analytics_bp = Blueprint('analytics_bp', __name__)
 logging.basicConfig(level=logging.INFO)
@@ -109,7 +110,10 @@ def get_analytics_summary(conn):
                         # Ler item['name'] deixava item_mais_vendido sempre 'N/A'.
                         if isinstance(item, dict):
                             nome_item = item.get('title') or item.get('name')
-                            if nome_item and str(nome_item).strip().lower() not in ('taxa de entrega', 'frete'):
+                            # Mesma regra do resto do sistema (utils/pedido_itens): exige tambem
+                            # ausencia de menu_item_id, senao um produto REAL chamado 'frete'
+                            # sumia do relatorio de vendas.
+                            if nome_item and not eh_linha_de_frete(item):
                                 all_item_names.extend([nome_item] * int(item.get('quantity', 1) or 1))
         
         if all_item_names:
