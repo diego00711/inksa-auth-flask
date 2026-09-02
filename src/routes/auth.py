@@ -3,6 +3,7 @@
 import os
 import logging
 import re
+import secrets
 import requests
 from flask import Blueprint, request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, gotrue_admin
@@ -425,6 +426,148 @@ def logout():
 
 
 # ✅ NOVO ENDPOINT: CADASTRO DE RESTAURANTE
+@auth_bp.route('/checkout-rapido', methods=['POST'])
+@limiter.limit("8 per minute")
+def checkout_rapido():
+    """Cria a conta do cliente NO MEIO do checkout, sem tela de cadastro.
+
+    ── POR QUE EXISTE ────────────────────────────────────────────────────────
+    O parceiro cola o link curto da loja na bio do Instagram
+    (clientes.inksadelivery.com.br/gelae). A pessoa vem do Instagram, monta o
+    carrinho — e bate numa tela de login. É ali que a maior parte desiste, e é
+    justamente a gente que trouxe ela até ali.
+
+    Aqui ela informa nome, telefone e e-mail: dados que ela teria que dar de
+    qualquer jeito pra receber comida em casa. A conta nasce por trás, com
+    senha aleatória, e a sessão volta pronta. Ela nunca vê "cadastre-se".
+
+    ── POR QUE NÃO É "PEDIDO SEM CONTA" ──────────────────────────────────────
+    Gravar pedido com client_id nulo parece mais simples e não é: 25 consultas
+    em 8 arquivos fazem JOIN em client_profiles (comanda do parceiro, tela do
+    entregador, admin, financeiro, cupons, carrinho abandonado). Além de
+    quebrar todas elas, o pedido ficaria órfão — sem rastreamento, sem push e
+    sem avaliação, que é pior pro cliente do que preencher três campos.
+
+    ⚠️ ── O RISCO QUE DEFINE O DESENHO ────────────────────────────────────────
+    Se bastasse digitar um telefone pra ganhar sessão, qualquer pessoa entraria
+    na conta de outra digitando o telefone dela. Por isso:
+
+      • e-mail ou telefone JÁ existentes  → 409, e o app manda pro login normal
+      • dados novos                        → conta criada e sessão devolvida
+
+    Quem já tem conta não perde nada: hoje ele já cai no login de qualquer
+    forma. Quem é novo — que é a pessoa que vem do Instagram — entra direto.
+
+    Cliente que volta e não lembra a senha resolve pelo "esqueci minha senha",
+    e é por isso que o e-mail é pedido: sem e-mail real a conta fica sem
+    caminho de recuperação e ele criaria outra no pedido seguinte.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        nome = (data.get('name') or '').strip()
+        email = (data.get('email') or '').strip().lower()
+        telefone = re.sub(r'\D', '', (data.get('phone') or ''))
+
+        if len(nome) < 2:
+            return jsonify({"status": "error", "error": "Informe seu nome."}), 400
+        if not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', email):
+            return jsonify({"status": "error", "error": "Informe um e-mail válido."}), 400
+        if len(telefone) < 10:
+            return jsonify({"status": "error", "error": "Informe um telefone com DDD."}), 400
+
+        if not supabase or not supabase_admin:
+            return jsonify({"status": "error", "error": "Serviço indisponível"}), 500
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "error": "Serviço indisponível"}), 500
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE lower(email) = %s LIMIT 1", (email,))
+                if cur.fetchone():
+                    return jsonify({
+                        "status": "error", "error": "conta_existente",
+                        "message": "Você já tem conta com esse e-mail. Entre para continuar.",
+                        "email": email,
+                    }), 409
+                cur.execute(
+                    r"SELECT 1 FROM client_profiles"
+                    r" WHERE regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = %s LIMIT 1",
+                    (telefone,))
+                if cur.fetchone():
+                    return jsonify({
+                        "status": "error", "error": "conta_existente",
+                        "message": "Já existe uma conta com esse telefone. Entre para continuar.",
+                    }), 409
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # Senha aleatória: a pessoa nunca precisa dela. Se um dia quiser entrar
+        # por senha, usa "esqueci minha senha" — por isso o e-mail é real.
+        senha = secrets.token_urlsafe(24)
+
+        # auth.admin.* PRECISA do supabase_admin. Com o cliente comum isso
+        # devolve not_admin de forma intermitente e o cadastro falha sem motivo
+        # aparente — já custou caro aqui antes.
+        criado = supabase_admin.auth.admin.create_user({
+            "email": email,
+            "password": senha,
+            "email_confirm": True,   # sem confirmação por e-mail: ela está no meio de um pedido
+            "user_metadata": {"name": nome, "user_type": "client"},
+        })
+        user_id = criado.user.id
+
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    partes = nome.split(' ', 1)
+                    cur.execute(
+                        """INSERT INTO users (id, email, user_type)
+                           VALUES (%s, %s, 'client')
+                           ON CONFLICT (id) DO NOTHING""",
+                        (user_id, email))
+                    cur.execute(
+                        """INSERT INTO client_profiles (user_id, first_name, last_name, phone)
+                           VALUES (%s, %s, %s, %s)
+                           ON CONFLICT (user_id) DO NOTHING""",
+                        (user_id, partes[0], partes[1] if len(partes) > 1 else '', telefone))
+                conn.commit()
+            except Exception:
+                logger.exception("Perfil do checkout rápido não criado")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        # Entra com a senha recém-criada pra devolver a sessão pronta: a pessoa
+        # segue o pedido sem nenhuma tela no meio.
+        sessao = supabase.auth.sign_in_with_password({"email": email, "password": senha})
+        return jsonify({
+            "status": "success",
+            "data": {
+                # Mesmo formato de /login: o app já sabe guardar `token` e
+                # `refresh_token`. Formato novo aqui significaria um segundo
+                # caminho de sessão no front, e dois caminhos divergem.
+                "token": sessao.session.access_token,
+                "refresh_token": sessao.session.refresh_token,
+                "user": {"id": user_id, "email": email, "name": nome, "user_type": "client"},
+            },
+        }), 201
+
+    except Exception as e:
+        logger.exception("Erro no checkout rápido")
+        return jsonify({"status": "error", "error": "Não foi possível criar sua conta agora."}), 500
+
+
 @auth_bp.route('/register', methods=['POST'])
 @limiter.limit("5 per minute")
 def register():
