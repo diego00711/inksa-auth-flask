@@ -7,6 +7,16 @@ mercadopago==2.2.1
 supabase==2.0.0
 gevent>=24.10.1
 httpx==0.24.1
+# Fixados por causa de uma quebra REAL em producao (02/09/2026): o anyio
+# 4.15.0 saiu com importacao preguicosa (_lazyimport.py) e o httpcore 0.17.3
+# le `anyio.abc` na hora de definir a classe -> AttributeError no import, o
+# app nem subia. O requirements fixava so o httpx; anyio e httpcore vinham
+# indiretos, entao o build pegou a versao nova sozinho.
+#
+# Nao foi mudanca nossa que quebrou: QUALQUER deploy daquele dia quebraria.
+# Dependencia indireta nao fixada e bomba com pavio de terceiro.
+anyio==4.14.0
+httpcore==0.17.3
 python-dotenv==1.0.0
 PyJWT==2.8.0
 bcrypt==4.1.2
