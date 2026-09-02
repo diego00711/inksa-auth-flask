@@ -533,15 +533,24 @@ def checkout_rapido():
                     cur.execute(
                         """INSERT INTO client_profiles (user_id, first_name, last_name, phone)
                            VALUES (%s, %s, %s, %s)
-                           ON CONFLICT (user_id) DO NOTHING""",
+                           ON CONFLICT (user_id) DO UPDATE
+                              SET first_name = EXCLUDED.first_name,
+                                  last_name  = EXCLUDED.last_name,
+                                  phone      = COALESCE(EXCLUDED.phone, client_profiles.phone)""",
                         (user_id, partes[0], partes[1] if len(partes) > 1 else '', telefone))
                 conn.commit()
             except Exception:
+                # Sem perfil o cliente NÃO consegue pedir: orders.client_id
+                # referencia client_profiles. Devolver sessão aqui daria uma
+                # conta que trava no checkout sem explicação — melhor falhar
+                # agora, alto e claro.
                 logger.exception("Perfil do checkout rápido não criado")
                 try:
                     conn.rollback()
                 except Exception:
                     pass
+                return jsonify({"status": "error",
+                                "error": "Não foi possível criar sua conta agora."}), 500
             finally:
                 try:
                     conn.close()
