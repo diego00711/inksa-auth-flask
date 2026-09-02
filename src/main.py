@@ -53,6 +53,7 @@ load_dotenv()
 try:
     from src.routes.auth import auth_bp
     from src.routes.orders import orders_bp
+    from src.routes.parceiro_api import parceiro_api_bp, parceiro_credenciais_bp
     from src.routes.menu import menu_bp
     from src.routes.upload import upload_bp
     from src.routes.restaurant import restaurant_bp
@@ -268,6 +269,13 @@ app.register_blueprint(restaurant_bp, url_prefix='/api/restaurant')
 app.register_blueprint(menu_bp, url_prefix='/api/menu')
 app.register_blueprint(upload_bp, url_prefix='/api/upload')
 app.register_blueprint(orders_bp, url_prefix='/api/orders')
+
+# API pública de parceiro (PDV/ERP). Versionada na URL de propósito: contrato
+# público não se desfaz — quando precisar mudar formato, nasce /v2 e a v1
+# continua no ar até os integradores migrarem.
+app.register_blueprint(parceiro_api_bp, url_prefix='/api/parceiro/v1')
+# Gerência das credenciais: login normal do parceiro, NÃO o token da API.
+app.register_blueprint(parceiro_credenciais_bp, url_prefix='/api/parceiro/credenciais')
 app.register_blueprint(categories_bp, url_prefix='/api/categories')
 app.register_blueprint(analytics_bp, url_prefix='/api/analytics')
 app.register_blueprint(analytics_admin_bp, url_prefix="/api/analytics")
