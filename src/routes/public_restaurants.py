@@ -396,6 +396,56 @@ def list_cities():
 
 # ─── GET /api/restaurants/<restaurant_id> ───────────────────────────────────
 
+@public_restaurants_bp.get("/slug/<slug>")
+def get_restaurant_by_slug(slug):
+    """Resolve o apelido do link público (/loja/<slug>) para o id da loja.
+
+    Existe porque ninguém cola um UUID na bio do Instagram. A rota
+    /restaurantes/<uuid> do app do cliente já era pública e funcionava; o que
+    faltava era um endereço que o parceiro consiga divulgar.
+
+    Devolve só o necessário para a tela redirecionar. Os dados completos
+    continuam vindo do endpoint por id — assim existe um caminho só para
+    carregar loja, e não dois que podem divergir.
+
+    404 quando o slug não existe, ou quando a loja não está aprovada e ativa:
+    link de loja fora do ar não pode abrir uma página meio funcionando.
+    """
+    conn = None
+    try:
+        conn = _get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT rp.id, rp.restaurant_name, rp.slug
+                  FROM restaurant_profiles rp
+                  LEFT JOIN users u ON u.id = rp.user_id
+                 WHERE lower(rp.slug) = lower(%s)
+                   AND COALESCE(rp.approved, false)
+                   AND COALESCE(rp.active, false)
+                 LIMIT 1
+                """,
+                (slug,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"status": "error", "error": "Loja não encontrada"}), 404
+        return jsonify({"status": "success", "data": {
+            "id": str(row["id"]),
+            "restaurant_name": row["restaurant_name"],
+            "slug": row["slug"],
+        }}), 200
+    except Exception:
+        logger.exception("Erro em get_restaurant_by_slug")
+        return jsonify({"status": "error", "error": "Erro interno"}), 500
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 @public_restaurants_bp.get("/<uuid:restaurant_id>")
 def get_restaurant(restaurant_id):
     """
@@ -412,6 +462,7 @@ def get_restaurant(restaurant_id):
                 SELECT
                     rp.id,
                     rp.restaurant_name,
+                    rp.slug,
                     COALESCE(rp.trade_name, rp.business_name)     AS trade_name,
                     rp.logo_url,
                     NULL AS cover_url,
