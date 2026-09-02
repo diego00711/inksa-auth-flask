@@ -192,8 +192,18 @@ def _pedido_publico(linha):
             "forma": linha.get('payment_method'),
             "pago": linha.get('status_pagamento') == 'approved',
         },
+        # ⚠️ NÃO calcule o subtotal como total − frete. Parece certo e quebra
+        # sempre que houver cupom: no pedido #1001 o frete foi grátis pago
+        # PELA PLATAFORMA, então total_amount (79,87) já era só a comida, e a
+        # subtração devolvia 74,87 — cinco reais a menos que o item real.
+        # `total_amount_items` é o subtotal que o próprio checkout gravou.
+        #
+        # E por isso itens + entrega PODE não dar total: quando há cupom, o
+        # cliente paga menos que a soma. `total` é o que ele pagou.
         "valores": {
-            "itens": num(linha.get('total_amount', 0)) - num(linha.get('delivery_fee', 0)),
+            "itens": num(linha.get('total_amount_items')) if linha.get('total_amount_items') is not None
+                     else round(sum(num(i.get('unit_price') if i.get('unit_price') is not None else i.get('price'))
+                                    * (i.get('quantity') or i.get('qty') or 1) for i in produtos), 2),
             "entrega": num(linha.get('delivery_fee')),
             "total": num(linha.get('total_amount')),
         },
@@ -221,7 +231,8 @@ def _pedido_publico(linha):
 
 _SELECT_PEDIDO = """
     SELECT o.id, o.numero, o.status, o.status_pagamento, o.created_at, o.updated_at,
-           o.total_amount, o.delivery_fee, o.payment_method, o.delivery_address,
+           o.total_amount, o.total_amount_items, o.delivery_fee, o.payment_method,
+           o.delivery_address,
            o.items, o.notes,
            r.delivery_type,
            c.first_name || COALESCE(' ' || c.last_name, '') AS cliente_nome,
