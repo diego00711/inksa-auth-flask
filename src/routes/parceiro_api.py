@@ -43,9 +43,9 @@ from functools import wraps
 import psycopg2.extras
 from flask import Blueprint, jsonify, request
 
-from ..extensions import limiter
+from src.extensions import limiter
 from ..utils.catalogo import importar_itens
-from ..utils.helpers import get_db_connection
+from ..utils.helpers import get_db_connection, get_user_id_from_token
 
 logger = logging.getLogger(__name__)
 
@@ -515,7 +515,6 @@ def enviar_cardapio(loja):
 # roubasse um token poderia criar outros e sobreviver à revogação.
 # ───────────────────────────────────────────────────────────────────────────
 
-from ..utils.helpers import get_user_id_from_token  # noqa: E402
 
 parceiro_credenciais_bp = Blueprint('parceiro_credenciais_bp', __name__)
 
