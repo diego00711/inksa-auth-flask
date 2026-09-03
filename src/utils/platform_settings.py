@@ -340,9 +340,23 @@ def founding_commission_factor(restaurant_id) -> Decimal:
     """Fator multiplicador da comissão para a campanha "Parceiro Fundador".
 
     Retorna o fator promocional (ex.: 0.5 = metade) quando o restaurante está
-    marcado como `fundador` E a campanha ainda está no prazo (data fixa global
-    `founding_partner_until`, comparada no fuso America/Sao_Paulo). Caso
-    contrário retorna 1 (comissão cheia).
+    marcado como `fundador` E a janela dele ainda está aberta. Caso contrário
+    retorna 1 (comissão cheia).
+
+    ⚠️ A JANELA É POR PARCEIRO, NÃO GLOBAL. `fundador_ate` é carimbada no
+    momento em que o admin marca o selo: data da marcação + N meses
+    (`platform_settings.founding_partner_months`, hoje 6). Cada parceiro tem a
+    sua data — Sabor Supremo até 11/02/2027, Yo!Frango até 21/02/2027, e assim
+    por diante.
+
+    O desenho ORIGINAL (julho/2026) era uma data fixa para todos
+    (`founding_partner_until` = 31/01/2027) e mudou depois. Esta observação
+    existe porque a versão velha desta docstring dizia "data fixa global" e
+    fez a gente afirmar ao parceiro uma data errada — três meses depois, com
+    o código já certo. Ao mudar a regra, corrija o texto que a descreve.
+
+    A data global sobrevive só como RETAGUARDA para quem foi marcado antes de
+    a coluna `fundador_ate` existir.
 
     Fail-safe: sem restaurante, sem data definida, campanha expirada ou qualquer
     erro → 1 (nunca dá desconto por engano).
