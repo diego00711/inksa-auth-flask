@@ -186,13 +186,36 @@ def calculate_delivery_fee():
             restaurant_latitude = restaurant_data.get('latitude')
             restaurant_longitude = restaurant_data.get('longitude')
 
-            # Se o restaurante ainda não tem coordenadas, NÃO quebra o carrinho:
-            # cobra a taxa base (fixa) e sinaliza que a distância não foi calculada.
+            # LOJA SEM COORDENADA NÃO TEM FRETE — RECUSA, NÃO INVENTA.
+            #
+            # Aqui havia um fail-open: sem coordenada, cobrava a taxa base e
+            # devolvia status "success". Parecia gentil ("não quebra o
+            # carrinho") e era pior que quebrar:
+            #
+            #  • cotava o MESMO valor para qualquer distância — o cliente a
+            #    300 km via R$ 7,00 igual ao vizinho da esquina;
+            #  • pulava a trava de raio logo abaixo, que existe justamente
+            #    por causa dos pedidos São Paulo → Nova Iguaçu de agosto;
+            #  • devolvia entregadores_capazes = null, então a trava de
+            #    "existe alguém que consegue levar" não avaliava nada;
+            #  • e o pedido nasceria sem origem: o entregador retira ONDE?
+            #
+            # É o mesmo erro que o "R$ 5 padrão" do orderService cometia, e a
+            # lição está escrita lá: nunca inventar um preço. Sem endereço da
+            # loja, a resposta certa é dizer que não dá.
+            #
+            # Devolve HTTP 200 com código de erro, no mesmo formato do
+            # 'fora_da_area', porque é recusa de negócio e não falha técnica.
             if not restaurant_latitude or not restaurant_longitude:
-                logger.warning("Restaurante sem coordenadas — usando taxa base fixa")
-                delivery_fee = fixed_fee
-                distance_km = 0.0
-                calculation_method = f"Taxa base R$ {fixed_fee:.2f} (restaurante sem localização cadastrada)"
+                logger.warning(
+                    "Frete recusado: restaurante %s (%s) não tem coordenadas cadastradas",
+                    restaurant_data.get('restaurant_name'), restaurant_id)
+                return jsonify({
+                    "error": "loja_sem_endereco",
+                    "message": "Esta loja ainda não cadastrou o endereço, então não "
+                               "dá para calcular a entrega. Já avisamos o restaurante.",
+                    "restaurant_name": restaurant_data.get('restaurant_name'),
+                }), 200
             else:
                 # Calcular distância
                 distance_km = distancia_de_rua(
