@@ -3,7 +3,7 @@ from flask import Blueprint, request, jsonify
 from flask_cors import CORS
 import math
 import logging
-from ..utils.helpers import supabase
+from ..utils.helpers import get_db_connection
 from ..utils.platform_settings import get_settings
 # A conta do percurso mora em utils/area_entrega: o fechamento do pedido
 # precisa dela também, e rota não é lugar de regra compartilhada.
@@ -82,6 +82,53 @@ def _peso_do_carrinho(itens):
                 pass
 
 
+def _dados_do_restaurante(restaurant_id):
+    """Dados da loja necessários pro frete. Devolve dict ou None.
+
+    ISTO LIA PELO REST DO SUPABASE (supabase.table) E QUEBROU EM PRODUÇÃO.
+    Em 04/09/2026 o caminho REST parou de responder — login (GoTrue) e SQL
+    direto seguiram funcionando, só o PostgREST caiu pro backend. Resultado:
+    /calculate_fee devolvia 500, e sem frete NÃO FECHA PEDIDO. O catálogo
+    continuou no ar porque public_restaurants.py lê por SQL, o que deixou a
+    falha invisível na home e visível só no carrinho.
+
+    A lição não é "o REST estava fora do ar naquele dia": é que o caminho do
+    dinheiro não pode depender de um serviço a mais quando o mesmo dado está a
+    um SELECT de distância. Toda a criação de pedido (payment.py, orders.py)
+    já lia por SQL; o frete era a única peça do checkout pendurada no REST.
+    """
+    import uuid as _uuid
+    import psycopg2.extras
+
+    # id inválido vira "não encontrado", não exceção: o ::uuid do Postgres
+    # levantaria erro e devolveria 500 pra uma entrada que é só lixo.
+    try:
+        _uuid.UUID(str(restaurant_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT latitude, longitude, delivery_type, delivery_fee,
+                       restaurant_name, own_delivery_radius_km
+                  FROM public.restaurant_profiles
+                 WHERE id = %s::uuid
+            """, (str(restaurant_id),))
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 @delivery_calculator_bp.route('/calculate_fee', methods=['POST', 'OPTIONS'])
 def calculate_delivery_fee():
     """Calcula a taxa de entrega baseada no restaurante e localização do cliente"""
@@ -121,19 +168,15 @@ def calculate_delivery_fee():
         # Buscar dados do restaurante
         logger.info(f"Buscando restaurante: {restaurant_id}")
         
-        response = supabase.table('restaurant_profiles').select(
-            'latitude, longitude, delivery_type, delivery_fee, restaurant_name, '
-            'own_delivery_radius_km'
-        ).eq('id', restaurant_id).execute()
-        
-        if not response.data or len(response.data) == 0:
+        restaurant_data = _dados_do_restaurante(restaurant_id)
+
+        if not restaurant_data:
             logger.error(f"Restaurante não encontrado: {restaurant_id}")
             return jsonify({
                 "status": "error",
                 "error": "Restaurante não encontrado"
             }), 404
 
-        restaurant_data = response.data[0]
         logger.info(f"Dados do restaurante: {restaurant_data}")
         
         delivery_type = restaurant_data.get('delivery_type', 'platform')
