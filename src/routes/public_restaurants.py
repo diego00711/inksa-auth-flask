@@ -449,7 +449,7 @@ def get_restaurant_by_slug(slug):
 def _situacao_entregadores(loja):
     """Se esta loja tem quem entregue agora. Alimenta o aviso e a trava.
 
-    Devolve {cadastrados, trabalhando, bloqueado, titulo, detalhe}.
+    Devolve {cadastrados, online_agora, bloqueado, titulo, detalhe}.
 
     TRÊS CASOS QUE NÃO BLOQUEIAM, e cada um por um motivo diferente:
 
@@ -458,38 +458,38 @@ def _situacao_entregadores(loja):
     2. NÃO DEU PRA APURAR (loja sem coordenada, tropeço de banco). Falha de
        leitura não é ausência de entregador — fechar a loja por causa disso
        custa venda de verdade e não protege ninguém.
-    3. Tem alguém trabalhando. O caminho normal.
+    3. Tem alguém ONLINE agora. O caminho normal.
 
-    A diferença entre `cadastrados = 0` e `trabalhando = 0` é o que o cliente
+    A diferença entre `cadastrados = 0` e `online_agora = 0` é o que o cliente
     precisa saber: no primeiro caso a região não é atendida e voltar mais
     tarde não adianta; no segundo é só ninguém em serviço agora.
     """
-    vazio = {"cadastrados": None, "trabalhando": None, "bloqueado": False,
+    vazio = {"cadastrados": None, "online_agora": None, "bloqueado": False,
              "titulo": None, "detalhe": None}
 
     if (loja.get("delivery_type") or "platform") != "platform":
         return vazio
 
     try:
-        from ..utils.carga import contar_trabalhando
+        from ..utils.carga import contar_capazes
         from ..utils.platform_settings import get_settings
-        cadastrados, trabalhando = contar_trabalhando(
+        cadastrados, online_agora = contar_capazes(
             0, loja.get("latitude"), loja.get("longitude"), get_settings())
     except Exception:
         logger.warning("Não deu pra apurar entregadores da loja %s", loja.get("id"),
                        exc_info=True)
         return vazio
 
-    if cadastrados is None or trabalhando is None:
+    if cadastrados is None or online_agora is None:
         return vazio
 
-    if trabalhando > 0:
-        return {"cadastrados": cadastrados, "trabalhando": trabalhando,
+    if online_agora > 0:
+        return {"cadastrados": cadastrados, "online_agora": online_agora,
                 "bloqueado": False, "titulo": None, "detalhe": None}
 
     return {
         "cadastrados": cadastrados,
-        "trabalhando": 0,
+        "online_agora": 0,
         "bloqueado": True,
         "titulo": "Sem entregadores ativos na sua região",
         "detalhe": (

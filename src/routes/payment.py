@@ -424,10 +424,12 @@ def _sem_entregador(restaurant_id):
     cardápio pula a home. Esta é a barreira autoritativa, do mesmo jeito que
     _restaurant_is_closed é para a loja fechada.
 
-    "Ninguém para entregar" usa esta_trabalhando (online OU sinal em 3h), e
-    não is_available cru — o Android congela o app em segundo plano e mata o
-    heartbeat, então bloquear por is_available recusaria pedido com entregador
-    rodando. A regra mora em utils/carga.py e é a mesma que decide o push.
+    "Ninguém para entregar" é ONLINE AGORA, sem janela de tolerância. A defesa
+    contra o Android congelar o app em segundo plano já existe uma camada
+    abaixo: o scheduler só desliga quem passa 30 min sem heartbeat, e nunca
+    desliga quem está com entrega na mão. Empilhar outra janela aqui deixava a
+    loja aceitando pedido horas depois de o último entregador sair — foi o que
+    aconteceu em produção. Ver a nota em utils/carga.py.
 
     LOJA DE ENTREGA PRÓPRIA NÃO ENTRA AQUI: ela não usa entregador da Inksa.
 
@@ -441,7 +443,7 @@ def _sem_entregador(restaurant_id):
     try:
         import psycopg2.extras
         from ..utils.helpers import get_db_connection
-        from ..utils.carga import contar_trabalhando
+        from ..utils.carga import contar_capazes
         from ..utils.platform_settings import get_settings
 
         conn = get_db_connection()
@@ -457,11 +459,11 @@ def _sem_entregador(restaurant_id):
         if (loja['delivery_type'] or 'platform') != 'platform':
             return False
 
-        _cad, trabalhando = contar_trabalhando(
+        _cad, online_agora = contar_capazes(
             0, loja['latitude'], loja['longitude'], get_settings())
-        if trabalhando is None:
+        if online_agora is None:
             return False
-        return trabalhando <= 0
+        return online_agora <= 0
     except Exception as e:
         logging.warning(f"⚠️ Não foi possível checar entregadores da loja {restaurant_id}: {e}")
         return False

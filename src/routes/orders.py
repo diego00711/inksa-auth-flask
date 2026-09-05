@@ -416,14 +416,14 @@ def handle_orders():
                 # Loja de entrega própria não entra: ela não usa entregador da
                 # Inksa. Fail-open se não der pra apurar, igual à trava acima.
                 #
-                # contar_trabalhando abre a PRÓPRIA conexão, então `cur`
+                # contar_capazes abre a PRÓPRIA conexão, então `cur`
                 # continua válido para o peso_do_pedido logo abaixo.
                 if _rest is not None and (_rest.get('delivery_type') or 'platform') == 'platform':
-                    from ..utils.carga import contar_trabalhando
+                    from ..utils.carga import contar_capazes
                     from ..utils.platform_settings import get_settings
-                    _cad, _trab = contar_trabalhando(
+                    _cad, _online = contar_capazes(
                         0, _rest.get('latitude'), _rest.get('longitude'), get_settings())
-                    if _trab is not None and _trab <= 0:
+                    if _online is not None and _online <= 0:
                         return jsonify({
                             "error": "Sem entregadores ativos na sua região. Nenhum entregador "
                                      "está em serviço agora, então não dá para fechar o pedido "

@@ -493,27 +493,22 @@ def esta_trabalhando(apto):
     return hb >= datetime.now(timezone.utc) - timedelta(hours=_JANELA_PUSH_HORAS)
 
 
-def contar_trabalhando(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
-    """(cadastrados, trabalhando) — a conta que decide se a loja aceita pedido.
-
-    Difere de contar_capazes só no segundo número: lá é `is_available` cru,
-    aqui é `esta_trabalhando`. Para AVISAR ("pode demorar"), o número cru
-    serve; para BLOQUEAR, não — bloquear por is_available fecharia a loja
-    justamente no caso mais comum, o entregador rodando com o app congelado
-    pelo Android em segundo plano.
-
-    (None, None) quando não deu pra apurar. Quem chama NÃO deve bloquear
-    nesse caso: falha de leitura não é ausência de entregador, e fechar a
-    loja por causa de um tropeço de banco custa venda de verdade.
-    """
-    if rest_lat is None or rest_lng is None:
-        return (None, None)
-    try:
-        aptos = _aptos(peso_kg, rest_lat, rest_lng, settings, distancia_km)
-    except Exception:
-        logger.warning("Não deu pra contar entregadores trabalhando", exc_info=True)
-        return (None, None)
-    return (len(aptos), sum(1 for a in aptos if esta_trabalhando(a)))
+# A TRAVA DA LOJA USA `contar_capazes`, NÃO `esta_trabalhando`. Por quê:
+#
+# Existiu aqui uma contar_trabalhando() que aplicava a janela de 3h também na
+# trava. Era redundância, e apareceu em produção como loja aberta sem ninguém:
+# o entregador desligou de propósito e a loja seguiu aceitando pedido.
+#
+# O motivo é que a proteção contra o Android congelar o app JÁ EXISTE uma
+# camada abaixo — o scheduler só desliga (is_available=false) depois de 30 min
+# sem heartbeat, e nunca desliga quem está com entrega na mão. Somando a minha
+# janela dava até 3h30 de loja aberta à toa.
+#
+# Então as duas perguntas são DIFERENTES de propósito, e não duas cópias:
+#   • PUSH  -> online OU sinal em 3h. Errar acordando quem parou é incômodo;
+#              não acordar quem trabalha é entrega perdida.
+#   • TRAVA -> online e ponto. Errar aberto é pedido que ninguém entrega.
+# Cada erro cai pro lado barato da sua própria pergunta.
 
 
 def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
@@ -521,7 +516,8 @@ def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=
 
     Apto (capacidade, raio, aprovado) E provavelmente trabalhando — o que NÃO
     é o mesmo que is_available=true. A regra e o porquê moram em
-    esta_trabalhando(), que a trava de "loja sem entregador" também usa.
+    esta_trabalhando(), usada SÓ aqui: a trava que fecha a loja usa
+    contar_capazes (online e ponto), pelo motivo explicado na nota abaixo dela.
 
     Se o push exigisse is_available, ele pararia de chegar exatamente na
     situação em que é a ÚNICA coisa que alcança o entregador: app fechado, ele
