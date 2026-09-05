@@ -21,8 +21,16 @@ VALID_PRIORITY = {"Baixo", "Médio", "Alto", "Crítico"}
 # sem erro nenhum pra denunciar.
 # "Financeiro" já era oferecida no app do Parceiro e NÃO estava aqui: quem
 # escolhia caía no mesmo fallback e via o ticket arquivado como "Dúvida".
-VALID_CATEGORY = {"Dúvida", "Pagamento", "Pedido", "Entrega", "Cardápio", "Financeiro",
-                  "Conta", "Técnico", "Integração", "Outro"}
+# "Sugestão" é a TERCEIRA vez que esta lista morde. Ela entrou com o item
+# "Sugestões" nos três apps; sem ela aqui, toda sugestão viraria "Dúvida",
+# o filtro de Sugestões no admin marcaria zero para sempre, e nada no
+# caminho daria erro — ticket criado, HTTP 201, dado errado.
+#
+# ⚠️ REGRA: categoria nova em QUALQUER app entra aqui NO MESMO COMMIT. Esta
+# lista é a única coisa que decide se a escolha do usuário sobrevive, e o
+# fallback é mudo por natureza.
+VALID_CATEGORY = {"Dúvida", "Sugestão", "Pagamento", "Pedido", "Entrega", "Cardápio",
+                  "Financeiro", "Conta", "Técnico", "Integração", "Outro"}
 
 
 def _auth_required():
