@@ -459,46 +459,79 @@ def contar_capazes(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None
     return (len(aptos), sum(1 for a in aptos if a['online']))
 
 
-# Janela de "provavelmente ainda trabalhando" pro push. Ver a explicação
-# em tokens_para_avisar.
+# Janela de "provavelmente ainda trabalhando". Ver a explicação em
+# esta_trabalhando.
 _JANELA_PUSH_HORAS = 3
 
 
-def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
-    """Tokens de push de quem deve ser acordado por ESTE pedido.
+def esta_trabalhando(apto):
+    """Este entregador provavelmente está em serviço agora?
 
-    Apto (capacidade, raio, aprovado) E provavelmente trabalhando. "Provavelmente
-    trabalhando" NÃO é o mesmo que is_available=true, e a diferença importa:
+    NÃO é o mesmo que is_available=true, e a diferença decide venda:
 
     O app manda heartbeat a cada 2 min, e um job desliga (is_available=false)
     quem fica 30 min sem bater. Só que o Android congela o app em segundo
     plano — o heartbeat morre no minuto em que o entregador troca pro
     WhatsApp. Meia hora depois ele consta como offline SEM ter tocado em nada.
 
-    Se o push exigisse is_available, ele pararia de chegar exatamente na
-    situação em que o push é a ÚNICA coisa que alcança o entregador: app
-    fechado, ele esperando corrida no WhatsApp. Eu tinha escrito assim; era
-    uma trava que se fecha justo na hora de servir.
-
     Por isso: online AGORA **ou** deu sinal de vida nas últimas 3 horas.
+
+    MORA AQUI, solta, porque agora tem DOIS donos: o push de "entrega
+    disponível" e a trava que fecha a loja quando não há ninguém para levar.
+    Se cada um tivesse a sua cópia, um dia o push acordaria alguém que a
+    trava considera inexistente — e a loja apareceria fechada com entregador
+    trabalhando. Duas regras pra uma pergunta é uma delas errada.
+    """
+    from datetime import datetime, timedelta, timezone
+    if apto.get('online'):
+        return True
+    hb = apto.get('last_heartbeat')
+    if not hb:
+        return False
+    if hb.tzinfo is None:
+        hb = hb.replace(tzinfo=timezone.utc)
+    return hb >= datetime.now(timezone.utc) - timedelta(hours=_JANELA_PUSH_HORAS)
+
+
+def contar_trabalhando(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
+    """(cadastrados, trabalhando) — a conta que decide se a loja aceita pedido.
+
+    Difere de contar_capazes só no segundo número: lá é `is_available` cru,
+    aqui é `esta_trabalhando`. Para AVISAR ("pode demorar"), o número cru
+    serve; para BLOQUEAR, não — bloquear por is_available fecharia a loja
+    justamente no caso mais comum, o entregador rodando com o app congelado
+    pelo Android em segundo plano.
+
+    (None, None) quando não deu pra apurar. Quem chama NÃO deve bloquear
+    nesse caso: falha de leitura não é ausência de entregador, e fechar a
+    loja por causa de um tropeço de banco custa venda de verdade.
+    """
+    if rest_lat is None or rest_lng is None:
+        return (None, None)
+    try:
+        aptos = _aptos(peso_kg, rest_lat, rest_lng, settings, distancia_km)
+    except Exception:
+        logger.warning("Não deu pra contar entregadores trabalhando", exc_info=True)
+        return (None, None)
+    return (len(aptos), sum(1 for a in aptos if esta_trabalhando(a)))
+
+
+def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
+    """Tokens de push de quem deve ser acordado por ESTE pedido.
+
+    Apto (capacidade, raio, aprovado) E provavelmente trabalhando — o que NÃO
+    é o mesmo que is_available=true. A regra e o porquê moram em
+    esta_trabalhando(), que a trava de "loja sem entregador" também usa.
+
+    Se o push exigisse is_available, ele pararia de chegar exatamente na
+    situação em que é a ÚNICA coisa que alcança o entregador: app fechado, ele
+    esperando corrida no WhatsApp. Eu tinha escrito assim; era uma trava que
+    se fecha justo na hora de servir.
 
     O erro escolhido é assumido. Acordar quem desligou há uma hora é um
     incômodo que ele descarta; não acordar quem está trabalhando é entrega
     perdida e um entregador convencido de que o app não presta. Entre os dois,
     erra-se pro lado de tocar.
     """
-    from datetime import datetime, timedelta, timezone
-    corte = datetime.now(timezone.utc) - timedelta(hours=_JANELA_PUSH_HORAS)
-
-    def _trabalhando(a):
-        if a['online']:
-            return True
-        hb = a.get('last_heartbeat')
-        if not hb:
-            return False
-        if hb.tzinfo is None:
-            hb = hb.replace(tzinfo=timezone.utc)
-        return hb >= corte
-
     return [a['fcm_token'] for a in _aptos(peso_kg, rest_lat, rest_lng, settings, distancia_km)
-            if a['fcm_token'] and _trabalhando(a)]
+            if a['fcm_token'] and esta_trabalhando(a)]

@@ -416,6 +416,69 @@ def _restaurant_is_closed(restaurant_id) -> bool:
         return False
 
 
+def _sem_entregador(restaurant_id):
+    """True quando a loja é da plataforma e NÃO há ninguém para entregar.
+
+    A tela da loja já avisa antes do carrinho, mas aviso de tela não é trava:
+    o último entregador pode sair enquanto a pessoa escolhe, e link direto pro
+    cardápio pula a home. Esta é a barreira autoritativa, do mesmo jeito que
+    _restaurant_is_closed é para a loja fechada.
+
+    "Ninguém para entregar" usa esta_trabalhando (online OU sinal em 3h), e
+    não is_available cru — o Android congela o app em segundo plano e mata o
+    heartbeat, então bloquear por is_available recusaria pedido com entregador
+    rodando. A regra mora em utils/carga.py e é a mesma que decide o push.
+
+    LOJA DE ENTREGA PRÓPRIA NÃO ENTRA AQUI: ela não usa entregador da Inksa.
+
+    Fail-open, igual às travas vizinhas: não deu pra checar, deixa passar.
+    Falha de leitura não é ausência de entregador, e derrubar o checkout de
+    todo mundo por um hiccup de banco é pior que um pedido que a loja recusa.
+    """
+    if not restaurant_id:
+        return False
+    conn = None
+    try:
+        import psycopg2.extras
+        from ..utils.helpers import get_db_connection
+        from ..utils.carga import contar_trabalhando
+        from ..utils.platform_settings import get_settings
+
+        conn = get_db_connection()
+        if not conn:
+            return False
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""SELECT latitude, longitude, delivery_type
+                             FROM public.restaurant_profiles WHERE id = %s::uuid""",
+                        (str(restaurant_id),))
+            loja = cur.fetchone()
+        if not loja:
+            return False
+        if (loja['delivery_type'] or 'platform') != 'platform':
+            return False
+
+        _cad, trabalhando = contar_trabalhando(
+            0, loja['latitude'], loja['longitude'], get_settings())
+        if trabalhando is None:
+            return False
+        return trabalhando <= 0
+    except Exception as e:
+        logging.warning(f"⚠️ Não foi possível checar entregadores da loja {restaurant_id}: {e}")
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+_MSG_SEM_ENTREGADOR = (
+    "Sem entregadores ativos na sua região. Nenhum entregador está em serviço "
+    "agora, então não dá para fechar o pedido — tente daqui a pouco."
+)
+
+
 def _excede_limite_de_itens(restaurant_id, itens):
     """(True, mensagem) quando o pedido passa do limite de unidades da loja.
 
@@ -505,6 +568,11 @@ def criar_preferencia_mercado_pago():
             logging.info(f"⛔ Pedido barrado: restaurante {dados_pedido.get('restaurant_id')} está fechado.")
             _body, _code = _RESTAURANT_CLOSED_RESPONSE
             return jsonify(_body), _code
+
+        # 🔒 Trava: não aceita pedido se não houver quem entregue.
+        if _sem_entregador(dados_pedido.get('restaurant_id')):
+            logging.info(f"⛔ Pedido barrado: sem entregador para a loja {dados_pedido.get('restaurant_id')}.")
+            return jsonify({"erro": _MSG_SEM_ENTREGADOR, "codigo": "sem_entregador"}), 409
 
         # 🔒 Trava: pedido grande demais pro que a loja consegue entregar.
         _excede, _msg = _excede_limite_de_itens(
@@ -1356,6 +1424,11 @@ def processar_pagamento_cartao():
             logging.info(f"⛔ Pedido (cartão) barrado: restaurante {d.get('restaurant_id')} está fechado.")
             _body, _code = _RESTAURANT_CLOSED_RESPONSE
             return jsonify(_body), _code
+
+        # 🔒 Trava: não aceita pedido se não houver quem entregue.
+        if _sem_entregador(d.get('restaurant_id')):
+            logging.info(f"⛔ Pedido (cartão) barrado: sem entregador para a loja {d.get('restaurant_id')}.")
+            return jsonify({"erro": _MSG_SEM_ENTREGADOR, "codigo": "sem_entregador"}), 409
 
         _excede, _msg = _excede_limite_de_itens(d.get('restaurant_id'), items_req)
         if _excede:

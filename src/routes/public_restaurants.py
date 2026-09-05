@@ -446,6 +446,61 @@ def get_restaurant_by_slug(slug):
                 pass
 
 
+def _situacao_entregadores(loja):
+    """Se esta loja tem quem entregue agora. Alimenta o aviso e a trava.
+
+    Devolve {cadastrados, trabalhando, bloqueado, titulo, detalhe}.
+
+    TRÊS CASOS QUE NÃO BLOQUEIAM, e cada um por um motivo diferente:
+
+    1. LOJA DE ENTREGA PRÓPRIA. Ela não usa entregador da Inksa; travar aqui
+       fecharia uma loja que entrega sozinha sem problema nenhum.
+    2. NÃO DEU PRA APURAR (loja sem coordenada, tropeço de banco). Falha de
+       leitura não é ausência de entregador — fechar a loja por causa disso
+       custa venda de verdade e não protege ninguém.
+    3. Tem alguém trabalhando. O caminho normal.
+
+    A diferença entre `cadastrados = 0` e `trabalhando = 0` é o que o cliente
+    precisa saber: no primeiro caso a região não é atendida e voltar mais
+    tarde não adianta; no segundo é só ninguém em serviço agora.
+    """
+    vazio = {"cadastrados": None, "trabalhando": None, "bloqueado": False,
+             "titulo": None, "detalhe": None}
+
+    if (loja.get("delivery_type") or "platform") != "platform":
+        return vazio
+
+    try:
+        from ..utils.carga import contar_trabalhando
+        from ..utils.platform_settings import get_settings
+        cadastrados, trabalhando = contar_trabalhando(
+            0, loja.get("latitude"), loja.get("longitude"), get_settings())
+    except Exception:
+        logger.warning("Não deu pra apurar entregadores da loja %s", loja.get("id"),
+                       exc_info=True)
+        return vazio
+
+    if cadastrados is None or trabalhando is None:
+        return vazio
+
+    if trabalhando > 0:
+        return {"cadastrados": cadastrados, "trabalhando": trabalhando,
+                "bloqueado": False, "titulo": None, "detalhe": None}
+
+    return {
+        "cadastrados": cadastrados,
+        "trabalhando": 0,
+        "bloqueado": True,
+        "titulo": "Sem entregadores ativos na sua região",
+        "detalhe": (
+            "Nenhum entregador está em serviço agora. Assim que alguém entrar, "
+            "a loja volta a aceitar pedidos — tente daqui a pouco."
+            if cadastrados > 0 else
+            "Ainda não temos entregadores cadastrados para atender esta região."
+        ),
+    }
+
+
 @public_restaurants_bp.get("/<uuid:restaurant_id>")
 def get_restaurant(restaurant_id):
     """
@@ -509,6 +564,17 @@ def get_restaurant(restaurant_id):
                 max(cupons, key=lambda c: _peso_cupom(c, data.get("delivery_fee")))["label"]
                 if cupons else None
             )
+
+        # TEM QUEM ENTREGUE? A pergunta é respondida AQUI, antes do cardápio.
+        #
+        # Aceitar pedido sem entregador é o pior desfecho possível: o cliente
+        # já pagou, a loja já produziu, e alguém tem que desfazer os dois na
+        # mão. Uma venda não feita custa menos que isso.
+        #
+        # Cabe nesta rota porque ela roda no ABRIR DA LOJA e já traz lat/lng —
+        # a conta usa a posição da LOJA, não a do cliente, então dá pra avisar
+        # antes de a pessoa informar endereço e antes de montar carrinho.
+        data["entregadores"] = _situacao_entregadores(data)
 
         return jsonify({"status": "success", "data": data}), 200
 
