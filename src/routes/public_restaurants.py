@@ -683,11 +683,17 @@ def get_restaurant_menu(restaurant_id):
                 item.pop('promo_price', None)
                 items.append(item)
 
-        # MAIS PEDIDOS — só depois de consumir o cursor do cardápio acima.
-        # Rodar antes descartaria as linhas do menu, que ainda não foram lidas.
-        vendas = _vendas_por_item(cur, restaurant_id)
-        for item in items:
-            item['vendas'] = int(vendas.get(str(item.get('id')), 0))
+            # MAIS PEDIDOS — DENTRO do `with`, e depois do fetchall acima.
+            #
+            # Duas restrições que se apertam: rodar ANTES do loop descartaria as
+            # linhas do cardápio, que ainda não foram lidas; rodar FORA do bloco
+            # usa um cursor já fechado. A primeira versão caiu na segunda — e
+            # como o helper devolve {} em qualquer falha, a resposta continuava
+            # 200 com o ranking eternamente vazio. Só apareceu porque eu fui
+            # conferir o número em produção; a tela não teria como acusar.
+            vendas = _vendas_por_item(cur, restaurant_id)
+            for item in items:
+                item['vendas'] = int(vendas.get(str(item.get('id')), 0))
 
         # Group by category in Python — preserves insertion order (Python 3.7+)
         grouped: dict[str, list] = {}
