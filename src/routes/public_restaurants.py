@@ -522,6 +522,62 @@ def get_restaurant(restaurant_id):
 
 # ─── GET /api/restaurants/<restaurant_id>/menu ──────────────────────────────
 
+# Janela do ranking. "Mais pedidos" precisa de prazo, senão o campeão de um ano
+# atrás congela o topo do cardápio para sempre e a loja não consegue mudar o
+# que vende — nem quando tira o item de linha.
+_JANELA_MAIS_PEDIDOS_DIAS = 90
+
+
+def _vendas_por_item(cur, restaurant_id, dias=_JANELA_MAIS_PEDIDOS_DIAS):
+    """Unidades vendidas por item DESTA loja na janela. {menu_item_id: unidades}.
+
+    Conta por `menu_item_id`, nunca pelo nome: casar por nome quebra no dia em
+    que o parceiro renomeia "X-Salada" para "X Salada" — o histórico do item
+    zeraria e ele despencaria do ranking sem ninguém entender por quê.
+
+    Pedido cancelado/estornado não é venda. Linha de frete não tem
+    menu_item_id, então cai fora sozinha no WHERE.
+
+    NUNCA DERRUBA O CARDÁPIO. Qualquer tropeço aqui devolve {} e a tela
+    desenha o cardápio normal, só sem o ranking — mas loga com stack, porque
+    ranking silenciosamente vazio é indistinguível de loja sem vendas.
+    """
+    try:
+        cur.execute(
+            """
+            WITH linhas AS (
+                SELECT jsonb_array_elements(
+                         CASE jsonb_typeof(o.items)
+                           WHEN 'array'  THEN o.items
+                           WHEN 'string' THEN (o.items #>> '{}')::jsonb
+                           WHEN 'object' THEN COALESCE(o.items->'items', '[]'::jsonb)
+                           ELSE '[]'::jsonb
+                         END) AS item
+                  FROM orders o
+                 WHERE o.restaurant_id = %s
+                   AND o.items IS NOT NULL
+                   AND o.created_at >= now() - make_interval(days => %s)
+                   AND COALESCE(o.status, '') NOT IN (
+                       'cancelled', 'canceled', 'cancelado', 'rejected',
+                       'rejeitado', 'payment_failed', 'refunded', 'estornado')
+            )
+            SELECT item->>'menu_item_id' AS mid,
+                   SUM(CASE WHEN item->>'quantity' ~ '^[0-9]+(\\.[0-9]+)?$'
+                            THEN (item->>'quantity')::numeric
+                            ELSE 1 END) AS unidades
+              FROM linhas
+             WHERE item->>'menu_item_id' IS NOT NULL
+             GROUP BY 1
+            """,
+            (str(restaurant_id), int(dias)),
+        )
+        return {r[0]: int(r[1] or 0) for r in cur.fetchall()}
+    except Exception:
+        logger.warning("Ranking de mais pedidos falhou na loja %s — cardápio segue sem ele",
+                       restaurant_id, exc_info=True)
+        return {}
+
+
 @public_restaurants_bp.get("/<uuid:restaurant_id>/menu")
 def get_restaurant_menu(restaurant_id):
     """
@@ -627,6 +683,12 @@ def get_restaurant_menu(restaurant_id):
                 item.pop('promo_price', None)
                 items.append(item)
 
+        # MAIS PEDIDOS — só depois de consumir o cursor do cardápio acima.
+        # Rodar antes descartaria as linhas do menu, que ainda não foram lidas.
+        vendas = _vendas_por_item(cur, restaurant_id)
+        for item in items:
+            item['vendas'] = int(vendas.get(str(item.get('id')), 0))
+
         # Group by category in Python — preserves insertion order (Python 3.7+)
         grouped: dict[str, list] = {}
         for item in items:
@@ -634,7 +696,17 @@ def get_restaurant_menu(restaurant_id):
             grouped.setdefault(cat, []).append(item)
 
         categories = [{"name": cat, "items": itms} for cat, itms in grouped.items()]
-        return jsonify({"status": "success", "categories": categories}), 200
+        # Quantos itens JÁ FORAM VENDIDOS na janela. A tela usa isto para decidir
+        # se mostra a opção "Mais pedidos": com a loja sem histórico, o botão
+        # existiria e não faria nada — controle morto é pior que ausente.
+        return jsonify({
+            "status": "success",
+            "categories": categories,
+            "ranking": {
+                "itens_com_venda": sum(1 for v in vendas.values() if v > 0),
+                "janela_dias": _JANELA_MAIS_PEDIDOS_DIAS,
+            },
+        }), 200
 
     except Exception as e:
         logger.exception("Erro ao buscar cardápio do restaurante %s: %s", restaurant_id, e)
