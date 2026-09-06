@@ -71,7 +71,21 @@ def login():
         if not data or 'email' not in data or 'password' not in data:
             return jsonify({"status": "error", "error": "Preencha e-mail e senha."}), 400
 
-        email, password = data.get('email'), data.get('password')
+        # ⚠️ .strip().lower() NO E-MAIL. Esta era a ÚNICA rota de autenticação
+        # que comparava o e-mail cru — /register, /forgot-password e as outras
+        # já limpavam. No celular o teclado capitaliza a primeira letra sozinho
+        # e o autocompletar deixa espaço no fim, então "Fd230905@gmail.com " ia
+        # pro GoTrue e não achava ninguém: a pessoa recebia "e-mail ou senha
+        # incorretos" com a senha CERTA.
+        #
+        # O sintoma enganava feio: pedir nova senha funcionava (aquela rota
+        # limpa), trocar funcionava, e só o login falhava — parecia reset
+        # quebrado. Custou uma tarde inteira em 06/09/2026, e a prova foi o
+        # Diego digitar tudo minúsculo no celular e entrar de primeira.
+        #
+        # A SENHA NÃO PODE SER TOCADA: espaço em senha é caractere legítimo.
+        email = (data.get('email') or '').strip().lower()
+        password = data.get('password')
         # Cada app envia o tipo esperado (client/restaurant/delivery) para bloquear login cruzado
         expected_user_type = (data.get('expected_user_type') or '').strip().lower() or None
 
