@@ -484,12 +484,26 @@ def calculate_platform_commission(subtotal, restaurant_id=None, retirada=False) 
     rate = effective_commission_rate(restaurant_id)
     if retirada:
         try:
-            fator = get_settings()["pickup_commission_factor"]
+            cfg = get_settings()
+            fator = cfg["pickup_commission_factor"]
+            base = cfg["commission_rate"]
         except Exception:
             logger.exception("pickup_commission_factor indisponível; usando metade")
-            fator = Decimal("0.5")
+            fator, base = Decimal("0.5"), rate
         # Piso em zero e teto na taxa cheia: fator fora da faixa é erro de
         # digitação no admin, não intenção de pagar pra vender.
         fator = max(Decimal("0"), min(Decimal("1"), fator))
-        rate = rate * fator
+
+        # ⚠️ NÃO EMPILHA COM OS OUTROS DESCONTOS — vale o MELHOR dos dois, que é
+        # a mesma regra já usada entre Parceiro Fundador e Clube (ver
+        # effective_commission_rate). Multiplicar por cima do que sobrou é o que
+        # eu tinha feito, e o resultado apareceu no primeiro pedido real: o
+        # #1005 pagou 3,75% (15% -> 7,5% de fundador -> 3,75% de retirada).
+        # Como TODAS as lojas são fundadoras até fev/2027, isso significaria a
+        # plataforma inteira a 3,75% na retirada.
+        #
+        # Com o min, o fundador fica nos 7,5% enquanto a campanha durar, e
+        # quando ela vencer a retirada continua valendo 7,5% contra 15% da
+        # entrega — o desconto não desaparece, só para de dobrar.
+        rate = min(rate, base * fator)
     return (sub * rate).quantize(Decimal("0.01"))
