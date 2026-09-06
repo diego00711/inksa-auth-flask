@@ -826,6 +826,14 @@ def update_restaurant(restaurant_id):
         "address_neighborhood": "address_neighborhood",
         "address_complement": "address_complement",
         "address_state": "address_state",
+        # PAGAMENTO EM DINHEIRO passou a ser controle exclusivo do admin em
+        # 06/09/2026: saiu do app do Parceiro porque o dono ligava entendendo
+        # que o entregador traria o dinheiro dele, quando na verdade o
+        # entregador fica com o dinheiro e devolve pela via do repasse.
+        # Sem esta linha o botão novo do admin salvaria e não mudaria nada —
+        # a mesma armadilha de whitelist que já mordeu o accepts_cash no
+        # caminho do parceiro (ver restaurant.py).
+        "accepts_cash": "accepts_cash",
     }
 
     sets, params = [], []

@@ -190,11 +190,16 @@ def handle_profile():
                 'bank_account_number', 'bank_account_type', 'pix_key', 'pix_key_type',
                 'mp_account_id', 'delivery_type', 'own_delivery_radius_km',
                 'max_order_items',
-                # accepts_cash faltava aqui: o app mandava, o filtro descartava
-                # sem avisar, a tela dizia "salvo" e o cliente continuava vendo
-                # a opção de dinheiro. Whitelist que engole campo em silêncio é
-                # pior que erro — ninguém tem como perceber.
-                'accepts_cash',
+                # ⚠️ 'accepts_cash' SAIU DAQUI EM 06/09/2026, de propósito.
+                # O parceiro ligava "aceito dinheiro" entendendo que o
+                # entregador traria o dinheiro dele. Na mecânica da Inksa o
+                # entregador FICA com o dinheiro e passa a dever à plataforma;
+                # a loja recebe pelo repasse, não no balcão. Essa distância
+                # entre o que ele entende e o que acontece gera briga sobre
+                # dinheiro, que é a pior briga que existe.
+                # Agora quem liga é o admin (admin.py, PUT /admin/restaurants).
+                # Tirar da lista é o que REALMENTE bloqueia: sem isso, bastaria
+                # uma requisição montada à mão pra gravar o campo.
                 # Retirada no local. Entra aqui NO MESMO COMMIT em que o app
                 # ganha o botão — é literalmente a armadilha descrita acima, e
                 # ela já mordeu o accepts_cash.
