@@ -69,9 +69,10 @@ def get_analytics_summary(conn):
             logging.info(f"📅 Filtrando desde: {date_limit}")
             
             cur.execute("""
-                SELECT total_amount, items, created_at, client_id, estimated_prep_time
+                SELECT total_amount, items, created_at, client_id, estimated_prep_time,
+                       (created_at AT TIME ZONE 'America/Sao_Paulo') AS created_at_local
                 FROM orders
-                WHERE restaurant_id = %s 
+                WHERE restaurant_id = %s
                 AND status = 'delivered'
                 AND created_at >= %s
                 ORDER BY created_at DESC
@@ -81,15 +82,27 @@ def get_analytics_summary(conn):
             logging.info(f"📅 Buscando TODOS os pedidos")
             
             cur.execute("""
-                SELECT total_amount, items, created_at, client_id, estimated_prep_time
+                SELECT total_amount, items, created_at, client_id, estimated_prep_time,
+                       (created_at AT TIME ZONE 'America/Sao_Paulo') AS created_at_local
                 FROM orders
-                WHERE restaurant_id = %s 
+                WHERE restaurant_id = %s
                 AND status = 'delivered'
                 ORDER BY created_at DESC
             """, (restaurant_id,))
         
         orders = cur.fetchall()
         logging.info(f"📦 Pedidos encontrados: {len(orders)}")
+
+        # HORA DO PEDIDO É A HORA DE LAGES, NÃO A DO BANCO. A sessão do Postgres
+        # roda em UTC, então `created_at` chega 3 horas adiantado. Lendo direto
+        # dele, um pedido das 20h aparecia como 23h no gráfico de pico, e um
+        # pedido das 21h30 de sábado era contado no domingo — bem no jantar, que
+        # é quando delivery acontece. O painel mandaria o parceiro reforçar
+        # equipe no horário errado, sem nada denunciando o erro.
+        # A conversão vem pronta do SQL (created_at_local); o fallback só existe
+        # pra o dia em que alguém acrescentar uma terceira query e esquecer dela.
+        def _quando(order):
+            return order.get('created_at_local') or order['created_at']
 
         # --- Cálculos em Python ---
 
@@ -128,7 +141,7 @@ def get_analytics_summary(conn):
         sales_by_day = {}
         if orders:
             for order in orders:
-                order_date = order['created_at'].date()
+                order_date = _quando(order).date()
                 day_str = order_date.strftime('%Y-%m-%d')
                 sales_by_day[day_str] = sales_by_day.get(day_str, 0) + float(order['total_amount'])
         
@@ -194,7 +207,7 @@ def get_analytics_summary(conn):
         # e quando vale promover.
         por_hora, por_dow = {}, {}
         for order in orders:
-            dt = order['created_at']
+            dt = _quando(order)
             valor = float(order['total_amount'] or 0)
             por_hora[dt.hour] = por_hora.get(dt.hour, 0.0) + valor
             por_dow[dt.weekday()] = por_dow.get(dt.weekday(), 0.0) + valor
