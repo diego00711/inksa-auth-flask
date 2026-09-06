@@ -963,7 +963,8 @@ def complete_order(order_id):
                             completed_order['delivery_id'], completed_order['restaurant_id'],
                             order['total_amount'], order['delivery_fee'], order.get('comissao_plataforma'),
                             # Cupom da própria loja sai do repasse dela.
-                            desconto_parceiro=_desc)
+                            desconto_parceiro=_desc,
+                            retirada=bool(order['is_pickup']))
                         logger.info(f"💵 Pedido dinheiro {order_id} liquidado no fechamento (novo={_was_new})")
                     else:
                         # ENTREGA PRÓPRIA: sem entregador Inksa, o dinheiro fica
@@ -975,7 +976,9 @@ def complete_order(order_id):
                         cash_breakdown, _was_new = settle_cash_own_delivery(
                             cur, order_id, completed_order['restaurant_id'],
                             order['total_amount'], order['delivery_fee'],
-                            order.get('comissao_plataforma'), desconto_parceiro=_desc)
+                            order.get('comissao_plataforma'), desconto_parceiro=_desc,
+                            # RETIRADA cai aqui: sem delivery_id, este é o ramo.
+                            retirada=bool(order['is_pickup']))
                         logger.info(
                             f"💵 Pedido dinheiro {order_id} (entrega própria) — comissão "
                             f"R${cash_breakdown['commission']} vira dívida da loja (novo={_was_new})")

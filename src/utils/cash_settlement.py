@@ -22,11 +22,17 @@ from ..utils.platform_settings import (
 
 
 def compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_commission=None,
-                           desconto_parceiro=0.0):
+                           desconto_parceiro=0.0, retirada=False):
     """Só calcula os números (não toca no banco). Mesmas fórmulas do online.
 
     desconto_parceiro = cupom da própria loja, que sai do repasse DELA (a
     comissão da plataforma fica intacta). Cupom da Inksa não entra aqui.
+
+    `retirada` aplica a metade da comissão, igual ao caminho online. ⚠️ ISTO
+    FALTAVA: o pedido #1005 (06/09/2026) nasceu como retirada E em dinheiro, e
+    ia liquidar com a comissão CHEIA — a metade só existia no caminho online.
+    Regra de dinheiro que vale num caminho e não no outro é o defeito mais caro
+    que este projeto já teve, e sempre aparece assim: pelo caminho esquecido.
     """
     total_amount = float(total_amount or 0)
     delivery_fee = float(delivery_fee or 0)
@@ -34,7 +40,8 @@ def compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_c
     commission = float(existing_commission or 0)
     if not commission:
         # Mesma fonte/taxa dos pedidos online (Configurações > Taxas do admin).
-        commission = float(calculate_platform_commission(total_amount - delivery_fee, restaurant_id))
+        commission = float(calculate_platform_commission(
+            total_amount - delivery_fee, restaurant_id, retirada=retirada))
 
     # Frete do entregador = frete integral menos a taxa de administração do
     # frete (margem_frete da plataforma). O resto do dinheiro vira dívida dele.
@@ -56,7 +63,7 @@ def compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_c
 
 def settle_cash_order(cur, order_id, delivery_id, restaurant_id,
                       total_amount, delivery_fee, existing_commission=None,
-                      desconto_parceiro=0.0):
+                      desconto_parceiro=0.0, retirada=False):
     """Liquida o pedido em dinheiro de forma IDEMPOTENTE usando o cursor `cur`
     (não faz commit — quem chama controla a transação).
 
@@ -71,7 +78,7 @@ def settle_cash_order(cur, order_id, delivery_id, restaurant_id,
     indica se a dívida foi registrada agora (False = já estava liquidado).
     """
     b = compute_cash_breakdown(total_amount, delivery_fee, restaurant_id, existing_commission,
-                               desconto_parceiro)
+                               desconto_parceiro, retirada=retirada)
 
     # Idempotência: já liquidado? Não duplica a dívida nem o registro.
     cur.execute("SELECT id FROM cash_payment_records WHERE order_id = %s", (str(order_id),))
@@ -121,7 +128,8 @@ def settle_cash_order(cur, order_id, delivery_id, restaurant_id,
 
 
 def settle_cash_own_delivery(cur, order_id, restaurant_id, total_amount, delivery_fee,
-                             existing_commission=None, desconto_parceiro=0.0):
+                             existing_commission=None, desconto_parceiro=0.0,
+                             retirada=False):
     """DINHEIRO + ENTREGA PRÓPRIA: o fluxo invertido.
 
     Aqui quem recolhe o dinheiro é o motoboy da própria loja — não existe
@@ -144,7 +152,14 @@ def settle_cash_own_delivery(cur, order_id, restaurant_id, total_amount, deliver
     if not commission:
         # Comissão sobre os ITENS — o frete da entrega própria é da loja, a
         # Inksa não entra nele.
-        commission = float(calculate_platform_commission(total_amount - delivery_fee, restaurant_id))
+        #
+        # ⚠️ É AQUI QUE A RETIRADA EM DINHEIRO CAI. Pedido de retirada não tem
+        # delivery_id, então o complete_order manda pra este ramo, e não pro
+        # settle_cash_order. Sem o `retirada` nesta linha, a metade da comissão
+        # existiria no online e sumiria no dinheiro — pelo caminho de sempre: o
+        # que ninguém lembrou de olhar.
+        commission = float(calculate_platform_commission(
+            total_amount - delivery_fee, restaurant_id, retirada=retirada))
 
     # Cupom da própria loja: ela já deu o desconto no caixa, então a dívida de
     # comissão não muda — mas o valor recolhido em espécie, sim.
