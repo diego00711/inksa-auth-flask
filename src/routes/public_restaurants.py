@@ -491,6 +491,24 @@ def _situacao_entregadores(loja):
         return {"cadastrados": cadastrados, "online_agora": online_agora,
                 "bloqueado": False, "titulo": None, "detalhe": None}
 
+    # ⚠️ RETIRADA NO LOCAL DESARMA O BLOQUEIO. Sem isto a trava que eu criei
+    # para não vender sem entregador passaria a impedir também o pedido que
+    # FUNCIONA sem entregador — o cliente veria "não dá para pedir" numa loja
+    # onde ele podia simplesmente ir buscar. A loja continua sem entrega, mas
+    # não está mais fechada para vender.
+    if loja.get("accepts_pickup"):
+        return {
+            "cadastrados": cadastrados,
+            "online_agora": 0,
+            "bloqueado": False,
+            "titulo": "Só retirada no local agora",
+            "detalhe": (
+                "Nenhum entregador está em serviço no momento, então a entrega "
+                "está indisponível. Mas você pode pedir e retirar no balcão, "
+                "sem taxa de entrega."
+            ),
+        }
+
     return {
         "cadastrados": cadastrados,
         "online_agora": 0,
