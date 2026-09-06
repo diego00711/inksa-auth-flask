@@ -800,9 +800,16 @@ def complete_order(order_id):
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Cada consulta desta rota é uma ida e volta América do Norte <->
+            # São Paulo (~0,2s). Então tudo que a rota vai precisar da linha do
+            # pedido sai NESTA consulta: client_id e valor_repassado_entregador
+            # eram lidos mais abaixo, em dois SELECTs separados, e nenhuma das
+            # duas colunas muda no meio do caminho.
             cur.execute(
                 "SELECT o.status, o.delivery_code, o.restaurant_id, o.delivery_id, "
+                "o.client_id, "
                 "o.payment_method, o.total_amount, o.delivery_fee, o.comissao_plataforma, "
+                "COALESCE(o.valor_repassado_entregador, 0) AS valor_repassado_entregador, "
                 # Sem esta coluna a liquidação em dinheiro devolveria 0 e o
                 # cupom da própria loja acabaria pago pela Inksa.
                 "COALESCE(o.desconto_parceiro, 0) AS desconto_parceiro, "
@@ -865,12 +872,10 @@ def complete_order(order_id):
                 "updated_at = NOW() WHERE id = %s",
                 (confirmado_por, nota_confirmacao, str(order_id))
             )
-            # Busca client_id, delivery_id e restaurant_id antes de fechar o cursor
-            cur.execute(
-                "SELECT client_id, delivery_id, restaurant_id FROM orders WHERE id = %s",
-                (str(order_id),)
-            )
-            completed_order = cur.fetchone()
+            # client_id, delivery_id e restaurant_id JÁ vieram na consulta lá em
+            # cima, e o UPDATE acima não toca em nenhuma das três. Reler a linha
+            # só pra buscá-las era uma travessia de continente a troco de nada.
+            completed_order = order
 
             # Clube Inksa (entregador): aplica o benefício do nível do entregador
             # ao repasse DESTE pedido (bônus por entrega + % a mais do frete). Só
@@ -882,11 +887,11 @@ def complete_order(order_id):
                     _bonus = float(_cb.get('per_delivery_bonus') or 0)
                     _keep = float(_cb.get('freight_keep_extra_pct') or 0)
                     if _bonus > 0 or _keep > 0:
-                        cur.execute(
-                            "SELECT COALESCE(delivery_fee,0) AS fee, COALESCE(valor_repassado_entregador,0) AS pay "
-                            "FROM orders WHERE id = %s", (str(order_id),))
-                        _r = cur.fetchone()
-                        _fee = float(_r['fee']); _base = float(_r['pay'])
+                        # As duas colunas vieram na consulta do topo e o UPDATE
+                        # de status não mexe em nenhuma delas — mais uma ida ao
+                        # banco que não precisava existir.
+                        _fee = float(order['delivery_fee'] or 0)
+                        _base = float(order['valor_repassado_entregador'] or 0)
                         _freight_part = min(_fee, round(_base + _fee * _keep / 100.0, 2))
                         _new_pay = round(_freight_part + _bonus, 2)
                         _new_margem = round(_fee - _freight_part, 2)

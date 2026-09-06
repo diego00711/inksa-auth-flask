@@ -161,8 +161,32 @@ def _secure_secret(env_name, weak_default):
 # Usa a MESMA conexão blindada (timeouts TCP + statement_timeout) do resto do
 # app — senão uma query de gamificação travada derrubaria o worker igual ao
 # incidente 2026-07-11 (ver helpers.connect_hardened).
-from src.utils.helpers import connect_hardened as _connect_hardened
-app.config["DB_CONN_FACTORY"] = lambda: _connect_hardened(os.environ["DATABASE_URL"])
+#
+# ⚠️ E AGORA PELO POOL. Isto aqui chamava connect_hardened DIRETO, passando por
+# fora de get_db_connection() e portanto por fora do pool: toda pontuação e todo
+# desafio abriam conexão NOVA, com handshake TLS+auth completo. Entre o Render
+# (América do Norte) e o Supabase (São Paulo) isso custa ~0,5s CADA.
+#
+# No /complete do entregador são 4 a 6 dessas seguidas, depois de o pedido já
+# estar fechado — parte do modal preso de 15-20s medido no primeiro pedido de
+# teste real, em 06/09/2026.
+#
+# get_db_connection() já tenta o pool e cai sozinho na conexão direta se ele
+# falhar, então isto não perde nenhuma proteção. Só precisa LEVANTAR quando não
+# houver conexão: a gamificação espera exceção, não None (ver o comentário em
+# helpers.connect_hardened). _PooledConn implementa __enter__/__exit__, então os
+# 33 blocos `with conn:` da gamificação seguem funcionando.
+from src.utils.helpers import get_db_connection as _get_db_connection
+
+
+def _db_conn_factory():
+    conn = _get_db_connection()
+    if conn is None:
+        raise RuntimeError("DB_CONN_FACTORY: sem conexão com o banco")
+    return conn
+
+
+app.config["DB_CONN_FACTORY"] = _db_conn_factory
 app.config["GAMIFICATION_INTERNAL_TOKEN"] = _secure_secret(
     "GAMIFICATION_INTERNAL_TOKEN", "token-secreto-trocar"
 )
