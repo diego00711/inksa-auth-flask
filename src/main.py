@@ -176,17 +176,24 @@ def _secure_secret(env_name, weak_default):
 # houver conexão: a gamificação espera exceção, não None (ver o comentário em
 # helpers.connect_hardened). _PooledConn implementa __enter__/__exit__, então os
 # 33 blocos `with conn:` da gamificação seguem funcionando.
-from src.utils.helpers import get_db_connection as _get_db_connection
-
-
-def _db_conn_factory():
-    conn = _get_db_connection()
-    if conn is None:
-        raise RuntimeError("DB_CONN_FACTORY: sem conexão com o banco")
-    return conn
-
-
-app.config["DB_CONN_FACTORY"] = _db_conn_factory
+# ⚠️ REVERTIDO EM 06/09/2026, MESMO DIA, DEPOIS DE DERRUBAR A API.
+#
+# Eu tinha trocado por get_db_connection() para aproveitar o pool e economizar
+# ~0,5s por chamada. O ganho era real; o efeito colateral, fatal.
+#
+# gamification_routes.py abre conexão 32 vezes e fecha 31. challenges_routes.py
+# abre 4 e fecha 3. Esses dois vazamentos SEMPRE existiram e eram inofensivos:
+# conexão direta vazada é coletada e o Postgres derruba sozinho.
+#
+# Vinda do POOL, a conexão vazada nunca volta — some do pool de vez. Com
+# DB_POOL_MAXCONN=12, bastaram algumas passadas por essas rotas pra esgotar.
+# Aí toda requisição fica esperando conexão que não vem: WORKER TIMEOUT no
+# gunicorn às 18:26 e o master caiu. A API ficou fora do ar.
+#
+# O caminho certo é consertar os dois vazamentos PRIMEIRO e só então religar o
+# pool aqui — com o pool, um vazamento deixa de ser desleixo e vira apagão.
+from src.utils.helpers import connect_hardened as _connect_hardened
+app.config["DB_CONN_FACTORY"] = lambda: _connect_hardened(os.environ["DATABASE_URL"])
 app.config["GAMIFICATION_INTERNAL_TOKEN"] = _secure_secret(
     "GAMIFICATION_INTERNAL_TOKEN", "token-secreto-trocar"
 )
