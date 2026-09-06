@@ -399,7 +399,8 @@ def handle_orders():
                 # 🔒 Trava: restaurante fechado não recebe pedido (a tela do
                 # cliente só mostra o selo; ele pode ter fechado depois que o
                 # carrinho foi montado). Fail-open se não achar a linha.
-                cur.execute("""SELECT is_open, latitude, longitude, delivery_type
+                cur.execute("""SELECT is_open, latitude, longitude, delivery_type,
+                                      COALESCE(accepts_pickup, false) AS accepts_pickup
                                  FROM restaurant_profiles WHERE id = %s""",
                             (data.get('restaurant_id'),))
                 _rest = cur.fetchone()
@@ -418,7 +419,21 @@ def handle_orders():
                 #
                 # contar_capazes abre a PRÓPRIA conexão, então `cur`
                 # continua válido para o peso_do_pedido logo abaixo.
-                if _rest is not None and (_rest.get('delivery_type') or 'platform') == 'platform':
+                # RETIRADA NO LOCAL: quem decide é o servidor, conferindo se a
+                # loja ligou a opção. Cliente que mandasse a flag sozinho fecharia
+                # sem frete e com metade da comissão. Na dúvida, é entrega.
+                _quer_retirada_o = bool(data.get('is_pickup') or data.get('retirada')
+                                        or data.get('pickup'))
+                _retirada_o = bool(_quer_retirada_o and _rest is not None
+                                   and _rest.get('accepts_pickup'))
+                if _quer_retirada_o and not _retirada_o:
+                    return jsonify({
+                        "error": "Esta loja não está aceitando retirada no local agora. "
+                                 "Volte ao carrinho e escolha entrega.",
+                        "error_code": "PICKUP_NOT_ACCEPTED",
+                    }), 409
+
+                if (not _retirada_o) and _rest is not None and (_rest.get('delivery_type') or 'platform') == 'platform':
                     from ..utils.carga import contar_capazes
                     from ..utils.platform_settings import get_settings
                     _cad, _online = contar_capazes(
@@ -432,7 +447,8 @@ def handle_orders():
                         }), 409
 
                 total_items = sum(item.get('price', 0) * item.get('quantity', 1) for item in data['items'])
-                delivery_fee = data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
+                # Retirada não tem frete: quem se desloca é o cliente.
+                delivery_fee = 0 if _retirada_o else data.get('delivery_fee', DEFAULT_DELIVERY_FEE)
 
                 # Peso do pedido, lido do CATÁLOGO e não do que o app mandou —
                 # mesma razão de validar preço no servidor. Fica congelado no
@@ -446,11 +462,18 @@ def handle_orders():
                     'client_id': client_profile['id'],
                     'restaurant_id': data['restaurant_id'],
                     'items': json.dumps(data['items']),
-                    'delivery_address': json.dumps(data['delivery_address']),
+                    # Na retirada não existe endereço de entrega — anotar o do
+                    # cliente aqui faria a tela do parceiro anunciar uma entrega
+                    # que ninguém vai fazer.
+                    'delivery_address': ('' if _retirada_o
+                                         else json.dumps(data['delivery_address'])),
                     'total_amount_items': total_items,
                     'delivery_fee': delivery_fee,
                     'total_amount': total_items + delivery_fee,
                     'status': 'awaiting_payment',
+                    # Congelado no pedido, não derivado da loja: se ela desligar
+                    # a retirada amanhã, este pedido continua sendo de retirada.
+                    'is_pickup': _retirada_o,
                     'pickup_code': generate_verification_code(),
                     'delivery_code': generate_verification_code(),
                     'peso_total_kg': peso_total
@@ -807,7 +830,7 @@ def complete_order(order_id):
             # duas colunas muda no meio do caminho.
             cur.execute(
                 "SELECT o.status, o.delivery_code, o.restaurant_id, o.delivery_id, "
-                "o.client_id, "
+                "o.client_id, COALESCE(o.is_pickup, false) AS is_pickup, "
                 "o.payment_method, o.total_amount, o.delivery_fee, o.comissao_plataforma, "
                 "COALESCE(o.valor_repassado_entregador, 0) AS valor_repassado_entregador, "
                 # Sem esta coluna a liquidação em dinheiro devolveria 0 e o
@@ -834,7 +857,22 @@ def complete_order(order_id):
                 if not prof or order['delivery_id'] is None or str(prof['id']) != str(order['delivery_id']):
                     return jsonify({"error": "Este pedido não está atribuído a você"}), 403
 
-            if order['status'] != 'delivering':
+            # RETIRADA NO LOCAL fecha por outro caminho. Ela nunca passa por
+            # 'delivering' — não existe rota de entrega, o cliente vem ao balcão.
+            # Sem este ramo, o pedido de retirada NÃO TERIA COMO SER FECHADO:
+            # ficaria eternamente em "Pronto", sem virar receita.
+            if order['is_pickup']:
+                if user_type != 'restaurant':
+                    return jsonify({
+                        "error": "Pedido de retirada é fechado pela própria loja, "
+                                 "quando o cliente busca no balcão."
+                    }), 403
+                if order['status'] != 'ready':
+                    return jsonify({
+                        "error": "O pedido ainda não está pronto para retirada. "
+                                 f"Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"
+                    }), 400
+            elif order['status'] != 'delivering':
                 return jsonify({
                     "error": f"O pedido não está em rota de entrega. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"
                 }), 400
@@ -849,7 +887,12 @@ def complete_order(order_id):
                     return jsonify({"error": "Código de entrega inválido"}), 403
                 confirmado_por, nota_confirmacao = 'code', None
             else:
-                if not (user_type == 'restaurant' and order.get('delivery_type') == 'own'):
+                # NA RETIRADA O CÓDIGO É SEMPRE OBRIGATÓRIO, mesmo em loja de
+                # entrega própria. "Fechar sem código" existe porque na entrega
+                # o cliente pode não estar em casa — na retirada ele está na
+                # frente do balcão, então não há motivo para dispensar a prova.
+                if order['is_pickup'] or not (
+                        user_type == 'restaurant' and order.get('delivery_type') == 'own'):
                     return jsonify({"error": "Código de entrega (delivery_code) é obrigatório"}), 400
                 confirmado_por, nota_confirmacao = 'partner_no_code', motivo_sem_codigo[:300]
 
@@ -1819,6 +1862,11 @@ def _run_dispatch_tick(cur, settings):
            -- dela. Sem isto o motor ofertava o pedido a entregador Inksa, que
            -- ia até o balcão buscar algo que não é dele. NULL = 'platform'.
            AND COALESCE(rp.delivery_type, 'platform') <> 'own'
+           -- RETIRADA NO LOCAL, pelo mesmo motivo: quem busca é o cliente. O
+           -- motor de despacho é o SEGUNDO lugar que oferece pedido a
+           -- entregador (o outro é /orders/available); regra que entra só num
+           -- dos dois vira buraco pelo outro.
+           AND COALESCE(o.is_pickup, false) = false
            AND rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL
            AND (o.offer_courier_id IS NULL OR o.offer_expires_at <= NOW())
          ORDER BY o.created_at ASC
@@ -2184,6 +2232,12 @@ def get_available_orders():
                     -- Pedido de loja com ENTREGA PRÓPRIA nunca aparece pro
                     -- entregador Inksa. Mesma trava do motor de despacho.
                     AND COALESCE(rp.delivery_type, 'platform') <> 'own'
+                    -- RETIRADA NO LOCAL também não: quem busca é o cliente. Sem
+                    -- isto o entregador veria um pedido com frete zero e sem
+                    -- endereço, aceitaria, iria até a loja e não teria o que
+                    -- fazer — e o cliente chegaria para buscar um pedido que já
+                    -- teria saído.
+                    AND COALESCE(o.is_pickup, false) = false
                     {radius_clause}{carga_clause}{alcance_clause}{offer_clause}
                 ORDER BY o.created_at ASC;
             """

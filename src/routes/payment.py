@@ -481,6 +481,58 @@ _MSG_SEM_ENTREGADOR = (
 )
 
 
+def _eh_retirada(dados, restaurant_id):
+    """True quando o pedido é RETIRADA NO LOCAL e a loja de fato aceita.
+
+    A palavra final é do SERVIDOR, nunca do app. A flag que chega do carrinho é
+    um pedido, não uma ordem: quem mandasse `is_pickup: true` num pedido comum
+    fecharia sem frete e pagando metade da comissão. Só vale se a loja tiver
+    ligado `accepts_pickup`.
+
+    ⚠️ FAIL-CLOSED, ao contrário de _sem_entregador e _restaurant_is_closed, que
+    são fail-open de propósito. Aqui a assimetria é outra:
+
+      • Errar para ENTREGA num pedido que era retirada: cobra um frete indevido.
+        O cliente reclama na hora, a gente devolve, e ninguém fica esperando.
+      • Errar para RETIRADA num pedido que era entrega: nasce sem entregador e
+        sem frete, a loja prepara, e o pedido fica no balcão esperando alguém
+        que nunca vai buscar. Ninguém reclama porque ninguém sabe.
+
+    O segundo é bem pior. Na dúvida, é entrega.
+    """
+    quer = bool(dados.get('is_pickup') or dados.get('retirada') or dados.get('pickup'))
+    if not quer or not restaurant_id:
+        return False
+    conn = None
+    try:
+        import psycopg2.extras
+        from ..utils.helpers import get_db_connection
+        conn = get_db_connection()
+        if not conn:
+            return False
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""SELECT COALESCE(accepts_pickup, false) AS aceita
+                             FROM public.restaurant_profiles WHERE id = %s::uuid""",
+                        (str(restaurant_id),))
+            loja = cur.fetchone()
+        return bool(loja and loja['aceita'])
+    except Exception as e:
+        logging.warning(f"⚠️ Não foi possível confirmar retirada da loja {restaurant_id}: {e}")
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+_MSG_RETIRADA_NAO_ACEITA = (
+    "Esta loja não está aceitando retirada no local agora. "
+    "Volte ao carrinho e escolha entrega."
+)
+
+
 def _excede_limite_de_itens(restaurant_id, itens):
     """(True, mensagem) quando o pedido passa do limite de unidades da loja.
 
@@ -571,8 +623,22 @@ def criar_preferencia_mercado_pago():
             _body, _code = _RESTAURANT_CLOSED_RESPONSE
             return jsonify(_body), _code
 
+        # RETIRADA NO LOCAL. Decidido no servidor, não no carrinho (ver _eh_retirada).
+        _quer_retirada = bool(dados_pedido.get('is_pickup')
+                              or dados_pedido.get('retirada')
+                              or dados_pedido.get('pickup'))
+        _retirada = _eh_retirada(dados_pedido, dados_pedido.get('restaurant_id'))
+        if _quer_retirada and not _retirada:
+            # O carrinho mandou retirada e a loja não aceita: recusar é a única
+            # saída honesta. Seguir como entrega cobraria um frete que a pessoa
+            # não viu, para um endereço que ela não informou.
+            logging.info(f"⛔ Retirada pedida mas a loja {dados_pedido.get('restaurant_id')} não aceita.")
+            return jsonify({"erro": _MSG_RETIRADA_NAO_ACEITA, "codigo": "retirada_nao_aceita"}), 409
+
         # 🔒 Trava: não aceita pedido se não houver quem entregue.
-        if _sem_entregador(dados_pedido.get('restaurant_id')):
+        # Retirada não passa por aqui: quem busca é o cliente, e é justamente
+        # isso que deixa a loja vender quando não há nenhum entregador online.
+        if not _retirada and _sem_entregador(dados_pedido.get('restaurant_id')):
             logging.info(f"⛔ Pedido barrado: sem entregador para a loja {dados_pedido.get('restaurant_id')}.")
             return jsonify({"erro": _MSG_SEM_ENTREGADOR, "codigo": "sem_entregador"}), 409
 
@@ -610,7 +676,16 @@ def criar_preferencia_mercado_pago():
         # log — o cliente NÃO é punido por uma diferença que não é culpa dele
         # (ele pode ter demorado no carrinho e o preço mudou), mas repetição
         # vira sinal.
-        _fee_srv, _dist_srv = _frete_do_servidor(dados_pedido)
+        if _retirada:
+            # Zera o frete ANTES da conferência. Se deixasse passar, o servidor
+            # calcularia um frete de entrega, compararia com o zero que o
+            # carrinho mandou, veria diferença e recusaria o pedido por "frete
+            # divergente" — travando exatamente o caminho que veio destravar.
+            dados_pedido['delivery_fee'] = 0
+            dados_pedido['delivery_distance_km'] = 0
+            _fee_srv, _dist_srv = None, 0
+        else:
+            _fee_srv, _dist_srv = _frete_do_servidor(dados_pedido)
         if _fee_srv is not None:
             _fee_app = float(dados_pedido.get('delivery_fee', 0) or 0)
             _dif = round(_fee_srv - _fee_app, 2)
@@ -651,14 +726,20 @@ def criar_preferencia_mercado_pago():
             dados_pedido['delivery_fee'] = _fee_srv
 
         _fee_create = float(dados_pedido.get('delivery_fee', 0) or 0)
-        try:
-            _payout_create = float(calculate_courier_payout(
-                (_dist_srv if _dist_srv is not None
-                 else dados_pedido.get('delivery_distance_km')),
-                delivery_fee=_fee_create))
-        except Exception as _e_payout:
-            logging.warning(f"⚠️ calculate_courier_payout na criação falhou ({_e_payout}); usando frete cheio.")
-            _payout_create = _fee_create
+        if _retirada:
+            # Sem entregador não há repasse. Explícito para não depender de a
+            # função de repasse devolver zero quando recebe zero.
+            _fee_create = 0.0
+            _payout_create = 0.0
+        else:
+            try:
+                _payout_create = float(calculate_courier_payout(
+                    (_dist_srv if _dist_srv is not None
+                     else dados_pedido.get('delivery_distance_km')),
+                    delivery_fee=_fee_create))
+            except Exception as _e_payout:
+                logging.warning(f"⚠️ calculate_courier_payout na criação falhou ({_e_payout}); usando frete cheio.")
+                _payout_create = _fee_create
 
         # 🔒 SEM VEÍCULO PRA ESTA CARGA — barreira autoritativa.
         # O carrinho já avisa, mas aviso no app é CONSELHO: ele pode estar com
@@ -703,7 +784,15 @@ def criar_preferencia_mercado_pago():
             # catálogo e os dois precisam sobreviver a mudanças no cardápio.
             'age_restricted': _restrito_por_idade(dados_pedido.get('itens') or []),
             'total_amount': dados_pedido.get('total_amount', 0),
-            'delivery_address': dados_pedido.get('delivery_address', ''),
+            # RETIRADA fica congelada no pedido, não derivada da loja: se ela
+            # desligar a retirada amanhã, o pedido de ontem continua sendo de
+            # retirada pro financeiro, pro histórico e pro relatório.
+            'is_pickup': _retirada,
+            # Na retirada o endereço de entrega não existe — quem se desloca é o
+            # cliente. Guardar o endereço dele aqui faria a tela do parceiro
+            # anunciar uma entrega que ninguém vai fazer.
+            'delivery_address': ('' if _retirada
+                                 else dados_pedido.get('delivery_address', '')),
             'notes': dados_pedido.get('notes', ''),
             'client_latitude': dados_pedido.get('client_latitude'),
             'client_longitude': dados_pedido.get('client_longitude'),
@@ -1427,8 +1516,17 @@ def processar_pagamento_cartao():
             _body, _code = _RESTAURANT_CLOSED_RESPONSE
             return jsonify(_body), _code
 
+        # RETIRADA NO LOCAL. Este é o SEGUNDO caminho que grava pedido; regra que
+        # entra só num dos dois vira buraco (ver a nota "dois caminhos de pedido").
+        _quer_retirada_c = bool(d.get('is_pickup') or d.get('retirada') or d.get('pickup'))
+        _retirada_c = _eh_retirada(d, d.get('restaurant_id'))
+        if _quer_retirada_c and not _retirada_c:
+            logging.info(f"⛔ Retirada (cartão) pedida mas a loja {d.get('restaurant_id')} não aceita.")
+            return jsonify({"erro": _MSG_RETIRADA_NAO_ACEITA, "codigo": "retirada_nao_aceita"}), 409
+
         # 🔒 Trava: não aceita pedido se não houver quem entregue.
-        if _sem_entregador(d.get('restaurant_id')):
+        # Retirada não passa: quem busca é o cliente.
+        if not _retirada_c and _sem_entregador(d.get('restaurant_id')):
             logging.info(f"⛔ Pedido (cartão) barrado: sem entregador para a loja {d.get('restaurant_id')}.")
             return jsonify({"erro": _MSG_SEM_ENTREGADOR, "codigo": "sem_entregador"}), 409
 
@@ -1457,9 +1555,12 @@ def processar_pagamento_cartao():
             'status': 'awaiting_payment',
             'items': itens_com_nome_das_opcoes(items_req),
             'total_amount_items': subtotal_validado,
-            'delivery_fee': d.get('delivery_fee', 0),
+            'delivery_fee': (0 if _retirada_c else d.get('delivery_fee', 0)),
             'total_amount': total_seguro,
-            'delivery_address': d.get('delivery_address', ''),
+            # Mesma regra do outro caminho: retirada congela no pedido, e sem
+            # endereço de entrega, que na retirada não existe.
+            'is_pickup': _retirada_c,
+            'delivery_address': ('' if _retirada_c else d.get('delivery_address', '')),
             'notes': d.get('notes', ''),
             'client_latitude': d.get('client_latitude'),
             'client_longitude': d.get('client_longitude'),
@@ -1522,16 +1623,23 @@ def processar_pagamento_cartao():
 
         if status == 'approved':
             # Comissão e repasse vêm de platform_settings (editáveis no admin)
-            comissao = float(calculate_platform_commission(subtotal_validado, d.get('restaurant_id')))
-            delivery_fee_charged = float(d.get('delivery_fee', 0) or 0)
+            comissao = float(calculate_platform_commission(
+                subtotal_validado, d.get('restaurant_id'), retirada=_retirada_c))
+            delivery_fee_charged = 0.0 if _retirada_c else float(d.get('delivery_fee', 0) or 0)
             # Na entrega própria o frete inteiro volta pra loja; margem de frete
             # (o que a plataforma retém) só existe com entregador Inksa e pode
             # ser negativa em entregas curtas — é o valor real.
+            #
+            # Retirada entra pelo mesmo ramo da entrega própria: não há
+            # entregador Inksa, então não há repasse nem margem. Com frete zero
+            # o resultado é o mesmo por qualquer caminho, mas dizer explícito
+            # evita que uma mudança futura no split trate retirada como entrega.
             repasse_rest, courier_payout, margem_frete = _split_online(
                 subtotal_validado, delivery_fee_charged,
                 (_dist_srv_card if _dist_srv_card is not None
                  else d.get('delivery_distance_km')),
-                comissao, desc_parc_card, _entrega_propria(d.get('restaurant_id')))
+                comissao, desc_parc_card,
+                (_retirada_c or _entrega_propria(d.get('restaurant_id'))))
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',
@@ -1669,8 +1777,13 @@ def mercadopago_webhook():
                     
                     valor_total_itens = float(pedido_do_bd.get('total_amount_items', 0.0))
 
-                    # Comissão e repasse vêm de platform_settings (editáveis no admin)
-                    comissao_plataforma = float(calculate_platform_commission(valor_total_itens, pedido_do_bd.get('restaurant_id')))
+                    # Comissão e repasse vêm de platform_settings (editáveis no admin).
+                    # A retirada sai do PEDIDO, não da loja: é o que foi combinado
+                    # com o cliente na hora da compra e não muda depois.
+                    _retirada_web = bool(pedido_do_bd.get('is_pickup'))
+                    comissao_plataforma = float(calculate_platform_commission(
+                        valor_total_itens, pedido_do_bd.get('restaurant_id'),
+                        retirada=_retirada_web))
                     # Cupom da própria loja já foi gravado no pedido: sai do
                     # repasse dela, não da comissão da plataforma.
                     _desc_parc = float(pedido_do_bd.get('desconto_parceiro') or 0)
@@ -1684,7 +1797,10 @@ def mercadopago_webhook():
                         valor_total_itens, delivery_fee_charged,
                         pedido_do_bd.get('delivery_distance_km'),
                         comissao_plataforma, _desc_parc,
-                        _entrega_propria(pedido_do_bd.get('restaurant_id')))
+                        # Retirada entra pelo mesmo ramo da entrega própria:
+                        # não há entregador Inksa, logo não há repasse.
+                        (_retirada_web
+                         or _entrega_propria(pedido_do_bd.get('restaurant_id'))))
 
                     # ✅ DADOS QUE SERÃO ATUALIZADOS
                     update_data = {
@@ -1843,14 +1959,18 @@ def asaas_webhook():
                 return jsonify({"status": "already_processed"}), 200
 
             valor_itens = float(pedido.get('total_amount_items') or 0)
-            comissao = float(calculate_platform_commission(valor_itens, pedido.get('restaurant_id')))
+            # Retirada vem congelada no pedido (ver o outro webhook logo acima).
+            _retirada_wh = bool(pedido.get('is_pickup'))
+            comissao = float(calculate_platform_commission(
+                valor_itens, pedido.get('restaurant_id'), retirada=_retirada_wh))
             fee = float(pedido.get('delivery_fee') or 0)
             # Cupom da própria loja sai do repasse dela (gravado no pedido).
             _desc_parc = float(pedido.get('desconto_parceiro') or 0)
             # Entrega própria: o frete é da loja, não de entregador nenhum.
             repasse_rest, courier, margem = _split_online(
                 valor_itens, fee, pedido.get('delivery_distance_km'), comissao, _desc_parc,
-                _entrega_propria(pedido.get('restaurant_id')))
+                # Retirada: sem entregador Inksa, mesmo ramo da entrega própria.
+                (_retirada_wh or _entrega_propria(pedido.get('restaurant_id'))))
             supabase_client.table('orders').update({
                 'status': 'pending',  # ativa o pedido para o restaurante
                 'status_pagamento': 'approved',

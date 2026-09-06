@@ -195,6 +195,10 @@ def handle_profile():
                 # a opção de dinheiro. Whitelist que engole campo em silêncio é
                 # pior que erro — ninguém tem como perceber.
                 'accepts_cash',
+                # Retirada no local. Entra aqui NO MESMO COMMIT em que o app
+                # ganha o botão — é literalmente a armadilha descrita acima, e
+                # ela já mordeu o accepts_cash.
+                'accepts_pickup',
                 'opening_hours', 'hours_auto'
             ]
             updates = {k: v for k, v in data.items() if k in allowed_fields}

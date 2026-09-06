@@ -64,6 +64,11 @@ _DEFAULTS: dict[str, Decimal] = {
     "entrega_max_km_carro":       Decimal("0"),
     "entrega_max_km_utilitario":  Decimal("0"),
     "commission_rate":            Decimal("0.10"),  # 0..1, não 10
+    # RETIRADA NO LOCAL: fator sobre a comissão cheia (0.5 = metade). Decisão do
+    # Diego em 06/09/2026. Na retirada a loja faz mais (atende o balcão) e a
+    # Inksa entrega só a vitrine e o pagamento — cobrar igual à entrega dá
+    # argumento pro parceiro. 1 = cobra igual; 0 = não cobra nada.
+    "pickup_commission_factor":   Decimal("0.5"),
     "delivery_base_fee":          Decimal("5.00"),  # legado (modelo antigo de repasse)
     "delivery_per_km_fee":        Decimal("1.00"),  # legado (modelo antigo de repasse)
     # Taxa de administração retida pela plataforma sobre o frete (0..1).
@@ -204,6 +209,9 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               "capacidade_kg_carro", "capacidade_kg_utilitario",
               "entrega_max_km_bike", "entrega_max_km_moto",
               "entrega_max_km_carro", "entrega_max_km_utilitario",
+              # ⚠️ pickup_commission_factor PRECISA estar aqui, não só em
+              # _DEFAULTS — é exatamente a armadilha descrita acima.
+              "pickup_commission_factor",
               "idle_logout_minutes", "cart_reminder_minutes",
               "referral_enabled", "referral_reward_brl", "referral_min_order_brl",
               "referral_validity_days", "referral_monthly_cap",
@@ -458,15 +466,30 @@ def effective_commission_rate(restaurant_id=None) -> Decimal:
     return rate if rate > 0 else Decimal("0")
 
 
-def calculate_platform_commission(subtotal, restaurant_id=None) -> Decimal:
+def calculate_platform_commission(subtotal, restaurant_id=None, retirada=False) -> Decimal:
     """Comissão da plataforma sobre o subtotal do pedido.
 
     Ponto único: quem chama é o checkout online, o checkout de cartão E a
     liquidação do dinheiro. Regra de comissão que não more aqui vira regra que
     vale num caminho e não vale no outro.
+
+    `retirada=True` aplica o fator de retirada no local (padrão: metade). O
+    desconto entra AQUI, e não em cada chamador, pelo mesmo motivo de sempre:
+    regra de dinheiro espalhada é regra que um dia diverge entre os caminhos.
     """
     try:
         sub = Decimal(str(subtotal))
     except (InvalidOperation, TypeError):
         return Decimal("0.00")
-    return (sub * effective_commission_rate(restaurant_id)).quantize(Decimal("0.01"))
+    rate = effective_commission_rate(restaurant_id)
+    if retirada:
+        try:
+            fator = get_settings()["pickup_commission_factor"]
+        except Exception:
+            logger.exception("pickup_commission_factor indisponível; usando metade")
+            fator = Decimal("0.5")
+        # Piso em zero e teto na taxa cheia: fator fora da faixa é erro de
+        # digitação no admin, não intenção de pagar pra vender.
+        fator = max(Decimal("0"), min(Decimal("1"), fator))
+        rate = rate * fator
+    return (sub * rate).quantize(Decimal("0.01"))

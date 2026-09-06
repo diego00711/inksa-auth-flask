@@ -268,6 +268,10 @@ def list_restaurants():
                     COALESCE(rp.minimum_order, 0)                AS minimum_order,
                     rp.delivery_time                            AS delivery_time,
                     rp.delivery_type,
+                    -- Retirada no local: a vitrine mostra o selo "retira aqui",
+                    -- que é o que faz a loja continuar vendendo quando não há
+                    -- entregador online.
+                    COALESCE(rp.accepts_pickup, false)          AS accepts_pickup,
                     {dist_expr}                                 AS distance_km,
                     -- O nível do parceiro passou a ser medido em REAIS
                     -- faturados no mês, não em quantidade de pedidos. A conta
@@ -539,6 +543,8 @@ def get_restaurant(restaurant_id):
                     rp.category,
                     rp.delivery_type,
                     COALESCE(rp.accepts_cash, TRUE) AS accepts_cash,
+                    -- Sem isto o carrinho não teria como oferecer a retirada.
+                    COALESCE(rp.accepts_pickup, false) AS accepts_pickup,
                     rp.latitude,
                     rp.longitude
                 FROM restaurant_profiles rp
