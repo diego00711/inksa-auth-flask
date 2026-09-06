@@ -95,6 +95,28 @@ _POOL_ENABLED = os.environ.get("DB_POOL_ENABLED", "1").strip().lower() in ("1", 
 _DB_POOL = None
 _DB_POOL_LOCK = threading.Lock()
 
+# TERMÔMETRO DO POOL. Medido em 06/09/2026: a rota mais barata que toca o banco
+# nunca baixava de 0,81s, contra 0,29s de uma rota que não toca — ou seja, o
+# custo de conexão de ~0,5s estava em TODA requisição, como se não houvesse
+# pool. Só que o pool vem ligado por padrão. Ou o kill-switch está setado no
+# Render, ou ele está falhando e caindo pra conexão direta — e a queda é um
+# logger.warning que ninguém lê.
+#
+# Sem acesso ao painel, não dá pra saber qual dos dois. Então o backend passa a
+# dizer, em /api/health. Isto é só leitura: não muda nenhum comportamento.
+_POOL_STATUS = {
+    "habilitado": _POOL_ENABLED,
+    "criado": False,
+    "serviu_conexao": False,
+    "quedas_para_direta": 0,
+    "ultimo_erro": None,
+}
+
+
+def pool_status():
+    """Cópia do termômetro do pool, pra expor em /api/health."""
+    return dict(_POOL_STATUS)
+
 # Registra o typecaster de UUID GLOBALMENTE (as conexões do pool não passam pelo
 # connect_hardened, que registrava por-conexão). Idempotente.
 try:
@@ -122,9 +144,11 @@ def _get_pool(url):
                     kw["options"] = opts
                 _DB_POOL = _pgpool.ThreadedConnectionPool(1, maxc, dsn=url, **kw)
                 logger.info(f"✅ Pool de conexão DB criado (max={maxc}, statement_timeout={'sim' if opts else 'nao'}).")
+                _POOL_STATUS["criado"] = True
                 return _DB_POOL
             except Exception as e:
                 logger.warning(f"⚠️ Falha ao criar pool DB (opts={bool(opts)}): {e}")
+                _POOL_STATUS["ultimo_erro"] = f"criar pool: {e}"
                 _DB_POOL = None
         return None
 
@@ -198,9 +222,15 @@ def get_db_connection():
             if pool is not None:
                 real = pool.getconn()
                 if real is not None:
+                    _POOL_STATUS["serviu_conexao"] = True
                     return _PooledConn(real, pool)
+            # Chegar aqui é cair pra conexão direta SEM exceção — o caso mais
+            # silencioso de todos, e o que o termômetro existe pra denunciar.
+            _POOL_STATUS["quedas_para_direta"] += 1
         except Exception as e:
             logger.warning(f"⚠️ Pool indisponível ({e}); usando conexão direta.")
+            _POOL_STATUS["quedas_para_direta"] += 1
+            _POOL_STATUS["ultimo_erro"] = str(e)
     try:
         return connect_hardened(url)
     except Exception as e:

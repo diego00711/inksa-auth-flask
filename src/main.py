@@ -400,11 +400,22 @@ def health_check():
     _payout_provider = (os.environ.get("PAYOUT_PROVIDER") or "mock").strip().lower()
     _asaas_configured = bool(os.environ.get("ASAAS_API_KEY"))
     _asaas_env = (os.environ.get("ASAAS_ENV") or "sandbox").strip().lower()
+    # Termômetro do pool de conexão. Sem isto, "o pool está funcionando?" só se
+    # responde no painel do Render — e a queda pra conexão direta é um warning
+    # que ninguém lê. Cada conexão nova custa ~0,5s (Oregon <-> São Paulo), e
+    # uma rota qualquer abre várias: é o custo mais caro e mais invisível que a
+    # API tem. Só leitura, não muda comportamento nenhum.
+    try:
+        from .utils.helpers import pool_status as _pool_status
+        _pool = _pool_status()
+    except Exception as _e_pool:
+        _pool = {"erro_ao_ler": str(_e_pool)}
     return jsonify({
         "status": "ok" if db_status == "connected" else "degraded",
         "timestamp": datetime.now().isoformat(),
         "service": "inksa-auth-flask",
         "version": "1.0.0",
+        "db_pool": _pool,
         # Qual commit está REALMENTE rodando. O Render injeta esta variável a
         # cada deploy. Sem isto, "a correção já subiu?" só dava pra responder
         # olhando o comportamento — e quando a correção é uma trava que só
