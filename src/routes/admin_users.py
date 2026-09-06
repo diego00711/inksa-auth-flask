@@ -756,7 +756,7 @@ def admin_reset_user_password(user_id):
         return jsonify({"status": "error", "message": "Erro de conexão"}), 500
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT email FROM users WHERE id = %s", (str(user_id),))
+            cur.execute("SELECT email, user_type FROM users WHERE id = %s", (str(user_id),))
             row = cur.fetchone()
         if not row:
             return jsonify({"status": "error", "message": "Usuário não encontrado"}), 404
@@ -765,7 +765,29 @@ def admin_reset_user_password(user_id):
         if not supabase:
             return jsonify({"status": "error", "message": "Serviço de autenticação indisponível"}), 503
 
-        redirect_to = "https://clientes.inksadelivery.com.br/reset-password"
+        # O LINK TEM QUE LEVAR AO APP DA PESSOA. Isto era fixo no app do Cliente,
+        # para TODO mundo — entregador e parceiro incluídos.
+        #
+        # O estrago não é só estético: a senha até troca (é o mesmo usuário no
+        # GoTrue), mas a pessoa cai na tela de login do app ERRADO. Aí a trava de
+        # login cruzado recusa com "esta conta é de entregador, não pode entrar
+        # no app de cliente" — e quem acabou de trocar a senha lê isso como
+        # "a senha nova não funciona". Foi o que aconteceu com o Fernando Weber
+        # em 06/09/2026: o GoTrue registrou o login como SUCESSO às 13:15:41 e
+        # mesmo assim a tela deu erro.
+        #
+        # O /forgot-password (auth.py) já acerta isso derivando do Origin; aqui
+        # não há Origin do usuário, então derivamos do tipo dele.
+        _APP_POR_TIPO = {
+            "client": "https://clientes.inksadelivery.com.br",
+            "restaurant": "https://restaurante.inksadelivery.com.br",
+            "delivery": "https://entregadores.inksadelivery.com.br",
+        }
+        # Admin não tem tela própria de redefinição; cai na do Cliente, que
+        # troca a senha do mesmo usuário no GoTrue e serve ao propósito.
+        _base = _APP_POR_TIPO.get((row["user_type"] or "").strip().lower(),
+                                  "https://clientes.inksadelivery.com.br")
+        redirect_to = f"{_base}/reset-password"
         try:
             supabase.auth.reset_password_email(email, {"redirect_to": redirect_to})
         except TypeError:
