@@ -1902,6 +1902,43 @@ def test_push_send():
 # escaparia do filtro de raio), então ela não pode ser contada como pronta.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ── O QUE FALTA PRA COMEÇAR A VENDER / A RECEBER PEDIDO ────────────────────
+# Uma função só, usada pela tela de Prontidão E pelo push que cobra o cadastro.
+# Duas cópias da mesma regra é o defeito que mais mordeu este projeto: um dia
+# uma muda, a outra não, e o push passa a cobrar o que já foi resolvido.
+def _faltas_da_loja(l):
+    faltas = []
+    if not (l["aprovada"] and l["ativa"] and l["dono_ativo"]):
+        faltas.append("aprovação/ativação")
+    if not l["tem_coordenada"]:
+        faltas.append("endereço no mapa")
+    if int(l["itens"] or 0) == 0:
+        faltas.append("cardápio")
+    if not l["uf"]:
+        faltas.append("estado (UF)")
+    return faltas
+
+
+def _faltas_do_entregador(e):
+    faltas = []
+    if not e["aprovado"]:
+        faltas.append("aprovação do admin")
+    if not e["tem_coordenada"]:
+        # É a causa nº1 de "estou online e não chega nada": o filtro de raio
+        # precisa saber onde ele está.
+        faltas.append("endereço no mapa")
+    if not e["veiculo"]:
+        # O filtro de carga é fail-closed pra veículo desconhecido: sem isso
+        # ele não recebe pedido NENHUM, e em silêncio.
+        faltas.append("tipo de veículo")
+    if not e["telefone"]:
+        faltas.append("telefone")
+    if not e["cpf"]:
+        faltas.append("CPF")
+    return faltas
+
+
 @admin_bp.route("/prontidao", methods=["GET"])
 @admin_required
 def readiness():
@@ -1910,7 +1947,8 @@ def readiness():
         return jsonify({"status": "error", "message": "Banco indisponível."}), 500
     try:
         lojas = _fetchall(conn, """
-            SELECT rp.restaurant_name AS nome,
+            SELECT rp.id AS id,
+                   rp.restaurant_name AS nome,
                    NULLIF(TRIM(rp.address_city), '')  AS cidade,
                    UPPER(NULLIF(TRIM(rp.address_state), '')) AS uf,
                    COALESCE(rp.approved, TRUE)  AS aprovada,
@@ -1924,23 +1962,16 @@ def readiness():
              ORDER BY rp.restaurant_name
         """)
         for l in lojas:
-            faltas = []
-            if not (l["aprovada"] and l["ativa"] and l["dono_ativo"]):
-                faltas.append("aprovação/ativação")
-            if not l["tem_coordenada"]:
-                faltas.append("endereço no mapa")
-            if int(l["itens"] or 0) == 0:
-                faltas.append("cardápio")
-            if not l["uf"]:
-                faltas.append("estado (UF)")
+            l["id"] = str(l["id"])
             l["itens"] = int(l["itens"] or 0)
-            l["faltas"] = faltas
+            l["faltas"] = _faltas_da_loja(l)
             # "Vendável" = o cliente VÊ e tem o que pedir. As duas coisas.
             l["vendavel"] = (l["aprovada"] and l["ativa"] and l["dono_ativo"]
                              and l["tem_coordenada"] and l["itens"] > 0)
 
         entregadores = _fetchall(conn, """
-            SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', dp.first_name, dp.last_name)), ''),
+            SELECT dp.id AS id,
+                   COALESCE(NULLIF(TRIM(CONCAT_WS(' ', dp.first_name, dp.last_name)), ''),
                             'sem nome') AS nome,
                    NULLIF(TRIM(dp.address_city), '') AS cidade,
                    COALESCE(dp.approved, FALSE) AS aprovado,
@@ -1952,23 +1983,9 @@ def readiness():
              ORDER BY 1
         """)
         for e in entregadores:
-            faltas = []
-            if not e["aprovado"]:
-                faltas.append("aprovação do admin")
-            if not e["tem_coordenada"]:
-                # É a causa nº1 de "estou online e não chega nada": o filtro de
-                # raio precisa de onde ele está.
-                faltas.append("endereço no mapa")
-            if not e["veiculo"]:
-                # O filtro de carga é fail-closed pra veículo desconhecido:
-                # sem isso ele não recebe pedido NENHUM, e em silêncio.
-                faltas.append("tipo de veículo")
-            if not e["telefone"]:
-                faltas.append("telefone")
-            if not e["cpf"]:
-                faltas.append("CPF")
-            e["faltas"] = faltas
-            e["pode_receber"] = not faltas
+            e["id"] = str(e["id"])
+            e["faltas"] = _faltas_do_entregador(e)
+            e["pode_receber"] = not e["faltas"]
 
         # Itens sem peso nos segmentos onde ele decide frete e veículo. Sem
         # isso, um pedido de 60 kg calcula 0 kg: sai com frete de moto e a
@@ -2048,6 +2065,115 @@ def readiness():
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CARRINHO_MIN = 15
+
+
+@admin_bp.route("/prontidao/cobrar", methods=["POST"])
+@admin_required
+def cobrar_cadastro():
+    """Manda um push pedindo pra pessoa terminar o cadastro.
+
+    O QUE FALTA É RECALCULADO AQUI, nunca recebido da tela. Se viesse do front,
+    bastaria uma requisição montada à mão pra mandar qualquer texto como push
+    em nome da Inksa. E além disso a tela pode estar velha: cobrar cardápio de
+    quem já cadastrou é o jeito mais rápido de ensinar a pessoa a ignorar as
+    nossas notificações.
+
+    Quem não tem fcm_token (nunca abriu o app, ou recusou notificação) NÃO é
+    reportado como enviado — hoje são 3 dos 11 entregadores e 1 das 6 lojas.
+    Dizer "enviado" nesses casos faria o admin achar que cobrou e ficar
+    esperando resposta que nunca vinha.
+    """
+    data = request.get_json(silent=True) or {}
+    tipo = (data.get("tipo") or "").strip().lower()
+    alvo = (data.get("id") or "").strip()
+    if tipo not in ("loja", "entregador") or not alvo:
+        return jsonify({"status": "error", "message": "Informe tipo (loja|entregador) e id."}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if tipo == "loja":
+                cur.execute("""
+                    SELECT rp.restaurant_name AS nome, rp.fcm_token,
+                           UPPER(NULLIF(TRIM(rp.address_state), '')) AS uf,
+                           COALESCE(rp.approved, TRUE) AS aprovada,
+                           COALESCE(rp.active, TRUE)   AS ativa,
+                           COALESCE(u.is_active, TRUE) AS dono_ativo,
+                           (rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL) AS tem_coordenada,
+                           (SELECT COUNT(*) FROM menu_items m WHERE m.restaurant_id = rp.id) AS itens
+                      FROM restaurant_profiles rp
+                      LEFT JOIN users u ON u.id = rp.user_id
+                     WHERE rp.id = %s::uuid
+                """, (alvo,))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"status": "error", "message": "Loja não encontrada."}), 404
+                faltas = _faltas_da_loja(row)
+                titulo = "Sua loja ainda não está vendendo"
+                onde = "no app do Parceiro, em Configurações"
+            else:
+                cur.execute("""
+                    SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''),
+                                    'Entregador') AS nome,
+                           fcm_token,
+                           COALESCE(approved, FALSE) AS aprovado,
+                           NULLIF(TRIM(vehicle_type), '') AS veiculo,
+                           (latitude IS NOT NULL AND longitude IS NOT NULL) AS tem_coordenada,
+                           NULLIF(TRIM(phone), '') AS telefone,
+                           NULLIF(TRIM(cpf), '')   AS cpf
+                      FROM delivery_profiles WHERE id = %s::uuid
+                """, (alvo,))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"status": "error", "message": "Entregador não encontrado."}), 404
+                faltas = _faltas_do_entregador(row)
+                titulo = "Falta pouco pra você receber corridas"
+                onde = "no app do Entregador, em Perfil"
+
+        if not faltas:
+            return jsonify({"status": "error",
+                            "message": "Cadastro já está completo — não há o que cobrar."}), 409
+
+        # "aprovação do admin" é tarefa NOSSA, não dela. Cobrar isso da pessoa
+        # seria pedir que ela resolva algo que só o Diego resolve.
+        dela = [f for f in faltas if "aprovação" not in f]
+        if not dela:
+            return jsonify({"status": "error",
+                            "message": "Só falta a aprovação do admin — isso é com você, "
+                                       "não com a pessoa."}), 409
+
+        token = (row["fcm_token"] or "").strip()
+        if not token:
+            return jsonify({"status": "error",
+                            "message": f"{row['nome']} ainda não tem notificação ativa "
+                                       "(nunca abriu o app ou recusou). Chame por WhatsApp."}), 409
+
+        corpo = ("Falta " + " e ".join([", ".join(dela[:-1]), dela[-1]] if len(dela) > 1 else dela)
+                 + f" {onde}. Termine o cadastro pra começar a usar a Inksa.")
+        from ..services.notification_service import send_push_notification
+        ok = False
+        try:
+            ok = bool(send_push_notification(token, titulo, corpo,
+                                             {"tipo": "cobranca_cadastro"}))
+        except Exception:
+            logger.exception("Falha ao enviar push de cobrança de cadastro")
+
+        if not ok:
+            return jsonify({"status": "error",
+                            "message": "O envio falhou (token pode estar vencido). "
+                                       "Tente falar por WhatsApp."}), 502
+
+        log_admin_action_auto("CobrarCadastro", f"Push para {tipo} {row['nome']}: {', '.join(dela)}")
+        return jsonify({"status": "success",
+                        "message": f"Push enviado para {row['nome']}.",
+                        "enviado": corpo}), 200
+    except Exception as e:
+        logger.exception("Erro em cobrar_cadastro: %s", e)
+        return jsonify({"status": "error", "message": "Erro ao enviar."}), 500
+    finally:
+        conn.close()
 
 
 @admin_bp.route("/carrinhos", methods=["GET"])
