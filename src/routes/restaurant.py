@@ -313,6 +313,58 @@ def handle_profile():
         if conn: 
             conn.close()
 
+@restaurant_bp.route('/minha-taxa', methods=['GET'])
+@handle_db_errors
+def minha_taxa(conn):
+    """A taxa que ESTE parceiro paga hoje — para a tela de precificação.
+
+    Existe porque a calculadora não pode chutar 15%: quem é Parceiro Fundador
+    paga metade, e quem sobe de nível no Clube paga menos ainda. Número errado
+    numa tela que ensina a formar preço faz o parceiro vender no prejuízo
+    achando que está certo — pior que não ter a tela.
+
+    Devolve também a taxa de RETIRADA, que é outra (não empilha com o Fundador:
+    vale o melhor dos dois — ver calculate_platform_commission).
+    """
+    user_id, user_type, error = get_user_id_from_token(request.headers.get('Authorization'))
+    if error:
+        return error
+    if user_type != 'restaurant':
+        return jsonify({"status": "error", "error": "Unauthorized"}), 403
+
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("""SELECT id, COALESCE(fundador, false) AS fundador, fundador_ate,
+                              COALESCE(accepts_pickup, false) AS accepts_pickup,
+                              COALESCE(delivery_type, 'platform') AS delivery_type
+                         FROM restaurant_profiles WHERE user_id = %s""", (user_id,))
+        loja = cur.fetchone()
+    if not loja:
+        return jsonify({"status": "error", "error": "Perfil não encontrado"}), 404
+
+    from ..utils.platform_settings import (
+        effective_commission_rate, calculate_platform_commission, get_settings)
+    rid = str(loja['id'])
+    # Deriva as duas taxas da MESMA função que cobra de verdade, em vez de
+    # repetir a fórmula aqui. Fórmula duplicada é fórmula que um dia diverge —
+    # e divergir numa tela de preço significa ensinar a conta errada.
+    base = float(get_settings()['commission_rate'])
+    entrega = float(effective_commission_rate(rid))
+    retirada = float(calculate_platform_commission(100, rid, retirada=True)) / 100.0
+
+    return jsonify({
+        "status": "success",
+        "data": {
+            "taxa_base_pct":     round(base * 100, 2),
+            "taxa_entrega_pct":  round(entrega * 100, 2),
+            "taxa_retirada_pct": round(retirada * 100, 2),
+            "fundador":          bool(loja['fundador']),
+            "fundador_ate":      loja['fundador_ate'].isoformat() if loja['fundador_ate'] else None,
+            "aceita_retirada":   bool(loja['accepts_pickup']),
+            "entrega_propria":   loja['delivery_type'] == 'own',
+        }
+    }), 200
+
+
 @restaurant_bp.route('/heartbeat', methods=['POST'])
 @handle_db_errors
 def restaurant_heartbeat(conn):
