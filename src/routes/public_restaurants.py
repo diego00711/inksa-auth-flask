@@ -151,6 +151,55 @@ def list_restaurants():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
 
             has_coords = bool(user_lat and user_lon)
+
+            # ⚠️ SEM COORDENADA E SEM CIDADE, O RAIO NÃO É APLICADO — está logo
+            # abaixo, no `if has_coords and not city and not state`. O cliente
+            # que recusa a permissão de localização, ou que abre pela primeira
+            # vez, cai justamente nesse caso e recebe a plataforma INTEIRA.
+            #
+            # Enquanto só existe Lages isso é inofensivo: "tudo" é Lages mesmo.
+            # No dia em que entrar a primeira loja de outra cidade, um cliente
+            # de Lages passa a ver loja onde não dá pra pedir — e só descobre no
+            # fim do carrinho, que é o pior lugar pra descobrir.
+            #
+            # Então a regra é: sem como saber ONDE o cliente está, só entrego a
+            # lista se a plataforma tiver UMA cidade só (não há o que confundir).
+            # Com duas ou mais, devolvo lista vazia e um aviso pro app pedir a
+            # cidade — o seletor já existe no topo da tela do cliente.
+            #
+            # A contagem espelha exatamente o que a consulta principal considera
+            # visível: aprovada, ativa, dono ativo, com coordenada e com
+            # cardápio. Contar loja escondida faria a trava disparar por causa
+            # de quem ninguém vê.
+            if not has_coords and not city and not state:
+                cur.execute("""
+                    SELECT COUNT(DISTINCT LOWER(TRIM(rp.address_city)))
+                      FROM restaurant_profiles rp
+                      LEFT JOIN users u ON u.id = rp.user_id
+                     WHERE COALESCE(rp.approved, TRUE) = TRUE
+                       AND COALESCE(rp.active, TRUE) = TRUE
+                       AND COALESCE(u.is_active, TRUE) = TRUE
+                       AND rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL
+                       AND NULLIF(TRIM(COALESCE(rp.address_city, '')), '') IS NOT NULL
+                       AND EXISTS (SELECT 1 FROM menu_items mi
+                                    WHERE mi.restaurant_id = rp.id
+                                      AND COALESCE(mi.is_available, TRUE) = TRUE)
+                """)
+                _n_cidades = int((cur.fetchone() or [0])[0] or 0)
+                if _n_cidades > 1:
+                    logger.info("Listagem sem localização com %s cidades — pedindo a cidade ao app.",
+                                _n_cidades)
+                    return jsonify({
+                        "status": "success",
+                        "data": [],
+                        "has_more": False,
+                        "limit": limit,
+                        "offset": offset,
+                        # O app usa isto pra abrir o seletor de cidade em vez de
+                        # mostrar "nenhuma loja encontrada", que seria mentira.
+                        "precisa_escolher_cidade": True,
+                        "cidades_disponiveis": _n_cidades,
+                    }), 200
             dist_expr = (
                 "ROUND((earth_distance(ll_to_earth(rp.latitude, rp.longitude),"
                 " ll_to_earth(%s, %s)) / 1000)::numeric, 2)"
