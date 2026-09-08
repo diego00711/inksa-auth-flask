@@ -1956,7 +1956,9 @@ def readiness():
                    COALESCE(u.is_active, TRUE)  AS dono_ativo,
                    (rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL) AS tem_coordenada,
                    (SELECT COUNT(*) FROM menu_items m WHERE m.restaurant_id = rp.id) AS itens,
-                   COALESCE(rp.delivery_type, 'platform') AS tipo_entrega
+                   COALESCE(rp.delivery_type, 'platform') AS tipo_entrega,
+                   (SELECT MAX(c.created_at) FROM cadastro_cobrancas c
+                     WHERE c.tipo = 'loja' AND c.alvo_id = rp.id) AS cobrado_em
               FROM restaurant_profiles rp
               LEFT JOIN users u ON u.id = rp.user_id
              ORDER BY rp.restaurant_name
@@ -1965,6 +1967,7 @@ def readiness():
             l["id"] = str(l["id"])
             l["itens"] = int(l["itens"] or 0)
             l["faltas"] = _faltas_da_loja(l)
+            l["cobrado_em"] = l["cobrado_em"].isoformat() if l["cobrado_em"] else None
             # "Vendável" = o cliente VÊ e tem o que pedir. As duas coisas.
             l["vendavel"] = (l["aprovada"] and l["ativa"] and l["dono_ativo"]
                              and l["tem_coordenada"] and l["itens"] > 0)
@@ -1978,7 +1981,9 @@ def readiness():
                    NULLIF(TRIM(dp.vehicle_type), '') AS veiculo,
                    (dp.latitude IS NOT NULL AND dp.longitude IS NOT NULL) AS tem_coordenada,
                    NULLIF(TRIM(dp.phone), '') AS telefone,
-                   NULLIF(TRIM(dp.cpf), '')   AS cpf
+                   NULLIF(TRIM(dp.cpf), '')   AS cpf,
+                   (SELECT MAX(c.created_at) FROM cadastro_cobrancas c
+                     WHERE c.tipo = 'entregador' AND c.alvo_id = dp.id) AS cobrado_em
               FROM delivery_profiles dp
              ORDER BY 1
         """)
@@ -1986,6 +1991,7 @@ def readiness():
             e["id"] = str(e["id"])
             e["faltas"] = _faltas_do_entregador(e)
             e["pode_receber"] = not e["faltas"]
+            e["cobrado_em"] = e["cobrado_em"].isoformat() if e["cobrado_em"] else None
 
         # Itens sem peso nos segmentos onde ele decide frete e veículo. Sem
         # isso, um pedido de 60 kg calcula 0 kg: sai com frete de moto e a
@@ -2165,9 +2171,29 @@ def cobrar_cadastro():
                             "message": "O envio falhou (token pode estar vencido). "
                                        "Tente falar por WhatsApp."}), 502
 
+        # SÓ GRAVA DEPOIS DO ENVIO CONFIRMADO. Registrar antes marcaria de verde
+        # na tela uma cobrança que o FCM recusou, e aí o Diego pararia de
+        # insistir com alguém que nunca recebeu nada.
+        cobrado_em = None
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO cadastro_cobrancas (tipo, alvo_id, faltas) "
+                    "VALUES (%s, %s::uuid, %s) RETURNING created_at",
+                    (tipo, alvo, ", ".join(dela)))
+                cobrado_em = cur.fetchone()[0].isoformat()
+            conn.commit()
+        except Exception:
+            # O push JÁ FOI. Falhar aqui não pode virar erro pro admin — o pior
+            # que acontece é a tela não marcar de verde e ele cobrar de novo.
+            logger.exception("Push enviado, mas o registro da cobrança falhou")
+            try: conn.rollback()
+            except Exception: pass
+
         log_admin_action_auto("CobrarCadastro", f"Push para {tipo} {row['nome']}: {', '.join(dela)}")
         return jsonify({"status": "success",
                         "message": f"Push enviado para {row['nome']}.",
+                        "cobrado_em": cobrado_em,
                         "enviado": corpo}), 200
     except Exception as e:
         logger.exception("Erro em cobrar_cadastro: %s", e)
