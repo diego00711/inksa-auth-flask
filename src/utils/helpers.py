@@ -163,14 +163,6 @@ def _get_pool(url):
         if _DB_POOL is not None:  # outro greenlet criou enquanto esperávamos
             return _DB_POOL
         from psycopg2 import pool as _pgpool
-        # ⚠️ CONTINUA 12 DE PROPÓSITO. Cheguei a subir pra 20 — medindo, um
-        # disparo de 25 chamadas simultâneas derrubava exatamente 13 pra
-        # conexão direta (25 - 12) e 40 derrubava 28, então mais vagas
-        # "resolviam" o contador. Mas o caminho do pool SERIALIZA (ver o
-        # comentário de _POOL_ESPERA_S): mais vagas = mais requisições presas
-        # no caminho lento, e a conexão direta, que paraleliza, é justamente
-        # a escapatória. Subir o teto antes de entender a serialização é
-        # otimizar o instrumento errado.
         maxc = int(os.environ.get("DB_POOL_MAXCONN", "12"))
         # Tenta com statement_timeout; se o servidor rejeitar 'options' no
         # startup, recria sem (mesma lógica do connect_hardened).
@@ -180,7 +172,33 @@ def _get_pool(url):
                 if opts:
                     kw["options"] = opts
                 _DB_POOL = _pgpool.ThreadedConnectionPool(1, maxc, dsn=url, **kw)
-                logger.info(f"✅ Pool de conexão DB criado (max={maxc}, statement_timeout={'sim' if opts else 'nao'}).")
+                # ── A LINHA QUE CONSERTA A SERIALIZAÇÃO (11/09/2026) ────────
+                #
+                # `minconn` no psycopg2 NÃO é "mínimo de conexões vivas": é
+                # quantas o pool GUARDA. Em `_putconn` (pool.py:105):
+                #
+                #     if len(self._pool) < self.minconn and not close:
+                #         self._pool.append(conn)   # guarda
+                #     else:
+                #         conn.close()              # JOGA FORA
+                #
+                # Com minconn=1 o pool guardava UMA conexão e fechava todas as
+                # outras ao devolver. Numa rajada isso vira desastre, porque
+                # `_getconn` cria a conexão que falta DENTRO do cadeado global
+                # (pool.py:163 -> `self._connect(key)`), e conectar daqui até
+                # São Paulo custa ~1s. Então 12 chamadas simultâneas viravam
+                # uma FILA de 1s cada — medido: a 1ª pegava em 0,0ms e a 12ª
+                # esperava 11,3s. E na volta 11 eram descartadas, então a
+                # rajada seguinte repetia tudo: o pool nunca esquentava.
+                #
+                # Mexer em minconn DEPOIS de construído muda só a retenção —
+                # ele só é lido em dois lugares, a criação inicial (pool.py:58,
+                # já passou) e essa retenção. Ou seja: nasce com 1 conexão (boot
+                # rápido, sem 12 handshakes travando o primeiro request) e passa
+                # a guardar tudo o que criar sob demanda.
+                _DB_POOL.minconn = maxc
+                logger.info(f"✅ Pool de conexão DB criado (guarda até {maxc}, "
+                            f"statement_timeout={'sim' if opts else 'nao'}).")
                 _POOL_STATUS["criado"] = True
                 return _DB_POOL
             except Exception as e:
