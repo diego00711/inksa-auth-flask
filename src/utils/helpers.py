@@ -241,8 +241,15 @@ class _PooledConn:
                 # Reseta o estado antes do próximo uso: encerra qualquer
                 # transação aberta/abortada e tira autocommit (uma rota de
                 # leitura liga autocommit; não pode vazar pra próxima).
-                real.rollback()
-                if getattr(real, "autocommit", False):
+                #
+                # ⚠️ O `rollback()` é UMA IDA ATÉ SÃO PAULO (~174ms medidos) e
+                # acontecia em TODA requisição. Com autocommit não há transação
+                # aberta pra desfazer, então ele é só desperdício — por isso o
+                # `if`. Ver `_SOMENTE_LEITURA` mais abaixo.
+                if not getattr(real, "autocommit", False):
+                    real.rollback()
+                else:
+                    # Local, não fala com o servidor (não há transação aberta).
                     real.autocommit = False
             except Exception:
                 pool.putconn(real, close=True)  # estado suspeito -> descarta
@@ -337,6 +344,56 @@ def _pega_do_pool(pool):
             _time.sleep(0.02)
 
 
+# ── AUTOCOMMIT NAS ROTAS DE VITRINE (11/09/2026) ─────────────────────────────
+#
+# Medido, com o cabeçalho X-Tempo-Servidor-Ms: uma rota pública que faz UMA
+# consulta gastava **532ms de servidor**. A conta fecha assim:
+#
+#     ~348ms  primeira consulta  (BEGIN implícito + a consulta = 2 idas a SP)
+#     ~174ms  rollback ao devolver a conexão      (1 ida a SP)
+#     ~532ms  total, pra um SELECT trivial
+#
+# São TRÊS viagens até São Paulo pra buscar uma linha. Com autocommit não há
+# BEGIN implícito nem rollback: sobra UMA viagem.
+#
+# ⚠️ POR QUE ISTO NÃO PODE VALER PRA TUDO: sem transação, cada comando confirma
+# sozinho. Numa rota de pedido ou pagamento isso destrói a atomicidade — um
+# INSERT passa e o seguinte falha, e o banco fica pela metade. Então a regra é
+# estreita e fechada:
+#
+#   1. só método GET (POST/PUT/DELETE nunca entram);
+#   2. só os prefixos abaixo, que são vitrine pública.
+#
+# Conferido rota por rota antes de ligar: das 23 rotas GET desses arquivos,
+# NENHUMA executa INSERT/UPDATE/DELETE. As escritas que existem nesses mesmos
+# arquivos estão todas em rotas POST/PUT/DELETE de admin, que não passam por
+# aqui. O `INSERT INTO site_visits` do public.py mora em `public_visita`, que é
+# POST.
+#
+# ⚠️ AO CRIAR ROTA NOVA NESSES PREFIXOS: se ela escrever, ou ela deixa de ser
+# GET, ou o prefixo sai desta lista. Não existe meio termo.
+_PREFIXOS_SOMENTE_LEITURA = (
+    "/api/restaurants",   # vitrine, estados, cidades, loja, cardápio
+    "/api/banners",       # o GET é público; o resto é POST/PUT/DELETE de admin
+    "/api/categories",
+    "/api/club/levels",
+    "/api/public/",       # support-info, app-config, social-day, geocode…
+)
+
+
+def _requisicao_e_somente_leitura():
+    """True quando dá pra usar autocommit sem risco (ver o bloco acima)."""
+    try:
+        from flask import request, has_request_context
+        if not has_request_context():
+            return False          # scheduler, CLI: caminho normal, com transação
+        if request.method != "GET":
+            return False
+        return request.path.startswith(_PREFIXOS_SOMENTE_LEITURA)
+    except Exception:
+        return False              # na dúvida, transação normal
+
+
 def get_db_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -351,6 +408,14 @@ def get_db_connection():
                 real = _pega_do_pool(pool)
                 if real is not None:
                     _POOL_STATUS["serviu_conexao"] = True
+                    if _requisicao_e_somente_leitura():
+                        try:
+                            # Sem transação: a consulta vira 1 ida a SP em vez
+                            # de 2, e o rollback do close() deixa de existir.
+                            # ~344ms a menos por requisição de vitrine.
+                            real.autocommit = True
+                        except Exception:
+                            pass   # não deu? segue com transação, como sempre
                     return _PooledConn(real, pool)
                 # Esperou a vaga e ela não veio: pico de verdade. Conexão
                 # direta resolve a requisição; o contador de LOTAÇÃO registra.
