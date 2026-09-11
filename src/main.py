@@ -473,58 +473,6 @@ def health_check():
     }), 200
 
 
-# ⚠️ TEMPORÁRIO — INVESTIGAÇÃO DA SERIALIZAÇÃO (11/09/2026). REMOVER DEPOIS.
-#
-# Medido: rota que usa o POOL fica 5x mais lenta com 12 chamadas simultâneas;
-# rota que abre conexão DIRETA não muda. Este endpoint faz a MESMA coisa pelos
-# dois caminhos e cronometra as fases separadas (pegar conexão x consultar),
-# pra dizer ONDE o tempo vai embora. Sem isso é chute.
-#
-# Seguro de expor: não lê dado nenhum (`SELECT 1`), não aceita entrada além de
-# um nome de modo, e devolve só números.
-@app.route('/api/diag/db')
-def diag_db():
-    import time as _t
-    modo = (request.args.get('modo') or 'pool').strip().lower()
-    if modo not in ('pool', 'direta'):
-        return jsonify({"erro": "modo deve ser 'pool' ou 'direta'"}), 400
-
-    from src.utils.helpers import get_db_connection as _gdc
-
-    t0 = _t.monotonic()
-    try:
-        conn = _connect_hardened(os.environ["DATABASE_URL"]) if modo == 'direta' else _gdc()
-    except Exception as e:
-        return jsonify({"modo": modo, "fase": "conectar", "erro": str(e)[:200]}), 500
-    t_conn = _t.monotonic() - t0
-    if conn is None:
-        return jsonify({"modo": modo, "fase": "conectar", "erro": "sem conexão"}), 500
-
-    t1 = _t.monotonic()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            cur.fetchone()
-        t_query = _t.monotonic() - t1
-        t2 = _t.monotonic()
-    except Exception as e:
-        return jsonify({"modo": modo, "fase": "consulta", "erro": str(e)[:200]}), 500
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    t_close = _t.monotonic() - t2
-
-    return jsonify({
-        "modo": modo,
-        "conectar_ms": round(t_conn * 1000, 1),
-        "consulta_ms": round(t_query * 1000, 1),
-        "devolver_ms": round(t_close * 1000, 1),
-        "total_ms": round((_t.monotonic() - t0) * 1000, 1),
-    }), 200
-
-
 # --- Handlers de SocketIO ---
 @socketio.on('connect')
 def handle_connect():
