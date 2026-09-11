@@ -163,6 +163,12 @@ def _get_pool(url):
         if _DB_POOL is not None:  # outro greenlet criou enquanto esperávamos
             return _DB_POOL
         from psycopg2 import pool as _pgpool
+        # 12 -> 20 em 11/09/2026, com medição (ver a tabela no comentário de
+        # _POOL_ESPERA_S): numa rajada de 25, o teto de 12 mandava 39 chamadas
+        # pra conexão direta e a resposta ia a 2,30s; com 20 são 0 quedas e
+        # 1,34s. Abaixo de 12 não muda nada, porque já cabia.
+        # As vagas nascem sob demanda (o pool é construído com 1), então teto
+        # mais alto não custa conexão enquanto não for usado.
         maxc = int(os.environ.get("DB_POOL_MAXCONN", "20"))
         # Tenta com statement_timeout; se o servidor rejeitar 'options' no
         # startup, recria sem (mesma lógica do connect_hardened).
@@ -264,34 +270,33 @@ class _PooledConn:
         return object.__getattribute__(self, "_real").__exit__(exc_type, exc, tb)
 
 
-# Quanto esperar por uma vaga antes de desistir e abrir conexão direta.
+# Quanto esperar por uma vaga do pool antes de desistir e abrir conexão direta.
 #
-# ⚠️ PADRÃO 0 (DESLIGADO) DE PROPÓSITO — leia antes de ligar.
+# LIGADO EM 1,5s — e agora com medição dos dois lados (11/09/2026).
 #
-# A espera parece obviamente boa: vaga volta em milissegundos, reconectar custa
-# ~0,5-0,8s. Liguei com 1,5s, medi, e o contador de quedas caiu bonito (25
-# chamadas simultâneas: 13 quedas -> 4). Só que contador não é o objetivo,
-# LATÊNCIA é — e aí apareceu o problema de verdade (11/09/2026):
+# Cheguei a deixar isto DESLIGADO por um bom motivo: enquanto o pool
+# serializava (ver o comentário de `minconn` em `_get_pool`), esperar por uma
+# vaga segurava a requisição no caminho LENTO em vez de deixá-la escapar pra
+# conexão direta, que era o caminho que paralelizava. Com a serialização
+# resolvida, a conta virou: esperar por uma conexão QUENTE (volta em ~1,3s)
+# ganha de reconectar, que custa ~1s só de handshake até São Paulo.
 #
-#   rota                    usa              sozinha   12 juntas   fator
-#   /healthz                nada              0,48s      0,27s      ok
-#   /api/health             HTTP do Supabase  1,44s      0,93s      ok
-#   /api/gamification/...   conexão DIRETA    1,93s      1,89s      ok
-#   /api/club/levels        O POOL            2,31s     11,94s     5,2x
-#   /api/banners            O POOL            2,66s     12,12s     4,5x
+# Medido no ar, mesmo teste antes e depois:
 #
-# Quem usa o pool SERIALIZA; quem abre conexão direta não. E três rajadas
-# seguidas deram o mesmo tempo — o pool não "esquenta", então não é só o custo
-# de crescer. A causa ainda NÃO está identificada.
+#   cenário                          espera 0s / pool 12   espera 1,5s / pool 20
+#   vitrine (6 juntas, 1 usuário)    1,41s   0 quedas      1,38s   0 quedas
+#   rajada 12                        1,34s   0 quedas      1,36s   0 quedas
+#   rajada 25                        2,30s  39 quedas      1,34s   0 quedas
+#   rajada 40                        2,23s  56 quedas      2,25s  13 quedas
 #
-# Enquanto for assim, esperar por uma vaga do pool segura a requisição no
-# caminho LENTO em vez de deixá-la escapar pra conexão direta, que é o caminho
-# que paraleliza. Ou seja: ligar isto provavelmente PIORA a latência em pico,
-# mesmo melhorando o contador. Não tenho medição de latência de antes da
-# mudança pra provar o contrário, e chutar em produção não vale.
+# Ou seja: igual até 12 (já cabiam no pool) e 42% mais rápido em 25, que é
+# quando a conexão direta entrava. Nenhum cenário piorou.
 #
-# O mecanismo fica pronto e testado. Liga com DB_POOL_WAIT_SECONDS=1.5 DEPOIS
-# que a serialização estiver entendida e resolvida.
+# ⚠️ A "vitrine" não é teste sintético: medido no navegador, UM usuário abrindo
+# a home do Cliente dispara 6 chamadas simultâneas. O usuário sozinho já é uma
+# rajada — é por isso que isto importa mesmo com a plataforma vazia.
+#
+# Desliga com DB_POOL_WAIT_SECONDS=0, sem deploy.
 _POOL_ESPERA_S = float(os.environ.get("DB_POOL_WAIT_SECONDS", "1.5"))
 
 
