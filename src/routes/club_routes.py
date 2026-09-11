@@ -124,7 +124,7 @@ def get_levels():
     if not conn:
         return jsonify({"error": "DB indisponível"}), 503
     try:
-        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             levels = fetch_levels(cur, audience)
             views = []
             for i, lvl in enumerate(levels):
@@ -153,7 +153,7 @@ def get_club_status():
     if not conn:
         return jsonify({"error": "DB indisponível"}), 503
     try:
-        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             profile_id = _resolve_profile(cur, user_type, auth_uid)
             if not profile_id:
                 return jsonify({"error": "Perfil não encontrado"}), 404
@@ -257,7 +257,7 @@ def admin_list_levels():
     if not conn:
         return jsonify({"error": "DB indisponível"}), 503
     try:
-        with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             if audience in _VALID_AUDIENCES:
                 cur.execute("""SELECT id, audience, level_order, name, emoji, color, min_activity,
                                       benefits, is_active

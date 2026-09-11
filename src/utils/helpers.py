@@ -372,11 +372,23 @@ def _pega_do_pool(pool):
 #
 # ⚠️ AO CRIAR ROTA NOVA NESSES PREFIXOS: se ela escrever, ou ela deixa de ser
 # GET, ou o prefixo sai desta lista. Não existe meio termo.
+#
+# ⚠️ E CUIDADO COM `with conn:` — ELE ANULA ISTO AQUI.
+# `with conn, conn.cursor(...)` faz o psycopg2 mandar **BEGIN e COMMIT
+# explícitos**, mesmo com autocommit ligado. São duas idas a São Paulo de volta,
+# e o ganho evapora. Medido em 11/09/2026 no pg_stat_statements: 5 chamadas a
+# /api/club/levels geravam 5 SELECT + 5 BEGIN + 5 COMMIT (529ms), enquanto 5
+# chamadas a /api/public/support-info, que usa só `with conn.cursor(...)`,
+# geravam 5 SELECT e nada mais (177ms).
+# Em rota de LEITURA o `with conn:` não serve pra nada: escreva só
+# `with conn.cursor(...) as cur:`. Em rota de escrita ele é obrigatório — e lá
+# o autocommit não vale de qualquer forma, porque a regra acima só aceita GET.
 _PREFIXOS_SOMENTE_LEITURA = (
     "/api/restaurants",   # vitrine, estados, cidades, loja, cardápio
     "/api/banners",       # o GET é público; o resto é POST/PUT/DELETE de admin
     "/api/categories",
-    "/api/club/levels",
+    "/api/club/",         # levels, status e admin/levels — os GET aqui só leem;
+                          # criar/editar/apagar nível é POST/PUT/DELETE e não entra
     "/api/public/",       # support-info, app-config, social-day, geocode…
 )
 
