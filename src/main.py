@@ -267,6 +267,32 @@ def handle_preflight():
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         return resp, 204
 
+# ── Quanto tempo o SERVIDOR levou, separado da rede ───────────────────────────
+# Sem isto, "a rota está lenta" é sempre ambíguo: daqui até o Render são ~170ms
+# de ida e volta, e o Render até o Supabase (São Paulo) outros ~170ms por
+# consulta. Medindo só do lado de fora não dá pra saber o que atacar — passei
+# por isso hoje, achando que uma rota de 3 consultas custava 3x uma de 1.
+# Custo: uma subtração por requisição.
+@app.before_request
+def _marca_inicio_da_requisicao():
+    import time as _t
+    from flask import g as _g
+    _g._t_inicio = _t.monotonic()
+
+
+@app.after_request
+def add_server_timing(response):
+    import time as _t
+    from flask import g as _g
+    t0 = getattr(_g, "_t_inicio", None)
+    if t0 is not None:
+        ms = (_t.monotonic() - t0) * 1000.0
+        response.headers["X-Tempo-Servidor-Ms"] = f"{ms:.1f}"
+        # Padrão que o DevTools do navegador entende e desenha na aba Network.
+        response.headers["Server-Timing"] = f"app;dur={ms:.1f}"
+    return response
+
+
 _CACHEABLE_PREFIXES = ('/api/restaurants', '/api/menu', '/api/banners', '/api/categories')
 
 @app.after_request
