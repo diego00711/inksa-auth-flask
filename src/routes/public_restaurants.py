@@ -11,6 +11,8 @@ If those columns don't exist yet, add them via migration:
 
 import logging
 import traceback
+import time as _time  # módulo time. O `time` importado abaixo é a CLASSE do
+                     # datetime — não dá pra usar um pelo outro.
 from datetime import datetime, date, time
 
 import psycopg2
@@ -42,6 +44,46 @@ def _get_conn():
     if not conn:
         raise RuntimeError("Erro de conexão com o banco de dados")
     return conn
+
+
+# ── Quantas cidades a plataforma tem, em cache curto ─────────────────────────
+#
+# Esta contagem roda no caminho MAIS quente que existe: cliente abrindo o app
+# pela primeira vez, antes de a localização resolver. É uma ida a São Paulo
+# (~177ms) numa rota que já faz outras — e a resposta só muda quando entra uma
+# LOJA DE CIDADE NOVA, o que acontece algumas vezes por ano.
+#
+# 60s de cache é seguro aqui porque o efeito de errar é minúsculo: uma cidade
+# nova demora no máximo um minuto pra passar a contar. Não é preço, não é
+# estoque, não é status de pedido.
+#
+# ⚠️ Cache de processo, não compartilhado: com mais de um worker cada um tem o
+# seu. Tudo bem — não precisa ser coerente entre eles.
+_CIDADES_CACHE = {"valor": None, "ate": 0.0}
+_CIDADES_TTL_S = 60.0
+
+
+def _contar_cidades(cur):
+    agora = _time.monotonic()
+    if _CIDADES_CACHE["valor"] is not None and agora < _CIDADES_CACHE["ate"]:
+        return _CIDADES_CACHE["valor"]
+    cur.execute("""
+        SELECT COUNT(DISTINCT LOWER(TRIM(rp.address_city)))
+          FROM restaurant_profiles rp
+          LEFT JOIN users u ON u.id = rp.user_id
+         WHERE COALESCE(rp.approved, TRUE) = TRUE
+           AND COALESCE(rp.active, TRUE) = TRUE
+           AND COALESCE(u.is_active, TRUE) = TRUE
+           AND rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL
+           AND NULLIF(TRIM(COALESCE(rp.address_city, '')), '') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM menu_items mi
+                        WHERE mi.restaurant_id = rp.id
+                          AND COALESCE(mi.is_available, TRUE) = TRUE)
+    """)
+    n = int((cur.fetchone() or [0])[0] or 0)
+    _CIDADES_CACHE["valor"] = n
+    _CIDADES_CACHE["ate"] = agora + _CIDADES_TTL_S
+    return n
 
 
 def _close(conn):
@@ -172,20 +214,7 @@ def list_restaurants():
             # cardápio. Contar loja escondida faria a trava disparar por causa
             # de quem ninguém vê.
             if not has_coords and not city and not state:
-                cur.execute("""
-                    SELECT COUNT(DISTINCT LOWER(TRIM(rp.address_city)))
-                      FROM restaurant_profiles rp
-                      LEFT JOIN users u ON u.id = rp.user_id
-                     WHERE COALESCE(rp.approved, TRUE) = TRUE
-                       AND COALESCE(rp.active, TRUE) = TRUE
-                       AND COALESCE(u.is_active, TRUE) = TRUE
-                       AND rp.latitude IS NOT NULL AND rp.longitude IS NOT NULL
-                       AND NULLIF(TRIM(COALESCE(rp.address_city, '')), '') IS NOT NULL
-                       AND EXISTS (SELECT 1 FROM menu_items mi
-                                    WHERE mi.restaurant_id = rp.id
-                                      AND COALESCE(mi.is_available, TRUE) = TRUE)
-                """)
-                _n_cidades = int((cur.fetchone() or [0])[0] or 0)
+                _n_cidades = _contar_cidades(cur)
                 if _n_cidades > 1:
                     logger.info("Listagem sem localização com %s cidades — pedindo a cidade ao app.",
                                 _n_cidades)
