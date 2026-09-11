@@ -289,7 +289,13 @@ def add_server_timing(response):
         ms = (_t.monotonic() - t0) * 1000.0
         response.headers["X-Tempo-Servidor-Ms"] = f"{ms:.1f}"
         # Padrão que o DevTools do navegador entende e desenha na aba Network.
-        response.headers["Server-Timing"] = f"app;dur={ms:.1f}"
+        partes = [f"app;dur={ms:.1f}"]
+        # Esta rota rodou sem transação? Sem expor isso, um tempo de 529ms é
+        # ambíguo: pode ser 3 consultas COM autocommit ou 1 consulta SEM ele —
+        # e o conserto é diferente em cada caso.
+        if getattr(_g, "_db_sem_transacao", False):
+            partes.append("sem_transacao;dur=0")
+        response.headers["Server-Timing"] = ", ".join(partes)
     return response
 
 

@@ -60,7 +60,39 @@ def _get_conn():
 # ⚠️ Cache de processo, não compartilhado: com mais de um worker cada um tem o
 # seu. Tudo bem — não precisa ser coerente entre eles.
 _CIDADES_CACHE = {"valor": None, "ate": 0.0}
-_CIDADES_TTL_S = 60.0
+# Vale pros DOIS caches desta vitrine (cidades e limiar de destaque).
+_TTL_CACHE_VITRINE_S = 60.0
+
+
+# ── Limiar do destaque na vitrine, em cache curto ────────────────────────────
+#
+# Mesma história da contagem de cidades: roda em TODA chamada da vitrine e a
+# resposta só muda quando o Diego mexe nos níveis do Clube no admin — algumas
+# vezes por ano. Uma ida a São Paulo (~177ms) por requisição, para reler um
+# número que não mudou.
+#
+# 60s é seguro porque errar aqui atrasa no máximo um minuto a entrada de uma
+# loja no destaque. Não é preço, não é status de pedido.
+_DESTAQUE_CACHE = {"valor": None, "ate": 0.0}
+
+
+def _limiar_destaque(cur):
+    """Menor min_activity entre os níveis com `featured_listing`. None = ninguém."""
+    agora = _time.monotonic()
+    if agora < _DESTAQUE_CACHE["ate"]:
+        return _DESTAQUE_CACHE["valor"]
+    cur.execute("""
+        SELECT MIN(min_activity) AS t FROM public.club_levels
+         WHERE audience = 'restaurant' AND is_active
+           AND COALESCE((benefits->>'featured_listing')::boolean, false) = true
+    """)
+    linha = cur.fetchone()
+    # ⚠️ None é resposta VÁLIDA (nenhum nível dá destaque) — por isso a validade
+    # do cache é a hora, não "valor is not None". Testar o valor faria a consulta
+    # rodar de novo em toda chamada justamente no caso em que ela é inútil.
+    _DESTAQUE_CACHE["valor"] = linha['t'] if linha and linha['t'] is not None else None
+    _DESTAQUE_CACHE["ate"] = agora + _TTL_CACHE_VITRINE_S
+    return _DESTAQUE_CACHE["valor"]
 
 
 def _contar_cidades(cur):
@@ -82,7 +114,7 @@ def _contar_cidades(cur):
     """)
     n = int((cur.fetchone() or [0])[0] or 0)
     _CIDADES_CACHE["valor"] = n
-    _CIDADES_CACHE["ate"] = agora + _CIDADES_TTL_S
+    _CIDADES_CACHE["ate"] = agora + _TTL_CACHE_VITRINE_S
     return n
 
 
@@ -272,13 +304,7 @@ def list_restaurants():
             # Correlacionado por `rp.id`, então não gasta placeholder.
             from ..utils.club import restaurant_volume_efetivo_sql
             _volume_sql = restaurant_volume_efetivo_sql("rp.id")
-            cur.execute("""
-                SELECT MIN(min_activity) AS t FROM public.club_levels
-                 WHERE audience = 'restaurant' AND is_active
-                   AND COALESCE((benefits->>'featured_listing')::boolean, false) = true
-            """)
-            _ft = cur.fetchone()
-            featured_threshold = _ft['t'] if _ft and _ft['t'] is not None else None
+            featured_threshold = _limiar_destaque(cur)
 
             if has_coords:
                 # params for dist_expr come first in SELECT

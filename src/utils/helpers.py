@@ -381,6 +381,22 @@ _PREFIXOS_SOMENTE_LEITURA = (
 )
 
 
+def _marca_autocommit():
+    """Deixa registrado que ESTA requisição rodou sem transação.
+
+    O `after_request` do main.py publica isso no Server-Timing. Serve pra
+    responder "essa rota está pegando o autocommit?" olhando um cabeçalho, em
+    vez de deduzir pelo tempo — 529ms tanto pode ser 3 consultas COM autocommit
+    quanto 1 consulta SEM ele, e os dois casos pedem conserto diferente.
+    """
+    try:
+        from flask import g, has_request_context
+        if has_request_context():
+            g._db_sem_transacao = True
+    except Exception:
+        pass
+
+
 def _requisicao_e_somente_leitura():
     """True quando dá pra usar autocommit sem risco (ver o bloco acima)."""
     try:
@@ -414,6 +430,7 @@ def get_db_connection():
                             # de 2, e o rollback do close() deixa de existir.
                             # ~344ms a menos por requisição de vitrine.
                             real.autocommit = True
+                            _marca_autocommit()
                         except Exception:
                             pass   # não deu? segue com transação, como sempre
                     return _PooledConn(real, pool)
