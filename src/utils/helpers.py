@@ -12,7 +12,7 @@ import psycopg2.extras
 from psycopg2.extras import register_uuid
 from flask import jsonify
 from supabase import create_client, Client
-from datetime import date, datetime, timedelta, time
+from datetime import date, datetime, timedelta, time, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -104,13 +104,42 @@ _DB_POOL_LOCK = threading.Lock()
 #
 # Sem acesso ao painel, não dá pra saber qual dos dois. Então o backend passa a
 # dizer, em /api/health. Isto é só leitura: não muda nenhum comportamento.
+#
+# ── POR QUE O TERMÔMETRO SEPARA "CHEIO" DE "QUEBRADO" (11/09/2026) ───────────
+#
+# Na primeira versão havia UM contador só (`quedas_para_direta`) e um
+# `ultimo_erro` que nunca era limpo. O /api/health passou a mostrar:
+#
+#     quedas_para_direta: 37,  ultimo_erro: "connection pool exhausted"
+#
+# e isso me levou a diagnosticar VAZAMENTO DE CONEXÃO — errado. Medido: 90
+# chamadas em sequência não moveram o contador (ninguém vaza); já 25 chamadas
+# SIMULTÂNEAS moveram +13 e 40 moveram +28. Ou seja, exatamente `n - maxconn`:
+# é lotação momentânea, não vazamento. E o `ultimo_erro` grudado fazia um pico
+# de dez dias atrás parecer defeito de agora.
+#
+# Lotação é CONTRAPRESSÃO ESPERADA; pool quebrado é DEFEITO. Um instrumento que
+# mistura os dois faz perder tempo procurando bug que não existe.
 _POOL_STATUS = {
     "habilitado": _POOL_ENABLED,
     "criado": False,
     "serviu_conexao": False,
+    # Mantido: é a soma dos dois abaixo (quem já lia continua lendo).
     "quedas_para_direta": 0,
+    "quedas_por_lotacao": 0,   # pool cheio no instante do pico — normal
+    "quedas_por_erro": 0,      # pool falhou de verdade — isto é defeito
+    "ultima_queda_em": None,   # pra saber se foi AGORA ou semana passada
     "ultimo_erro": None,
 }
+
+
+def _anota_queda(motivo, erro=None):
+    """Registra uma queda pra conexão direta, separando lotação de defeito."""
+    _POOL_STATUS["quedas_para_direta"] += 1
+    _POOL_STATUS["quedas_por_lotacao" if motivo == "lotacao" else "quedas_por_erro"] += 1
+    _POOL_STATUS["ultima_queda_em"] = datetime.now(timezone.utc).isoformat()
+    if erro is not None:
+        _POOL_STATUS["ultimo_erro"] = str(erro)
 
 
 def pool_status():
@@ -134,7 +163,13 @@ def _get_pool(url):
         if _DB_POOL is not None:  # outro greenlet criou enquanto esperávamos
             return _DB_POOL
         from psycopg2 import pool as _pgpool
-        maxc = int(os.environ.get("DB_POOL_MAXCONN", "12"))
+        # 12 -> 20 em 11/09/2026. Não é chute: medindo, um disparo de 25
+        # chamadas simultâneas derrubava exatamente 13 pra conexão direta
+        # (25 - 12), e 40 derrubava 28. O worker é único (gevent) e divide
+        # essas vagas com o agendador, que também consulta o banco. As vagas
+        # nascem sob demanda (minconn=1), então o teto mais alto não custa
+        # nada enquanto não for usado.
+        maxc = int(os.environ.get("DB_POOL_MAXCONN", "20"))
         # Tenta com statement_timeout; se o servidor rejeitar 'options' no
         # startup, recria sem (mesma lógica do connect_hardened).
         for opts in ('-c statement_timeout=30000', None):
@@ -209,6 +244,48 @@ class _PooledConn:
         return object.__getattribute__(self, "_real").__exit__(exc_type, exc, tb)
 
 
+# Quanto esperar por uma vaga antes de desistir e abrir conexão direta.
+# 0 desliga a espera (volta ao comportamento anterior).
+_POOL_ESPERA_S = float(os.environ.get("DB_POOL_WAIT_SECONDS", "1.5"))
+
+
+def _pega_do_pool(pool):
+    """Pega uma conexão do pool; se estiver cheio, ESPERA um pouco.
+
+    ── POR QUE ESPERAR ──────────────────────────────────────────────────────
+    `ThreadedConnectionPool.getconn()` não enfileira: cheio = estoura na hora.
+    Cada estouro vira uma conexão NOVA, e conexão nova custa ~0,5-0,8s de
+    handshake TLS+auth daqui pra SP (é o motivo de o pool existir). Ou seja, o
+    comportamento antigo respondia ao pico do jeito mais caro possível.
+
+    Uma consulta típica dura ~0,2s, então a vaga costuma voltar em
+    milissegundos — esperar é quase sempre mais barato que reconectar.
+
+    ── POR QUE ISTO NÃO TRAVA O WORKER ──────────────────────────────────────
+    A API roda `gunicorn -w 1 -k gevent`, e o `main.py` chama `monkey.patch_all()`
+    como PRIMEIRA linha (mais `psycogreen` pro psycopg2). Com isso o `sleep`
+    abaixo CEDE o worker em vez de bloqueá-lo: os outros greenlets seguem
+    rodando e devolvendo as conexões que esta espera precisa. Sem o
+    monkey-patch isto seria o contrário — pararia a API inteira.
+    ⚠️ Se um dia o worker deixar de ser gevent, reveja esta função.
+
+    Devolve a conexão real, ou None se o tempo acabou (aí o chamador cai pra
+    conexão direta, como sempre fez).
+    """
+    limite = _time.monotonic() + max(0.0, _POOL_ESPERA_S)
+    while True:
+        try:
+            return pool.getconn()
+        except Exception as e:
+            # Só "pool cheio" vale esperar. Qualquer outro erro é defeito e
+            # tem que subir na hora, sem mascarar atrás de uma espera.
+            if "exhausted" not in str(e).lower():
+                raise
+            if _time.monotonic() >= limite:
+                return None
+            _time.sleep(0.02)
+
+
 def get_db_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -220,17 +297,20 @@ def get_db_connection():
         try:
             pool = _get_pool(url)
             if pool is not None:
-                real = pool.getconn()
+                real = _pega_do_pool(pool)
                 if real is not None:
                     _POOL_STATUS["serviu_conexao"] = True
                     return _PooledConn(real, pool)
-            # Chegar aqui é cair pra conexão direta SEM exceção — o caso mais
-            # silencioso de todos, e o que o termômetro existe pra denunciar.
-            _POOL_STATUS["quedas_para_direta"] += 1
+                # Esperou a vaga e ela não veio: pico de verdade. Conexão
+                # direta resolve a requisição; o contador de LOTAÇÃO registra.
+                _anota_queda("lotacao")
+            else:
+                # Pool nem existe — isto sim é defeito, e é o caso mais
+                # silencioso de todos (cai pra direta sem exceção nenhuma).
+                _anota_queda("erro", "pool indisponível (não criado)")
         except Exception as e:
             logger.warning(f"⚠️ Pool indisponível ({e}); usando conexão direta.")
-            _POOL_STATUS["quedas_para_direta"] += 1
-            _POOL_STATUS["ultimo_erro"] = str(e)
+            _anota_queda("erro", e)
     try:
         return connect_hardened(url)
     except Exception as e:
