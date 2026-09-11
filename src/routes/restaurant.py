@@ -351,6 +351,30 @@ def minha_taxa(conn):
     entrega = float(effective_commission_rate(rid))
     retirada = float(calculate_platform_commission(100, rid, retirada=True)) / 100.0
 
+    # DE ONDE VEM ESSA TAXA. Só o número não basta numa tela que ensina a
+    # formar preço: o parceiro precisa saber se ela está garantida ou se pode
+    # mudar amanhã. Desde 11/09/2026 o nível é o maior entre este mês e o
+    # anterior, então dá pra responder com honestidade — ver
+    # club.restaurant_volume_efetivo_sql.
+    nivel_nome = None
+    garantido = False
+    fat_mes = fat_efetivo = 0.0
+    try:
+        from ..utils.club import (fetch_levels, level_for_activity,
+                                  monthly_activity, restaurant_volume_efetivo)
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            fat_mes = float(monthly_activity(cur, 'restaurant', rid) or 0)
+            fat_efetivo = float(restaurant_volume_efetivo(cur, rid) or 0)
+            nivel = level_for_activity(fetch_levels(cur, 'restaurant'), fat_efetivo)
+            nivel_nome = nivel['name'] if nivel else None
+            garantido = fat_efetivo > fat_mes
+    except Exception:
+        # current_app.logger porque este arquivo não tem logger próprio — e um
+        # `logger` inexistente aqui viraria NameError DENTRO do except, ou seja,
+        # trocaria uma falha silenciosa por um 500 na tela de preço.
+        from flask import current_app
+        current_app.logger.exception("minha_taxa: nível do clube indisponível (segue sem ele)")
+
     return jsonify({
         "status": "success",
         "data": {
@@ -361,6 +385,11 @@ def minha_taxa(conn):
             "fundador_ate":      loja['fundador_ate'].isoformat() if loja['fundador_ate'] else None,
             "aceita_retirada":   bool(loja['accepts_pickup']),
             "entrega_propria":   loja['delivery_type'] == 'own',
+            # Clube — para a tela explicar a taxa em vez de só mostrá-la.
+            "clube_nivel":       nivel_nome,
+            "clube_garantido_mes_anterior": garantido,
+            "faturamento_mes":   round(fat_mes, 2),
+            "faturamento_nivel": round(fat_efetivo, 2),
         }
     }), 200
 

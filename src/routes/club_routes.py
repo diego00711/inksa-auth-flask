@@ -160,7 +160,20 @@ def get_club_status():
 
             levels = fetch_levels(cur, user_type)
             activity = monthly_activity(cur, user_type, profile_id)
-            current = level_for_activity(levels, activity)
+
+            # PARCEIRO: o nível sai do volume EFETIVO (maior entre este mês e o
+            # anterior) — o MESMO número que a cobrança usa. A `activity` segue
+            # sendo o mês corrente, porque é dela que saem "vendi X este mês" e
+            # "faltam Y". Se o nível saísse da activity, no dia 1º a tela diria
+            # Bronze enquanto o checkout cobrava a taxa de Ouro.
+            if user_type == "restaurant":
+                from ..utils.club import restaurant_volume_efetivo
+                efetiva = restaurant_volume_efetivo(cur, profile_id)
+            else:
+                efetiva = activity
+            nivel_garantido = bool(efetiva > activity)
+
+            current = level_for_activity(levels, efetiva)
             nxt = next_level(levels, current)
 
             current_view = _to_view(current, nxt, user_type) if current else None
@@ -209,6 +222,11 @@ def get_club_status():
             "orders_to_next_level": to_next,
             "recent_orders": recent,
             "motivation": motivation,
+            # O nível veio do mês passado, não do que ele fez agora. Sem isto a
+            # tela mostraria "Ouro" com "R$ 0 vendidos este mês" e pareceria
+            # defeito.
+            "nivel_garantido_mes_anterior": nivel_garantido,
+            "faturamento_do_nivel": efetiva,
         }}), 200
     except Exception:
         logger.exception("club.get_club_status failed")

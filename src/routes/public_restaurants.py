@@ -265,8 +265,13 @@ def list_restaurants():
             # Clube: destaque = parceiros cujo FATURAMENTO do mês alcança um
             # nível com featured_listing. threshold = menor min_activity desses
             # níveis (que para o parceiro é expresso em reais).
-            from ..utils.club import restaurant_month_volume_sql
-            _volume_sql = restaurant_month_volume_sql("rp.id")
+            # Volume EFETIVO (maior entre este mês e o anterior), o MESMO que
+            # decide a comissão e o nível na tela do parceiro. Usar só o mês
+            # corrente aqui faria a loja sumir do destaque todo dia 1º,
+            # enquanto o app dela continuaria dizendo "Ouro".
+            # Correlacionado por `rp.id`, então não gasta placeholder.
+            from ..utils.club import restaurant_volume_efetivo_sql
+            _volume_sql = restaurant_volume_efetivo_sql("rp.id")
             cur.execute("""
                 SELECT MIN(min_activity) AS t FROM public.club_levels
                  WHERE audience = 'restaurant' AND is_active

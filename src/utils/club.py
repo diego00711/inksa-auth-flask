@@ -40,18 +40,25 @@ ACTIVITY_UNIT = {"client": "orders", "delivery": "orders", "restaurant": "brl"}
 MAX_COMMISSION_DISCOUNT_PP = 10.0
 
 
-def restaurant_month_volume_sql(id_expr="%s"):
-    """SQL do faturamento do mês do parceiro (subtotal dos pedidos entregues).
+def restaurant_month_volume_sql(id_expr="%s", ref="atual"):
+    """SQL do faturamento do parceiro no mês (subtotal dos pedidos entregues).
 
-    Devolvido como texto porque DOIS lugares precisam da mesma conta: o nível do
-    Clube (aqui) e o destaque na listagem (public_restaurants, que precisa dela
+    `ref`: "atual" = mês corrente; "anterior" = mês passado fechado.
+
+    Devolvido como texto porque VÁRIOS lugares precisam da mesma conta: o nível
+    do Clube, a comissão do checkout e o destaque na listagem (que precisa dela
     correlacionada com `rp.id`). Duas versões da mesma regra divergiriam, e o
-    parceiro veria um nível na tela dele e outro no destaque.
+    parceiro veria um nível na tela dele e outro na cobrança.
 
     `total_amount_items` é o subtotal gravado; o fallback existe pros pedidos
     antigos que não têm essa coluna preenchida — nunca o total cheio, senão o
     frete entraria no faturamento e inflaria o nível.
     """
+    if ref == "anterior":
+        janela = ("DATE_TRUNC('month', o.created_at) = "
+                  "DATE_TRUNC('month', NOW() - INTERVAL '1 month')")
+    else:
+        janela = "DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())"
     return f"""
         SELECT COALESCE(SUM(COALESCE(o.total_amount_items,
                                      o.total_amount - COALESCE(o.delivery_fee, 0),
@@ -59,7 +66,48 @@ def restaurant_month_volume_sql(id_expr="%s"):
           FROM orders o
          WHERE o.restaurant_id = {id_expr}
            AND o.status = 'delivered'
-           AND DATE_TRUNC('month', o.created_at) = DATE_TRUNC('month', NOW())
+           AND {janela}
+    """
+
+
+def restaurant_volume_efetivo_sql(id_expr="%s"):
+    """O faturamento que DEFINE O NÍVEL: o maior entre este mês e o anterior.
+
+    ── A REGRA, EM UMA FRASE ────────────────────────────────────────────────
+    O nível do parceiro nunca cai no meio do mês, e sobe na hora em que ele
+    cruza a faixa.
+
+    ── POR QUE (11/09/2026) ─────────────────────────────────────────────────
+    Antes o nível olhava só o mês corrente, e o efeito era que a tela prometia
+    uma coisa e a cobrança fazia outra. Medido com as faixas de hoje
+    (15/14/12/10% a partir de R$ 0/2.500/5.000/7.500): um parceiro que faturasse
+    exatos R$ 7.500 no mês via "Comissão de 10%" na tela e pagava **13,67%**,
+    porque os primeiros R$ 2.500 saíam a 15%, os seguintes a 14% e assim por
+    diante. Pior: todo dia 1º TODO MUNDO voltava pra 15%, inclusive quem fatura
+    R$ 30 mil há um ano.
+
+    Comparar VOLUME e não nível funciona porque o nível é função degrau do
+    faturamento, e degrau é monotônico: o maior volume sempre cai no maior
+    nível. Uma linha de SQL em vez de duas consultas e uma comparação em Python.
+
+    ── O QUE ISSO CUSTA ─────────────────────────────────────────────────────
+    Só o que ele pagava a mais nas faixas de baixo, e isso é um teto fixo por
+    nível: R$ 25 (Prata), R$ 125 (Ouro), R$ 275 (Diamante) por parceiro/mês.
+    NÃO cresce com o faturamento — um Diamante de R$ 40 mil custa os mesmos
+    R$ 275 de um de R$ 7.500.
+
+    ⚠️ Efeito aceito de propósito: quem fez um mês excelente mantém a taxa boa
+    no mês seguinte mesmo vendendo pouco. O custo disso é limitado pelo que ele
+    de fato vende.
+
+    ⚠️ Com `id_expr="%s"` isto gera DOIS placeholders — passe o id duas vezes.
+    Com uma expressão correlacionada (`rp.id`) não há parâmetro nenhum.
+    """
+    return f"""
+        SELECT GREATEST(
+                 ({restaurant_month_volume_sql(id_expr, 'atual')}),
+                 ({restaurant_month_volume_sql(id_expr, 'anterior')})
+               )
     """
 
 
@@ -93,10 +141,20 @@ def next_level(levels, current):
     return None
 
 
+def restaurant_volume_efetivo(cur, profile_id):
+    """O faturamento que define o NÍVEL do parceiro (ver
+    restaurant_volume_efetivo_sql). Diferente do que ele fez ESTE mês."""
+    cur.execute(restaurant_volume_efetivo_sql(), (str(profile_id), str(profile_id)))
+    row = cur.fetchone()
+    return float(row[0] or 0) if row else 0.0
+
+
 def monthly_activity(cur, audience, profile_id):
     col = _ACTIVITY_COL[audience]
     if audience == "restaurant":
-        # Parceiro conta REAIS (ver cabeçalho do módulo).
+        # Parceiro conta REAIS (ver cabeçalho do módulo). Aqui é o MÊS CORRENTE
+        # de propósito: é o que a barra de progresso mostra ("quanto já fiz").
+        # O nível vem do volume EFETIVO, que é outra coisa — ver get_status.
         cur.execute(restaurant_month_volume_sql() + " ", (profile_id,))
         row = cur.fetchone()
         return float(row[0] or 0) if row else 0.0
@@ -128,10 +186,27 @@ def get_status(audience, profile_id):
         with conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             levels = fetch_levels(cur, audience)
             activity = monthly_activity(cur, audience, profile_id)
-            current = level_for_activity(levels, activity)
+
+            # PARCEIRO: o nível sai do volume EFETIVO (maior entre este mês e o
+            # anterior), que é o mesmo número que a cobrança usa. A `activity`
+            # continua sendo o mês corrente porque é ela que a barra mostra.
+            # Se o nível saísse da `activity`, a tela diria "Bronze" no dia 1º
+            # enquanto o checkout cobrava a taxa de Ouro — a divergência que o
+            # cabeçalho deste módulo existe pra evitar.
+            if audience == "restaurant":
+                efetiva = restaurant_volume_efetivo(cur, profile_id)
+            else:
+                efetiva = activity
+
+            current = level_for_activity(levels, efetiva)
             return {
                 "levels": levels,
                 "activity": activity,
+                "activity_efetiva": efetiva,
+                # True = o nível veio do mês passado, não do que ele fez agora.
+                # A tela usa isto pra escrever "garantido pelo mês passado" em
+                # vez de deixar o parceiro achar que o número está errado.
+                "garantido_pelo_mes_anterior": bool(efetiva > activity),
                 "current": current,
                 "next": next_level(levels, current),
             }
@@ -199,7 +274,10 @@ def restaurant_commission_discount_pp(restaurant_id):
         return 0.0
     try:
         with conn.cursor() as cur:
-            cur.execute(restaurant_month_volume_sql(), (str(restaurant_id),))
+            # Volume EFETIVO: o maior entre este mês e o anterior (ver
+            # restaurant_volume_efetivo_sql). Dois placeholders, dois ids.
+            cur.execute(restaurant_volume_efetivo_sql(),
+                        (str(restaurant_id), str(restaurant_id)))
             row = cur.fetchone()
             volume = float(row[0] or 0) if row else 0.0
 
