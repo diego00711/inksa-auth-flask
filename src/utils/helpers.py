@@ -163,13 +163,15 @@ def _get_pool(url):
         if _DB_POOL is not None:  # outro greenlet criou enquanto esperávamos
             return _DB_POOL
         from psycopg2 import pool as _pgpool
-        # 12 -> 20 em 11/09/2026. Não é chute: medindo, um disparo de 25
-        # chamadas simultâneas derrubava exatamente 13 pra conexão direta
-        # (25 - 12), e 40 derrubava 28. O worker é único (gevent) e divide
-        # essas vagas com o agendador, que também consulta o banco. As vagas
-        # nascem sob demanda (minconn=1), então o teto mais alto não custa
-        # nada enquanto não for usado.
-        maxc = int(os.environ.get("DB_POOL_MAXCONN", "20"))
+        # ⚠️ CONTINUA 12 DE PROPÓSITO. Cheguei a subir pra 20 — medindo, um
+        # disparo de 25 chamadas simultâneas derrubava exatamente 13 pra
+        # conexão direta (25 - 12) e 40 derrubava 28, então mais vagas
+        # "resolviam" o contador. Mas o caminho do pool SERIALIZA (ver o
+        # comentário de _POOL_ESPERA_S): mais vagas = mais requisições presas
+        # no caminho lento, e a conexão direta, que paraleliza, é justamente
+        # a escapatória. Subir o teto antes de entender a serialização é
+        # otimizar o instrumento errado.
+        maxc = int(os.environ.get("DB_POOL_MAXCONN", "12"))
         # Tenta com statement_timeout; se o servidor rejeitar 'options' no
         # startup, recria sem (mesma lógica do connect_hardened).
         for opts in ('-c statement_timeout=30000', None):
@@ -245,8 +247,34 @@ class _PooledConn:
 
 
 # Quanto esperar por uma vaga antes de desistir e abrir conexão direta.
-# 0 desliga a espera (volta ao comportamento anterior).
-_POOL_ESPERA_S = float(os.environ.get("DB_POOL_WAIT_SECONDS", "1.5"))
+#
+# ⚠️ PADRÃO 0 (DESLIGADO) DE PROPÓSITO — leia antes de ligar.
+#
+# A espera parece obviamente boa: vaga volta em milissegundos, reconectar custa
+# ~0,5-0,8s. Liguei com 1,5s, medi, e o contador de quedas caiu bonito (25
+# chamadas simultâneas: 13 quedas -> 4). Só que contador não é o objetivo,
+# LATÊNCIA é — e aí apareceu o problema de verdade (11/09/2026):
+#
+#   rota                    usa              sozinha   12 juntas   fator
+#   /healthz                nada              0,48s      0,27s      ok
+#   /api/health             HTTP do Supabase  1,44s      0,93s      ok
+#   /api/gamification/...   conexão DIRETA    1,93s      1,89s      ok
+#   /api/club/levels        O POOL            2,31s     11,94s     5,2x
+#   /api/banners            O POOL            2,66s     12,12s     4,5x
+#
+# Quem usa o pool SERIALIZA; quem abre conexão direta não. E três rajadas
+# seguidas deram o mesmo tempo — o pool não "esquenta", então não é só o custo
+# de crescer. A causa ainda NÃO está identificada.
+#
+# Enquanto for assim, esperar por uma vaga do pool segura a requisição no
+# caminho LENTO em vez de deixá-la escapar pra conexão direta, que é o caminho
+# que paraleliza. Ou seja: ligar isto provavelmente PIORA a latência em pico,
+# mesmo melhorando o contador. Não tenho medição de latência de antes da
+# mudança pra provar o contrário, e chutar em produção não vale.
+#
+# O mecanismo fica pronto e testado. Liga com DB_POOL_WAIT_SECONDS=1.5 DEPOIS
+# que a serialização estiver entendida e resolvida.
+_POOL_ESPERA_S = float(os.environ.get("DB_POOL_WAIT_SECONDS", "0"))
 
 
 def _pega_do_pool(pool):
