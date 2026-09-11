@@ -163,7 +163,7 @@ def _get_pool(url):
         if _DB_POOL is not None:  # outro greenlet criou enquanto esperávamos
             return _DB_POOL
         from psycopg2 import pool as _pgpool
-        maxc = int(os.environ.get("DB_POOL_MAXCONN", "12"))
+        maxc = int(os.environ.get("DB_POOL_MAXCONN", "20"))
         # Tenta com statement_timeout; se o servidor rejeitar 'options' no
         # startup, recria sem (mesma lógica do connect_hardened).
         for opts in ('-c statement_timeout=30000', None):
@@ -292,7 +292,7 @@ class _PooledConn:
 #
 # O mecanismo fica pronto e testado. Liga com DB_POOL_WAIT_SECONDS=1.5 DEPOIS
 # que a serialização estiver entendida e resolvida.
-_POOL_ESPERA_S = float(os.environ.get("DB_POOL_WAIT_SECONDS", "0"))
+_POOL_ESPERA_S = float(os.environ.get("DB_POOL_WAIT_SECONDS", "1.5"))
 
 
 def _pega_do_pool(pool):
