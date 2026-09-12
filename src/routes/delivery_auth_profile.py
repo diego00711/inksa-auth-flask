@@ -215,6 +215,55 @@ def delivery_heartbeat():
         conn.close()
 
 
+@delivery_auth_profile_bp.route('/heartbeat-token', methods=['POST', 'OPTIONS'])
+@delivery_token_required
+def delivery_heartbeat_token():
+    """Entrega ao app a credencial que o serviço nativo do Android vai usar.
+
+    ⚠️ METADE DE UM RECURSO, DE PROPÓSITO (12/09/2026).
+
+    A versão completa disto derrubou a produção: o worker do gunicorn TRAVOU
+    (WORKER TIMEOUT, sem exceção) 42 segundos depois de subir, e a API ficou 20
+    minutos fora. Revertido às pressas.
+
+    Reli o diff inteiro e não achei mecanismo — nada aqui dá laço, rede ou
+    trava. Então o recurso está voltando PARTIDO EM DOIS, pra separar o que não
+    consegui separar lendo:
+
+      1. (agora) o módulo + esta rota, que NINGUÉM chama ainda
+      2. (depois) a troca do decorador do /heartbeat, que é o único ponto que
+         mexe numa rota com tráfego real
+
+    Se travar agora, é o módulo. Se aguentar, é a troca do decorador — e em
+    nenhum dos casos o entregador em turno sente: o /heartbeat dele continua no
+    decorador de sempre.
+
+    NÃO juntar as duas metades num commit só sem antes saber qual foi.
+
+    O resto do porquê está em `utils/heartbeat_token.py`.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    # Migalhas: se travar de novo, o log diz exatamente onde parou.
+    logger.info("[HBTOKEN] entrou na rota")
+    from ..utils.heartbeat_token import emitir
+    logger.info("[HBTOKEN] modulo importado")
+    token, expira = emitir(g.user_auth_id)
+    logger.info("[HBTOKEN] emitiu=%s", bool(token))
+    if not token:
+        logger.warning(
+            "heartbeat-token pedido mas nao ha segredo de assinatura "
+            "(HEARTBEAT_TOKEN_SECRET / SUPABASE_JWT_SECRET / JWT_SECRET)"
+        )
+        return jsonify({"error": "Recurso indisponível nesta instalação"}), 503
+
+    return jsonify({
+        "status": "success",
+        "data": {"token": token, "expires_at": expira.isoformat()},
+    }), 200
+
+
 # ==============================================
 # CLASSES E FUNÇÕES AUXILIARES
 # ==============================================
