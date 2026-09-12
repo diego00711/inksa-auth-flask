@@ -148,6 +148,22 @@ _DEFAULTS: dict[str, Decimal] = {
     # Logoff automático por inatividade (minutos) nos apps Parceiro e Entregador.
     # 0/vazio = desliga o recurso. Editável no admin.
     "idle_logout_minutes":          Decimal("60"),
+    # Minutos SEM SINAL DE VIDA até o entregador ser marcado offline.
+    #
+    # ⚠️ NÃO confundir com idle_logout_minutes. Aquele DESLOGA a sessão; este só
+    # tira da fila de corridas. São mecanismos separados, e mexer num não afeta
+    # o outro — em 12/09/2026 o Diego subiu o logoff pra 500 min e continuou
+    # sendo marcado offline, porque quem desligava era ESTE.
+    #
+    # O app manda sinal de 2 em 2 minutos, mas só enquanto está acordado: com o
+    # celular bloqueado o Android congela os temporizadores do JS e o sinal
+    # para. Meia hora de celular no bolso entre corridas já bastava.
+    #
+    # O número é um equilíbrio: curto demais tira da rua quem ESTÁ trabalhando;
+    # longo demais deixa "fantasma" online (já houve entregador marcado online
+    # por 25 horas, que foi o motivo de o desligamento existir).
+    # 0 = nunca desliga por inatividade.
+    "courier_offline_minutes":      Decimal("60"),
     # Lembrete automático de carrinho abandonado. Minutos parado antes de
     # avisar; 0 DESLIGA a automação (o botão manual do admin continua valendo).
     # 20 e não 5: aos 5 minutos a pessoa costuma estar AINDA no checkout —
@@ -212,7 +228,7 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
               # ⚠️ pickup_commission_factor PRECISA estar aqui, não só em
               # _DEFAULTS — é exatamente a armadilha descrita acima.
               "pickup_commission_factor",
-              "idle_logout_minutes", "cart_reminder_minutes",
+              "idle_logout_minutes", "courier_offline_minutes", "cart_reminder_minutes",
               "referral_enabled", "referral_reward_brl", "referral_min_order_brl",
               "referral_validity_days", "referral_monthly_cap",
               "referral_welcome_min_brl"):

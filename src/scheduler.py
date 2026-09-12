@@ -289,14 +289,30 @@ def _offline_stale_couriers_job() -> None:
     contava gente que não estava trabalhando, e o motor de despacho gastava
     oferta de pedido com quem não ia responder.
 
-    TOLERÂNCIA FOLGADA (30 min) de propósito: desligar cedo demais tira da rua
-    quem ESTÁ trabalhando e só ficou sem rede um instante. O custo de deixar um
-    fantasma 30 min a mais é bem menor que o de derrubar um entregador real.
+    TOLERÂNCIA FOLGADA de propósito: desligar cedo demais tira da rua quem ESTÁ
+    trabalhando e só ficou sem rede um instante. O custo de deixar um fantasma
+    mais um tempo é bem menor que o de derrubar um entregador real.
+
+    A tolerância é `courier_offline_minutes` no admin (padrão 60, 0 = nunca
+    desliga). ATENÇÃO ao ler o número: como este job roda de 10 em 10 minutos,
+    a espera real vai de N a N+10 min — configurar 30 desliga entre 30 e 40.
 
     Entregador com entrega em curso NUNCA é desligado, mesmo sem heartbeat —
     ele está com o pedido na mão; sumir com ele do sistema seria pior.
     """
     from .utils.helpers import get_db_connection
+    from .utils.platform_settings import get_settings
+
+    try:
+        minutos = int(float(get_settings().get("courier_offline_minutes") or 0))
+    except (TypeError, ValueError):
+        minutos = 60
+    if minutos <= 0:
+        return  # desligado no admin: ninguém cai por inatividade
+    # Piso de segurança: o app dá sinal de 2 em 2 minutos. Tolerância menor que
+    # isso derrubaria entregador ativo no intervalo entre dois sinais.
+    minutos = max(minutos, 5)
+
     conn = None
     try:
         conn = get_db_connection()
@@ -309,17 +325,21 @@ def _offline_stale_couriers_job() -> None:
                       SET is_available = false
                     WHERE dp.is_available IS TRUE
                       AND (dp.last_heartbeat IS NULL
-                           OR dp.last_heartbeat < NOW() - INTERVAL '30 minutes')
+                           OR dp.last_heartbeat < NOW() - make_interval(mins => %s))
                       AND NOT EXISTS (
                             SELECT 1 FROM orders o
                              WHERE o.delivery_id = dp.id
                                AND o.status IN ('accepted_by_delivery', 'delivering')
-                          )"""
+                          )""",
+                (minutos,),
             )
             desligados = cur.rowcount
             conn.commit()
         if desligados:
-            logger.info("[COURIER] %d entregador(es) desligados por inatividade", desligados)
+            logger.info(
+                "[COURIER] %d entregador(es) desligados por inatividade (>%d min)",
+                desligados, minutos,
+            )
     except Exception:
         logger.exception("[COURIER] Erro no job de desligamento por inatividade")
         if conn:
