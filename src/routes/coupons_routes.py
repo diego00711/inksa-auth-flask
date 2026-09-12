@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify
 import psycopg2
 import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
-from ..utils.coupons import evaluate_coupon, contar_usos_do_cliente
+from ..utils.coupons import evaluate_coupon, contar_usos_do_cliente, reserva_do_cliente
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +248,7 @@ def validate_coupon():
             # real continua sendo a do fechamento.
             usos = 0
             cliente_id = None
+            reserva = None   # oferta relâmpago: quando a reserva DESTE cliente expira
             if coupon is not None:
                 try:
                     uid, utype, err = get_user_id_from_token(request.headers.get('Authorization'))
@@ -257,13 +258,14 @@ def validate_coupon():
                         if perfil:
                             cliente_id = perfil['id']
                             usos = contar_usos_do_cliente(coupon['id'], perfil['id'], cur)
+                            reserva = reserva_do_cliente(coupon['id'], perfil['id'], cur)
                 except Exception:
                     usos = 0
 
         # Validação/cálculo centralizado (mesma lógica do fechamento do pedido)
         result = evaluate_coupon(dict(coupon) if coupon else None, order_total, delivery_fee,
                                  restaurant_id=restaurant_id, usos_deste_cliente=usos,
-                                 client_id=cliente_id)
+                                 client_id=cliente_id, reserva_expira_em=reserva)
         if not result["valid"]:
             return jsonify({"valid": False, "message": result["message"]}), 200
 
@@ -350,9 +352,13 @@ def cupons_disponiveis():
             saida = []
             for c in candidatos:
                 usos = contar_usos_do_cliente(c['id'], client_id, cur)
+                # Relâmpago sem reserva viva cai como inválido logo abaixo e some
+                # da lista — é o comportamento certo: oferta que ele não ativou
+                # não deve aparecer como disponível no carrinho.
                 r = evaluate_coupon(c, subtotal, delivery_fee,
                                     restaurant_id=restaurant_id,
-                                    usos_deste_cliente=usos, client_id=client_id)
+                                    usos_deste_cliente=usos, client_id=client_id,
+                                    reserva_expira_em=reserva_do_cliente(c['id'], client_id, cur))
                 if not r["valid"] or r["discount_amount"] <= 0:
                     continue
                 saida.append({
@@ -840,3 +846,358 @@ def admin_delete_coupon(coupon_id):
         return jsonify({"error": "Erro interno do servidor"}), 500
     finally:
         conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# OFERTA RELÂMPAGO
+# ═══════════════════════════════════════════════════════════════════════════
+
+@coupons_bp.route('/relampago/<uuid:banner_id>/reservar', methods=['POST', 'OPTIONS'])
+def reservar_relampago(banner_id):
+    """O cliente tocou no banner: reserva a oferta pra ele e devolve o código.
+
+    A reserva é o que faz o relógio existir. São DOIS tempos, e o cupom só vale
+    dentro dos dois:
+      1. a JANELA da campanha — `banners.starts_at/ends_at`, igual pra todos
+      2. a RESERVA deste cliente — `reserva_minutos` contados deste toque
+
+    ⚠️ UMA POR CLIENTE, SEM RENOVAR. Se ele deixar os minutos passarem, acabou —
+    tocar de novo devolve a reserva vencida, não uma nova. Sem isso o relógio
+    seria enfeite: bastava tocar outra vez pra ganhar mais tempo, e "relâmpago"
+    viraria "promoção comum com contador". Quem garante isso é a UNIQUE
+    (coupon_id, client_id) no banco, não este código.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    uid, utype, err = get_user_id_from_token(request.headers.get('Authorization'))
+    if err:
+        return err
+    if utype != 'client':
+        return jsonify({"error": "Apenas clientes reservam ofertas"}), 403
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "DB indisponível"}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id FROM client_profiles WHERE user_id = %s", (uid,))
+            perfil = cur.fetchone()
+            if not perfil:
+                return jsonify({"error": "Perfil de cliente não encontrado"}), 404
+            client_id = perfil['id']
+
+            # Banner + cupom numa consulta só. A janela da campanha é conferida
+            # AQUI: banner fora do ar não reserva nada, mesmo que alguém chame a
+            # rota direto.
+            cur.execute("""
+                SELECT b.id AS banner_id, b.restaurant_id,
+                       (b.is_active IS TRUE
+                        AND (b.starts_at IS NULL OR b.starts_at <= NOW())
+                        AND (b.ends_at   IS NULL OR b.ends_at   >= NOW())) AS no_ar,
+                       c.id AS coupon_id, c.code, c.reserva_minutos,
+                       c.is_active AS cupom_ativo, c.max_uses, c.uses_count,
+                       r.slug
+                  FROM banners b
+                  LEFT JOIN coupons c            ON c.id = b.coupon_id
+                  LEFT JOIN restaurant_profiles r ON r.id = b.restaurant_id
+                 WHERE b.id = %s
+            """, (str(banner_id),))
+            b = cur.fetchone()
+
+            if not b:
+                return jsonify({"error": "Oferta não encontrada"}), 404
+            if not b['coupon_id']:
+                return jsonify({"error": "Este banner não tem oferta"}), 409
+            if not b['no_ar']:
+                return jsonify({"error": "Esta oferta já saiu do ar"}), 409
+            if not b['cupom_ativo']:
+                return jsonify({"error": "Esta oferta não está mais ativa"}), 409
+
+            minutos = int(b['reserva_minutos'] or 0)
+            if minutos <= 0:
+                # Banner com cupom comum: nada a reservar, só entrega o código.
+                return jsonify({"status": "success", "data": {
+                    "codigo": b['code'], "slug": b['slug'],
+                    "restaurant_id": str(b['restaurant_id']) if b['restaurant_id'] else None,
+                    "expira_em": None,
+                }}), 200
+
+            # Esgotou antes de ele chegar. Vale conferir ANTES de criar reserva:
+            # reservar o que não existe mais só adiaria a recusa pro fechamento.
+            if b['max_uses'] is not None and int(b['uses_count'] or 0) >= int(b['max_uses']):
+                return jsonify({"error": "Esta oferta acabou"}), 409
+
+            # ON CONFLICT DO NOTHING + leitura: quem já tinha reserva recebe a
+            # DELE, viva ou vencida. Nunca renova — ver o aviso lá em cima.
+            cur.execute("""
+                INSERT INTO coupon_reservations (coupon_id, client_id, banner_id, expires_at)
+                VALUES (%s, %s, %s, NOW() + make_interval(mins => %s))
+                ON CONFLICT (coupon_id, client_id) DO NOTHING
+            """, (b['coupon_id'], client_id, b['banner_id'], minutos))
+            criou_agora = cur.rowcount > 0
+
+            cur.execute("""SELECT expires_at, expires_at > NOW() AS viva
+                             FROM coupon_reservations
+                            WHERE coupon_id = %s AND client_id = %s""",
+                        (b['coupon_id'], client_id))
+            reserva = cur.fetchone()
+
+            # Contabiliza o toque no mesmo lugar que já conta clique de banner.
+            cur.execute("UPDATE banners SET click_count = COALESCE(click_count,0) + 1 "
+                        "WHERE id = %s", (b['banner_id'],))
+            conn.commit()
+
+        if not reserva['viva']:
+            return jsonify({"error": "Sua oferta relâmpago expirou",
+                            "expirou": True}), 409
+
+        return jsonify({"status": "success", "data": {
+            "codigo": b['code'],
+            "slug": b['slug'],
+            "restaurant_id": str(b['restaurant_id']) if b['restaurant_id'] else None,
+            "expira_em": reserva['expires_at'].isoformat(),
+            "primeira_vez": criou_agora,
+        }}), 200
+
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao reservar oferta relâmpago do banner %s", banner_id)
+        return jsonify({"error": "Erro interno"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# Quanto tempo sem dar sinal de vida conta como "app fechado".
+# O app do cliente carimba last_seen a cada batida (client.py:60). 15 min é
+# folgado de propósito: quem fechou o app há 5 minutos ainda está por perto e
+# receber push do que ele acabou de ver na tela é irritante.
+_MINUTOS_PRA_CONSIDERAR_FECHADO = 15
+
+
+def _publico_do_relampago(cur, banner, publico, so_app_fechado, campanha):
+    """Monta a lista de (client_id, fcm_token) que vai receber o push.
+
+    `publico` diz QUEM entra:
+      'ja_pediram' — quem já pediu NESTA loja. Lista morna, melhor conversão,
+                     mas não traz gente nova.
+      'no_raio'    — quem está dentro do raio de entrega da loja. ⚠️ depende de
+                     `client_profiles.latitude/longitude`, que só começou a ser
+                     preenchido em 12/09/2026 — cliente antigo não tem, e por
+                     isso NÃO entra. Hoje isso é quase ninguém.
+      'todos'      — todo cliente com notificação ligada. É o que serve pra
+                     TRAZER USUÁRIO, que é o propósito da oferta relâmpago.
+
+    As travas que sobrevivem em qualquer público:
+      - token de notificação existe
+      - não recebeu ESTA rodada ainda (push_campaign_log, índice único)
+      - app fechado, se pedido
+    """
+    condicoes = ["NULLIF(TRIM(cp.fcm_token), '') IS NOT NULL",
+                 "NOT EXISTS (SELECT 1 FROM push_campaign_log l "
+                 "             WHERE l.client_id = cp.id AND l.campanha = %s)"]
+    args = [campanha]
+
+    if so_app_fechado:
+        # last_seen NULL = nunca abriu depois do recurso existir: conta como
+        # fechado. Fail-open aqui só custa um push a mais pra quem está no app.
+        condicoes.append("(cp.last_seen IS NULL OR cp.last_seen < NOW() - make_interval(mins => %s))")
+        args.append(_MINUTOS_PRA_CONSIDERAR_FECHADO)
+
+    if publico == 'ja_pediram':
+        condicoes.append(
+            "EXISTS (SELECT 1 FROM orders o WHERE o.client_id = cp.id "
+            "         AND o.restaurant_id = %s "
+            "         AND o.status NOT IN ('cancelled','canceled','awaiting_payment'))")
+        args.append(str(banner['restaurant_id']))
+
+    elif publico == 'no_raio':
+        condicoes.append("cp.latitude IS NOT NULL AND cp.longitude IS NOT NULL")
+        # earth_distance/ll_to_earth, NÃO PostGIS: este banco tem `cube` e
+        # `earthdistance`, e PostGIS não está instalado. É a mesma função que o
+        # filtro de raio do banner já usa (banners.py:116).
+        condicoes.append(
+            "earth_distance(ll_to_earth(cp.latitude, cp.longitude), "
+            "               ll_to_earth(%s, %s)) <= %s * 1000.0")
+        args += [banner['loja_lat'], banner['loja_lng'], banner['raio_km']]
+
+    cur.execute("SELECT cp.id, cp.fcm_token FROM client_profiles cp WHERE "
+                + " AND ".join(condicoes), tuple(args))
+    return [(r['id'], r['fcm_token']) for r in cur.fetchall()]
+
+
+@coupons_bp.route('/relampago/<uuid:banner_id>/disparar', methods=['POST', 'OPTIONS'])
+def disparar_relampago(banner_id):
+    """Manda o push da oferta relâmpago. Só admin.
+
+    Body: {
+      "publico": "todos" | "ja_pediram" | "no_raio",
+      "rodada":  "inicio" | "ultima_chamada",
+      "so_app_fechado": true
+    }
+
+    DUAS RODADAS, DUAS CHAVES DE CAMPANHA. A chave é
+    `relampago:<banner>:<rodada>`, e o índice único de `push_campaign_log` é por
+    chave — então a "última chamada" alcança inclusive quem já recebeu o
+    primeiro aviso. Se as duas dividissem a mesma chave, a última chamada não
+    sairia pra ninguém, que é justamente o oposto do pedido.
+
+    ⚠️ O TETO DIÁRIO VALE NA PRIMEIRA RODADA E NÃO VALE NA ÚLTIMA CHAMADA.
+    Isso é escolha, não descuido: o teto existe pra impedir bombardeio de
+    campanhas DIFERENTES no mesmo dia, e a última chamada é o fim da MESMA
+    campanha que a pessoa já recebeu. O limite real continua sendo dois pushes
+    por oferta e por pessoa, garantido pelas duas chaves.
+
+    "App fechado" = sem bater o heartbeat há 15 min. Quem está com o app aberto
+    já vê o banner na tela; mandar push do que ele está olhando é o tipo de
+    coisa que faz desinstalar.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    uid, utype, err = get_user_id_from_token(request.headers.get('Authorization'))
+    if err:
+        return err
+    if utype != 'admin':
+        return jsonify({"error": "Apenas admin dispara campanha"}), 403
+
+    corpo = request.get_json(silent=True) or {}
+    publico = (corpo.get('publico') or 'todos').strip().lower()
+    if publico not in ('todos', 'ja_pediram', 'no_raio'):
+        return jsonify({"error": "publico inválido"}), 400
+    rodada = (corpo.get('rodada') or 'inicio').strip().lower()
+    if rodada not in ('inicio', 'ultima_chamada'):
+        return jsonify({"error": "rodada inválida"}), 400
+    so_app_fechado = corpo.get('so_app_fechado', True) is not False
+
+    from ..services.notification_service import send_campaign
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "DB indisponível"}), 503
+    invalidos = set()
+    res = {}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT b.id, b.title, b.restaurant_id,
+                       (b.is_active IS TRUE
+                        AND (b.starts_at IS NULL OR b.starts_at <= NOW())
+                        AND (b.ends_at   IS NULL OR b.ends_at   >= NOW())) AS no_ar,
+                       b.ends_at,
+                       c.id AS coupon_id, c.code, c.discount_type, c.discount_value,
+                       c.max_uses, c.uses_count,
+                       r.restaurant_name, r.latitude AS loja_lat, r.longitude AS loja_lng,
+                       COALESCE(r.own_delivery_radius_km, 10) AS raio_km
+                  FROM banners b
+                  LEFT JOIN coupons c             ON c.id = b.coupon_id
+                  LEFT JOIN restaurant_profiles r ON r.id = b.restaurant_id
+                 WHERE b.id = %s
+            """, (str(banner_id),))
+            b = cur.fetchone()
+
+            if not b:
+                return jsonify({"error": "Banner não encontrado"}), 404
+            if not b['coupon_id']:
+                return jsonify({"error": "Este banner não tem cupom — nada a anunciar"}), 409
+            if not b['no_ar']:
+                return jsonify({"error": "Banner fora do ar. Ative a campanha antes de disparar."}), 409
+            if publico == 'no_raio' and (b['loja_lat'] is None or b['loja_lng'] is None):
+                return jsonify({"error": "A loja não tem coordenada — não dá pra calcular raio"}), 409
+
+            campanha = "relampago:%s:%s" % (banner_id, rodada)
+            destinos = _publico_do_relampago(cur, b, publico, so_app_fechado, campanha)
+
+            # Teto diário: só na primeira rodada (ver o aviso no topo).
+            if rodada == 'inicio' and destinos:
+                try:
+                    cur.execute("SELECT value FROM platform_settings "
+                                "WHERE key = 'push_campaign_daily_cap'")
+                    r = cur.fetchone()
+                    teto = int(str(r['value']).strip()) if r else 1
+                except Exception:
+                    teto = 1
+                if teto <= 0:
+                    return jsonify({"error": "Campanhas por push estão desligadas "
+                                             "(push_campaign_daily_cap = 0)"}), 409
+                ids = [str(c) for c, _ in destinos]
+                cur.execute("""
+                    SELECT client_id FROM push_campaign_log
+                     WHERE client_id = ANY(%s::uuid[])
+                       AND (sent_at AT TIME ZONE 'America/Sao_Paulo')::date
+                           = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+                     GROUP BY client_id HAVING COUNT(*) >= %s
+                """, (ids, teto))
+                estourados = set(str(r['client_id']) for r in cur.fetchall())
+                destinos = [(c, t) for c, t in destinos if str(c) not in estourados]
+
+            if not destinos:
+                return jsonify({"status": "success", "data": {
+                    "enviados": 0, "elegiveis": 0,
+                    "aviso": "Ninguém elegível: ou já receberam esta rodada, "
+                             "ou estão com o app aberto, ou não têm notificação ligada."
+                }}), 200
+
+            loja = b['restaurant_name'] or 'uma loja perto de você'
+            restam = None
+            if b['max_uses'] is not None:
+                restam = max(0, int(b['max_uses']) - int(b['uses_count'] or 0))
+
+            if rodada == 'ultima_chamada':
+                titulo = "Última chance na %s" % loja
+                cauda = ("Restam %d." % restam) if restam else "Está acabando."
+                corpo_push = "%s — %s Toque e garanta." % (
+                    b['title'] or 'Oferta relâmpago', cauda)
+            else:
+                titulo = "Oferta relâmpago na %s" % loja
+                corpo_push = "%s. Toque pra ativar a sua." % (
+                    b['title'] or 'Desconto por tempo limitado')
+
+            res = send_campaign(destinos, titulo, corpo_push, {
+                'type': 'relampago', 'banner_id': str(banner_id),
+                'coupon_code': b['code'], 'url': '/',
+            })
+
+            invalidos = set(res.get('invalidos') or [])
+            enviados = [cid for cid, _ in destinos if cid not in invalidos]
+            if enviados:
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO push_campaign_log (client_id, campanha, tipo) VALUES %s "
+                    "ON CONFLICT (client_id, campanha) DO NOTHING",
+                    [(cid, campanha, 'relampago') for cid in enviados])
+            if invalidos:
+                # Token recusado pelo FCM = app desinstalado. Limpa, senão a
+                # base de tokens só engorda com lixo e o contador de "clientes
+                # com push" mente.
+                cur.execute("UPDATE client_profiles SET fcm_token = NULL "
+                            "WHERE id = ANY(%s::uuid[])", ([str(c) for c in invalidos],))
+            conn.commit()
+            total_elegiveis = len(destinos)
+
+        return jsonify({"status": "success", "data": {
+            "enviados": res.get('enviados', 0),
+            "elegiveis": total_elegiveis,
+            "falhas": res.get('falhas', 0),
+            "tokens_limpos": len(invalidos),
+            "publico": publico, "rodada": rodada,
+        }}), 200
+
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao disparar oferta relâmpago do banner %s", banner_id)
+        return jsonify({"error": "Erro interno"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

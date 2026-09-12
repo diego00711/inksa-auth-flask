@@ -98,8 +98,63 @@ def contar_usos_do_cliente(coupon_id, client_id, cur=None):
                 pass
 
 
+def reserva_do_cliente(coupon_id, client_id, cur=None):
+    """Quando expira a reserva deste cliente neste cupom relâmpago?
+
+    Devolve o `expires_at` (datetime) se existir reserva, ou None se não existir
+    — e None TAMBÉM quando a consulta falha.
+
+    ⚠️ Aqui o None é FAIL-CLOSED de propósito, ao contrário do
+    `contar_usos_do_cliente` logo acima. O raciocínio é outro: um cupom
+    relâmpago SEM reserva não é um cupom legítimo sendo recusado por azar — ele
+    simplesmente não foi ativado. E o cliente tocou no banner segundos atrás, do
+    lado do app: repetir o toque é barato. Errar pro outro lado seria distribuir
+    desconto de campanha pra quem nunca entrou nela.
+    """
+    if not coupon_id or not client_id:
+        return None
+
+    sql = ("SELECT expires_at FROM public.coupon_reservations "
+           "WHERE coupon_id = %s AND client_id = %s")
+    args = (str(coupon_id), str(client_id))
+
+    def _le(c):
+        c.execute(sql, args)
+        row = c.fetchone()
+        if not row:
+            return None
+        return row[0] if not isinstance(row, dict) else row.get('expires_at')
+
+    if cur is not None:
+        try:
+            return _le(cur)
+        except Exception as exc:
+            logger.warning("Falha ao ler reserva do cupom %s p/ cliente %s: %s",
+                           coupon_id, client_id, exc)
+            return None
+
+    from .helpers import get_db_connection
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        with conn.cursor() as c:
+            return _le(c)
+    except Exception as exc:
+        logger.warning("Falha ao ler reserva do cupom %s p/ cliente %s: %s",
+                       coupon_id, client_id, exc)
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=None,
-                    usos_deste_cliente=0, client_id=None):
+                    usos_deste_cliente=0, client_id=None, reserva_expira_em=None):
     """Valida um cupom já buscado (dict da linha) e calcula o desconto.
 
     `coupon` pode vir do psycopg2 (DictCursor) ou do supabase (select '*') —
@@ -170,6 +225,27 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=
                    else f"Você já usou este cupom {limite} vezes")
             return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
                     "message": msg}
+
+    # OFERTA RELÂMPAGO: além da janela da campanha, o cliente tem o relógio DELE,
+    # que começou quando ele tocou no banner. Só vale dentro dos dois.
+    #
+    # `reserva_minutos` preenchido é o que marca o cupom como relâmpago. Cupom
+    # comum não tem, e nem passa por aqui — nada do que já existe muda.
+    #
+    # A mensagem separa os três casos de propósito. O Diego escolheu NÃO mostrar
+    # contador na tela; então a recusa é o único momento em que o cliente
+    # descobre o que houve, e "cupom inválido" seco aqui viraria reclamação.
+    if coupon.get('reserva_minutos'):
+        if not client_id:
+            return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                    "message": "Entre na sua conta para usar esta oferta relâmpago"}
+        if reserva_expira_em is None:
+            return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                    "message": "Toque na oferta relâmpago no app para ativá-la"}
+        expira = _parse_dt(reserva_expira_em)
+        if expira and expira < now:
+            return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                    "message": "Sua oferta relâmpago expirou"}
 
     min_val = _to_float(coupon.get('min_order_value'))
     if subtotal < min_val:

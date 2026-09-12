@@ -18,6 +18,63 @@ logger = logging.getLogger(__name__)
 banners_bp = Blueprint('banners', __name__)
 
 
+def _guardar_onde_o_cliente_esta(lat, lng):
+    """Carimba a última posição do cliente logado. Silencioso e best-effort.
+
+    POR QUE AQUI, E NÃO NUMA ROTA PRÓPRIA
+
+    Esta é a única chamada do app que já traz a coordenada do cliente, e ela
+    acontece toda vez que a home abre. Criar um endpoint só pra isso seria mais
+    uma requisição na abertura do app, no caminho que a gente passou semanas
+    encurtando.
+
+    A rota é PÚBLICA (a vitrine funciona sem login). Sem token, não há a quem
+    atribuir a posição — sai calado, que é o caso de todo visitante deslogado.
+
+    ⚠️ NUNCA levanta e NUNCA atrasa a resposta do banner de propósito: o cliente
+    veio ver a vitrine. Se o banco estiver ruim, ele perde uma atualização de
+    coordenada e não percebe; se isto quebrasse a rota, ele veria uma home vazia.
+    """
+    try:
+        if not (-90 <= float(lat) <= 90) or not (-180 <= float(lng) <= 180):
+            return  # coordenada fora do mundo: lixo, ignora
+    except (TypeError, ValueError):
+        return
+
+    auth = request.headers.get('Authorization')
+    if not auth:
+        return  # visitante deslogado: não há a quem atribuir
+
+    conn = None
+    try:
+        user_id, user_type, err = get_user_id_from_token(auth)
+        if err or user_type != 'client':
+            return
+        conn = get_db_connection()
+        if not conn:
+            return
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE client_profiles
+                   SET latitude = %s, longitude = %s, location_updated_at = NOW()
+                 WHERE user_id = %s
+            """, (float(lat), float(lng), str(user_id)))
+        conn.commit()
+    except Exception:
+        logging.debug("não deu pra guardar a posição do cliente", exc_info=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+
 def _coerce_int(value):
     """Converte para int; '' / None / inválido -> None (sem valor)."""
     if value in (None, ''):
@@ -108,7 +165,19 @@ def get_banners():
                     user_lat = user_lon = None
                     tem_local = False
 
+                # De quebra: guarda onde este cliente está.
+                #
+                # A coordenada já chegava aqui e era usada só pra filtrar banner,
+                # depois descartada. Guardando, ela passa a responder também
+                # "quem está no raio desta loja?", que é o alcance das campanhas
+                # de oferta relâmpago. Não pede nada a mais ao cliente — é o
+                # mesmo dado que ele já manda a cada abertura da home.
+                #
+                # Best-effort de propósito: falhar aqui não pode derrubar a
+                # vitrine. Banner é o que o cliente veio ver; a coordenada é
+                # bônus nosso.
                 if tem_local:
+                    _guardar_onde_o_cliente_esta(user_lat, user_lon)
                     geo_clause = """
                       AND (
                             geo_latitude IS NULL OR geo_longitude IS NULL

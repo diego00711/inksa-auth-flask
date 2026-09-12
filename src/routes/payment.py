@@ -20,7 +20,8 @@ from ..utils.platform_settings import calculate_courier_payout, calculate_platfo
 from ..utils.precos import preco_vigente
 from ..utils.helpers import get_user_id_from_token, supabase_admin
 from .orders import generate_verification_code
-from ..utils.coupons import evaluate_coupon, consume_coupon, contar_usos_do_cliente
+from ..utils.coupons import (evaluate_coupon, consume_coupon, contar_usos_do_cliente,
+                             reserva_do_cliente)
 from ..utils import asaas
 from ..utils.gateway import payment_provider
 from src.extensions import limiter
@@ -876,6 +877,11 @@ def criar_preferencia_mercado_pago():
                     usos_deste_cliente=contar_usos_do_cliente(
                         (coupon or {}).get('id'), client_profile_id),
                     client_id=client_profile_id,
+                    # Relâmpago: sem reserva viva, o cupom não vale. Só tem
+                    # efeito em cupom com `reserva_minutos`; nos demais é None e
+                    # o evaluate nem olha.
+                    reserva_expira_em=reserva_do_cliente(
+                        (coupon or {}).get('id'), client_profile_id),
                 )
                 if evalr['valid'] and evalr['discount_amount'] > 0:
                     backend_discount = evalr['discount_amount']
@@ -1394,6 +1400,10 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
             coupon, subtotal, delivery_fee, restaurant_id=restaurant_id,
             usos_deste_cliente=contar_usos_do_cliente((coupon or {}).get('id'), client_id),
             client_id=client_id,
+            # ⚠️ MESMA regra do outro caminho de pedido (linha ~874). Este
+            # arquivo grava pedido em DUAS funções, e regra que entra só numa
+            # vira buraco — já aconteceu neste projeto.
+            reserva_expira_em=reserva_do_cliente((coupon or {}).get('id'), client_id),
         )
         if evalr['valid'] and evalr['discount_amount'] > 0:
             desconto = evalr['discount_amount']
