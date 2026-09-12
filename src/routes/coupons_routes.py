@@ -142,6 +142,22 @@ def _anunciar_cupom(cupom, restaurant_id):
             pass
 
 
+def _so_digitado(data):
+    """Cupom que NAO aparece no app: so vale pra quem digitar o codigo.
+
+    Serve pra campanha de fora (radio, panfleto, parceria). Escondido, cada uso
+    e prova de que aquele canal trouxe o pedido — se aparecesse na vitrine,
+    qualquer cliente pegaria e a conta deixaria de medir coisa alguma.
+
+    NAO e o mesmo que is_active = false: ali o cupom nao vale pra ninguem.
+    Aqui ele vale normal, so nao e oferecido.
+    """
+    v = data.get('somente_digitado')
+    if isinstance(v, str):
+        return v.strip().lower() in ('1', 'true', 'yes', 'on', 'sim')
+    return bool(v)
+
+
 def _limite_por_cliente(data):
     """Lê max_uses_per_client do corpo, tolerando o que os apps mandam.
 
@@ -316,6 +332,11 @@ def cupons_disponiveis():
                        is_active, restaurant_id, paid_by, owner_client_id, description
                   FROM public.coupons
                  WHERE is_active
+                   -- Cupom de campanha externa não entra na lista do carrinho:
+                   -- ele só vale digitado. Aparecer aqui daria o desconto a
+                   -- quem nunca ouviu o anúncio, e o uso deixaria de medir o
+                   -- canal. O /validate continua aceitando normalmente.
+                   AND NOT somente_digitado
                    AND (valid_until IS NULL OR valid_until >= now())
                    AND (COALESCE(uses_count,0) < COALESCE(max_uses, 2147483647))
                    AND (owner_client_id = %s
@@ -384,7 +405,7 @@ def list_coupons():
             cur.execute("""
                 SELECT c.id, c.code, c.discount_type, c.discount_value, c.min_order_value,
                        c.max_uses, c.uses_count, c.valid_until, c.is_active, c.created_at,
-                       c.restaurant_id, c.paid_by, c.description,
+                       c.restaurant_id, c.paid_by, c.description, c.somente_digitado,
                        rp.restaurant_name
                 FROM public.coupons c
                 LEFT JOIN public.restaurant_profiles rp ON rp.id = c.restaurant_id
@@ -462,13 +483,13 @@ def create_coupon():
                 cur.execute("""
                     INSERT INTO public.coupons
                         (code, discount_type, discount_value, min_order_value, max_uses,
-                         max_uses_per_client, valid_until)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         max_uses_per_client, valid_until, somente_digitado)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, code, discount_type, discount_value, min_order_value,
                               max_uses, uses_count, max_uses_per_client, valid_until,
-                              is_active, created_at
+                              is_active, created_at, somente_digitado
                 """, (code, discount_type, discount_value, min_order_value, max_uses,
-                      _limite_por_cliente(data), valid_until))
+                      _limite_por_cliente(data), valid_until, _so_digitado(data)))
                 new_coupon = dict(cur.fetchone())
                 conn.commit()
             except psycopg2.errors.UniqueViolation:
@@ -505,7 +526,8 @@ def create_coupon():
 
 _COUPON_COLS = """id, code, discount_type, discount_value, min_order_value,
                   max_uses, uses_count, max_uses_per_client, valid_until,
-                  is_active, created_at, restaurant_id, paid_by, description"""
+                  is_active, created_at, restaurant_id, paid_by, description,
+                  somente_digitado"""
 
 
 def _own_restaurant_id(cur, user_id):
@@ -615,13 +637,14 @@ def create_my_coupon():
                 cur.execute(
                     f"""INSERT INTO public.coupons
                             (code, discount_type, discount_value, min_order_value, max_uses,
-                             max_uses_per_client, valid_until, description, restaurant_id, paid_by)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'restaurant')
+                             max_uses_per_client, valid_until, description, restaurant_id,
+                             somente_digitado, paid_by)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'restaurant')
                         RETURNING {_COUPON_COLS}""",
                     (code, dtype, dvalue, float(data.get('min_order_value') or 0),
                      data.get('max_uses') or None, _limite_por_cliente(data),
                      data.get('valid_until') or None,
-                     (data.get('description') or None), rid))
+                     (data.get('description') or None), rid, _so_digitado(data)))
                 novo = _serialize(cur.fetchone())
                 conn.commit()
             except psycopg2.errors.UniqueViolation:
@@ -655,6 +678,8 @@ def update_my_coupon(coupon_id):
     campos, valores = [], []
     if 'is_active' in data:
         campos.append("is_active = %s"); valores.append(bool(data['is_active']))
+    if 'somente_digitado' in data:
+        campos.append("somente_digitado = %s"); valores.append(_so_digitado(data))
     if 'min_order_value' in data:
         campos.append("min_order_value = %s"); valores.append(float(data.get('min_order_value') or 0))
     if 'max_uses' in data:
@@ -763,6 +788,8 @@ def admin_update_coupon(coupon_id):
         campos.append("valid_until = %s"); valores.append(data.get('valid_until') or None)
     if 'is_active' in data:
         campos.append("is_active = %s"); valores.append(bool(data['is_active']))
+    if 'somente_digitado' in data:
+        campos.append("somente_digitado = %s"); valores.append(_so_digitado(data))
     if 'paid_by' in data and data['paid_by'] in ('platform', 'restaurant'):
         campos.append("paid_by = %s"); valores.append(data['paid_by'])
     if not campos:

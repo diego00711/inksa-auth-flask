@@ -174,6 +174,12 @@ def _buscar_cupons_ativos(cur, restaurant_ids):
          -- não existe no Postgres — sem o cast a home inteira devolvia 500.
          WHERE restaurant_id = ANY(%s::uuid[])
            AND is_active IS TRUE
+           -- Cupom de campanha externa (rádio, panfleto) fica FORA da vitrine:
+           -- ele só vale pra quem digitar o código. Se aparecesse aqui,
+           -- qualquer cliente pegaria e o uso deixaria de provar de onde a
+           -- pessoa veio, que é justamente pra isso que ele existe.
+           -- Isto NÃO desativa o cupom: /validate continua aceitando.
+           AND NOT somente_digitado
            AND (valid_until IS NULL OR valid_until >= NOW())
            AND (max_uses IS NULL OR COALESCE(uses_count, 0) < max_uses)
          ORDER BY created_at DESC
