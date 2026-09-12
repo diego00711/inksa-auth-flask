@@ -194,7 +194,13 @@ def get_banners():
 
                 query = f"""
                     SELECT id, title, subtitle, image_url, link_url, display_order, text_position,
-                           duration_seconds, audience, is_sponsored, sponsor_name
+                           duration_seconds, audience, is_sponsored, sponsor_name,
+                           -- Só o SINAL de que há oferta, não o cupom.
+                           -- O código sai de /relampago/<id>/reservar, e só
+                           -- depois de reservar: mandá-lo aqui deixaria o
+                           -- desconto disponível pra quem lesse a resposta da
+                           -- vitrine, sem passar pela campanha nem pelo relógio.
+                           (coupon_id IS NOT NULL) AS tem_relampago
                     FROM banners
                     WHERE is_active = true
                       AND audience = %s
