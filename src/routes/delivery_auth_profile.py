@@ -47,6 +47,49 @@ def delivery_token_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+
+def heartbeat_auth_required(f):
+    """Como o `delivery_token_required`, mas TAMBÉM aceita o token de sinal de vida.
+
+    O serviço em primeiro plano do Android bate aqui com o app fechado, onde não
+    existe ninguém pra renovar a sessão. Ele usa a credencial estreita de
+    `utils/heartbeat_token.py` — o porquê está lá em cima, e é o único lugar em
+    que essa credencial vale.
+
+    A ordem importa: tenta o token de sessão PRIMEIRO, pra que o app web (que
+    manda o token normal) continue exatamente como antes.
+
+    Não confere `user_type` aqui de propósito: o UPDATE lá embaixo é
+    `WHERE user_id = %s` em `delivery_profiles`. Quem não é entregador não tem
+    linha e leva 404 — a checagem sai de graça, sem mais uma ida ao banco num
+    endpoint que roda a cada 2 minutos por entregador.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            return f(*args, **kwargs)
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return jsonify({"error": "Token de autorização ausente"}), 401
+
+        user_auth_id, user_type, error = get_user_id_from_token(auth_header)
+        if not error:
+            if user_type != 'delivery':
+                return jsonify({"error": "Acesso não autorizado. Apenas para entregadores."}), 403
+            g.user_auth_id = str(user_auth_id)
+            return f(*args, **kwargs)
+
+        from ..utils.heartbeat_token import validar as validar_heartbeat
+        token = auth_header.strip().split()[-1] if auth_header.strip() else None
+        dono = validar_heartbeat(token) if token else None
+        if dono:
+            g.user_auth_id = dono
+            g.veio_do_servico_nativo = True
+            return f(*args, **kwargs)
+
+        return error
+    return decorated_function
+
 # ==============================================
 # PERFIL PÚBLICO DO ENTREGADOR (quem vê é o cliente que está recebendo)
 # ==============================================
@@ -141,7 +184,7 @@ def delivery_public_profile(delivery_id):
 # HEARTBEAT
 # ==============================================
 @delivery_auth_profile_bp.route('/heartbeat', methods=['POST', 'OPTIONS'])
-@delivery_token_required
+@heartbeat_auth_required
 def delivery_heartbeat():
     """Sinal de vida do app do entregador enquanto ele está online.
 
@@ -213,6 +256,42 @@ def delivery_heartbeat():
         return jsonify({"error": "Erro ao registrar heartbeat"}), 500
     finally:
         conn.close()
+
+
+@delivery_auth_profile_bp.route('/heartbeat-token', methods=['POST', 'OPTIONS'])
+@delivery_token_required
+def delivery_heartbeat_token():
+    """Entrega ao app a credencial que o serviço nativo do Android vai usar.
+
+    Exige sessão de verdade (o decorador acima) — é o único jeito de provar que
+    quem pede é o dono. O app chama isto quando o entregador fica ONLINE e passa
+    o resultado pro serviço em primeiro plano, que bate no `/heartbeat` sozinho
+    mesmo com o app fechado.
+
+    O porquê de existir uma credencial separada do token de sessão está em
+    `utils/heartbeat_token.py` — resumo: dois renovadores sobre o mesmo
+    refresh_token deslogariam o entregador no meio do turno.
+
+    503 e não 500 quando falta segredo: não é erro do pedido, é ambiente sem
+    configuração. O app trata como "serviço nativo indisponível" e segue com o
+    heartbeat do JS, que é exatamente o comportamento de hoje.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    from ..utils.heartbeat_token import emitir
+    token, expira = emitir(g.user_auth_id)
+    if not token:
+        logger.warning(
+            "heartbeat-token pedido mas nao ha segredo de assinatura "
+            "(HEARTBEAT_TOKEN_SECRET / SUPABASE_JWT_SECRET / JWT_SECRET)"
+        )
+        return jsonify({"error": "Recurso indisponível nesta instalação"}), 503
+
+    return jsonify({
+        "status": "success",
+        "data": {"token": token, "expires_at": expira.isoformat()},
+    }), 200
 
 
 # ==============================================
