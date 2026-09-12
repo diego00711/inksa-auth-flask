@@ -1201,3 +1201,155 @@ def disparar_relampago(banner_id):
             conn.close()
         except Exception:
             pass
+
+
+@coupons_bp.route('/relampago/<uuid:banner_id>/criar', methods=['POST', 'OPTIONS'])
+def criar_relampago(banner_id):
+    """Cria o cupom da oferta relâmpago e amarra no banner. Só admin.
+
+    Body: {
+      "restaurant_id":  uuid da loja,
+      "discount_type":  "fixed" | "percentage" | "free_delivery",
+      "discount_value": número,
+      "reserva_minutos": 5,
+      "max_uses":       quantas ofertas existem no total (opcional = ilimitado),
+      "min_order_value": opcional,
+      "code":           opcional — sem ele, geramos um
+    }
+
+    UM ENDPOINT SÓ, DE PROPÓSITO. Cupom e banner nascem juntos ou não nascem:
+    banner relâmpago sem cupom é uma arte que promete desconto e não entrega, e
+    cupom relâmpago sem banner é um cupom que ninguém consegue ativar (a reserva
+    só acontece pelo toque no banner). Separar em dois passos deixaria os dois
+    estados meio-feitos possíveis.
+
+    DECISÕES QUE O ENDPOINT TOMA SOZINHO, e por quê:
+    - paid_by = 'platform'  — a Inksa absorve. A oferta existe pra TRAZER
+      usuário novo; cobrar isso do parceiro seria fazê-lo pagar pela captação
+      da plataforma.
+    - max_uses_per_client = 1 — é o "1 por cliente" do pedido.
+    - valid_until = banner.ends_at — o cupom morre junto com a campanha. Sem
+      isso sobraria um cupom vivo depois do banner sair do ar, e alguém que
+      guardou o código continuaria usando.
+    - somente_digitado = TRUE — a oferta NÃO aparece na lista de cupons da loja.
+      Ela se ativa pelo banner, e só. Se aparecesse ali, qualquer cliente
+      pegaria sem passar pela campanha e o relógio não significaria nada.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    uid, utype, err = get_user_id_from_token(request.headers.get('Authorization'))
+    if err:
+        return err
+    if utype != 'admin':
+        return jsonify({"error": "Apenas admin cria oferta relâmpago"}), 403
+
+    d = request.get_json(silent=True) or {}
+    restaurant_id = (d.get('restaurant_id') or '').strip() or None
+    if not restaurant_id:
+        return jsonify({"error": "Escolha a loja da oferta"}), 400
+
+    tipo = (d.get('discount_type') or 'fixed').strip().lower()
+    if tipo not in ('fixed', 'percentage', 'free_delivery'):
+        return jsonify({"error": "Tipo de desconto inválido"}), 400
+    try:
+        valor = float(d.get('discount_value') or 0)
+    except (TypeError, ValueError):
+        valor = 0.0
+    if tipo != 'free_delivery' and valor <= 0:
+        return jsonify({"error": "O desconto precisa ser maior que zero"}), 400
+    if tipo == 'percentage' and valor > 100:
+        return jsonify({"error": "Desconto em % não pode passar de 100"}), 400
+
+    try:
+        minutos = int(d.get('reserva_minutos') or 5)
+    except (TypeError, ValueError):
+        minutos = 5
+    # Piso de 1 min: abaixo disso o cliente não consegue nem montar o carrinho,
+    # e a oferta viraria pegadinha. Teto de 60 pra não virar cupom comum.
+    minutos = max(1, min(minutos, 60))
+
+    try:
+        max_uses = int(d['max_uses']) if d.get('max_uses') not in (None, '') else None
+    except (TypeError, ValueError):
+        max_uses = None
+    try:
+        minimo = float(d.get('min_order_value') or 0)
+    except (TypeError, ValueError):
+        minimo = 0.0
+
+    codigo = (d.get('code') or '').strip().upper()
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "DB indisponível"}), 503
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id, coupon_id, ends_at FROM banners WHERE id = %s",
+                        (str(banner_id),))
+            b = cur.fetchone()
+            if not b:
+                return jsonify({"error": "Banner não encontrado"}), 404
+            if b['coupon_id']:
+                return jsonify({"error": "Este banner já tem uma oferta. "
+                                         "Apague a antiga antes de criar outra."}), 409
+
+            cur.execute("SELECT restaurant_name FROM restaurant_profiles WHERE id = %s",
+                        (restaurant_id,))
+            loja = cur.fetchone()
+            if not loja:
+                return jsonify({"error": "Loja não encontrada"}), 404
+
+            if not codigo:
+                # Código legível, derivado do nome da loja. O cliente não precisa
+                # digitar (o banner arma sozinho), mas ele APARECE no carrinho —
+                # e "RELAMPAGO-MISTER" explica de onde veio o desconto melhor
+                # que um punhado de letras aleatórias.
+                import re as _re
+                base = _re.sub(r'[^A-Z0-9]', '', (loja['restaurant_name'] or 'LOJA').upper())[:10]
+                codigo = f"RELAMPAGO{base}"
+
+            cur.execute("""
+                INSERT INTO coupons
+                    (code, discount_type, discount_value, min_order_value,
+                     max_uses, uses_count, max_uses_per_client, valid_until,
+                     is_active, restaurant_id, paid_by, description,
+                     somente_digitado, reserva_minutos)
+                VALUES (%s, %s, %s, %s, %s, 0, 1, %s, TRUE, %s, 'platform', %s, TRUE, %s)
+                RETURNING id, code
+            """, (codigo, tipo, valor, minimo, max_uses, b['ends_at'],
+                  restaurant_id,
+                  f"Oferta relâmpago — {loja['restaurant_name']}", minutos))
+            cupom = cur.fetchone()
+
+            cur.execute("UPDATE banners SET coupon_id = %s, restaurant_id = %s, "
+                        "updated_at = NOW() WHERE id = %s",
+                        (cupom['id'], restaurant_id, str(banner_id)))
+            conn.commit()
+
+        return jsonify({"status": "success", "data": {
+            "coupon_id": str(cupom['id']),
+            "code": cupom['code'],
+            "reserva_minutos": minutos,
+            "loja": loja['restaurant_name'],
+        }}), 201
+
+    except psycopg2.errors.UniqueViolation:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({"error": f"Já existe um cupom com o código {codigo}. "
+                                 "Escolha outro."}), 409
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao criar oferta relâmpago no banner %s", banner_id)
+        return jsonify({"error": "Erro interno"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
