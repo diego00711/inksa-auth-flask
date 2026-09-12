@@ -138,7 +138,12 @@ def get_banners():
                            display_order, created_at, updated_at, text_position,
                            starts_at, ends_at, duration_seconds,
                            audience, is_sponsored, sponsor_name,
-                           geo_latitude, geo_longitude, geo_radius_km, geo_city
+                           geo_latitude, geo_longitude, geo_radius_km, geo_city,
+                           -- Sinaliza a oferta relâmpago: é o que decide se a
+                           -- linha mostra os botões de disparar push, e se o
+                           -- formulário deixa criar outra oferta por cima.
+                           (coupon_id IS NOT NULL) AS tem_relampago,
+                           click_count
                     FROM banners
                     ORDER BY display_order ASC, created_at DESC
                 """
