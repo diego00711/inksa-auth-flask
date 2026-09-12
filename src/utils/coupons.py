@@ -275,9 +275,21 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=
     else:
         restaurant_discount, platform_discount = 0.0, discount
 
+    # NÃO EMPILHA COM NADA. Hoje só a oferta relâmpago é exclusiva.
+    #
+    # Sem isto, o cliente somava a oferta relâmpago com o desconto do Clube no
+    # mesmo pedido — `total_discount = backend_discount + club_discount` em
+    # payment.py — e as DUAS pontas saem da plataforma. Um lanche de R$ 9,99
+    # numa campanha de captação vira R$ 8,99 com 10% de Diamante, e a Inksa
+    # paga os dois.
+    #
+    # Quem respeita esta bandeira é quem monta o total (payment.py, nos dois
+    # caminhos de pedido). Aqui ela só é hasteada.
+    exclusivo = bool(coupon.get('reserva_minutos'))
+
     return {"valid": True, "discount_amount": discount,
             "discount_type": disc_type, "message": "Cupom válido!",
-            "paid_by": paid_by,
+            "paid_by": paid_by, "exclusivo": exclusivo,
             "restaurant_discount": round(restaurant_discount, 2),
             "platform_discount": round(platform_discount, 2)}
 

@@ -865,6 +865,7 @@ def criar_preferencia_mercado_pago():
         backend_discount = 0.0
         applied_coupon_id = None
         desconto_parceiro = 0.0  # parte do desconto que sai do repasse da loja
+        cupom_exclusivo = False  # cupom que NÃO empilha com o Clube (relâmpago)
         if coupon_code and payment_method != 'cash':
             try:
                 order_subtotal = float(dados_pedido.get('total_amount_items', 0))
@@ -887,6 +888,7 @@ def criar_preferencia_mercado_pago():
                     backend_discount = evalr['discount_amount']
                     desconto_parceiro = float(evalr.get('restaurant_discount') or 0)
                     applied_coupon_id = coupon.get('id')
+                    cupom_exclusivo = bool(evalr.get('exclusivo'))
                     logging.info(
                         f"✅ Cupom '{coupon_code}' válido — desconto R${backend_discount:.2f} "
                         f"(pago por: {evalr.get('paid_by')})")
@@ -900,7 +902,15 @@ def criar_preferencia_mercado_pago():
         # No dinheiro não aplica (o entregador recolhe em espécie).
         club_discount = 0.0
         club_level_name = None
-        if payment_method != 'cash':
+        # ⚠️ CUPOM EXCLUSIVO NÃO EMPILHA COM O CLUBE.
+        #
+        # Logo abaixo o total soma os dois (`backend_discount + club_discount`),
+        # e as DUAS pontas saem da plataforma. Num lanche de R$ 9,99 de campanha
+        # de captação, os 10% de Diamante fariam a Inksa pagar duas vezes pelo
+        # mesmo pedido. A oferta relâmpago já é o desconto — ela é o teto.
+        if cupom_exclusivo and payment_method != 'cash':
+            logging.info("🔒 Cupom exclusivo aplicado — benefício do Clube não empilha")
+        if not cupom_exclusivo and payment_method != 'cash':
             try:
                 from ..utils.club import client_checkout_benefits
                 _cb = client_checkout_benefits(client_profile_id)
@@ -952,7 +962,8 @@ def criar_preferencia_mercado_pago():
         # que o app enviou.
         if payment_method == 'cash':
             try:
-                total_seguro, subtotal_validado, _desconto_cash, _coupon_id_cash, _desc_parc_cash = _validar_itens_e_total(
+                (total_seguro, subtotal_validado, _desconto_cash, _coupon_id_cash,
+                 _desc_parc_cash, _exclusivo_cash) = _validar_itens_e_total(
                     dados_pedido.get('itens', []),
                     dados_pedido.get('delivery_fee', 0),
                     coupon_code,
@@ -1358,7 +1369,8 @@ def _split_online(valor_itens, delivery_fee, distancia_km, comissao, desconto_pa
 def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtotal_items,
                            restaurant_id=None, client_id=None):
     """Revalida precos no banco e calcula o total no servidor (nao confia no front).
-    Retorna (total_seguro, subtotal_validado, desconto, coupon_id, desconto_parceiro).
+    Retorna (total_seguro, subtotal_validado, desconto, coupon_id,
+             desconto_parceiro, cupom_exclusivo).
     O coupon_id (quando != None) deve ser 'consumido' pelo chamador apos criar o
     pedido. desconto_parceiro = parte do desconto que sai do repasse da loja.
     Lanca ValueError se invalido.
@@ -1393,6 +1405,7 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
     desconto = 0.0
     coupon_id = None
     desconto_parceiro = 0.0
+    exclusivo = False
     if coupon_code:
         # Cupom da loja só vale nela; cupom da plataforma vale em qualquer uma.
         coupon = _buscar_cupom(coupon_code, restaurant_id)
@@ -1409,9 +1422,13 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
             desconto = evalr['discount_amount']
             coupon_id = coupon.get('id')
             desconto_parceiro = float(evalr.get('restaurant_discount') or 0)
+            # Cupom que não empilha com o Clube (hoje: oferta relâmpago).
+            # Quem respeita é o chamador, que é quem aplica o benefício depois.
+            exclusivo = bool(evalr.get('exclusivo'))
 
     total = max(0.0, round(subtotal + float(delivery_fee or 0) - desconto, 2))
-    return total, round(subtotal, 2), desconto, coupon_id, round(desconto_parceiro, 2)
+    return (total, round(subtotal, 2), desconto, coupon_id,
+            round(desconto_parceiro, 2), exclusivo)
 
 
 @mp_payment_bp.route('/pagamentos/processar_cartao', methods=['POST'])
@@ -1485,7 +1502,8 @@ def processar_pagamento_cartao():
             d['delivery_fee'] = _fee_srv_card
 
         try:
-            total_seguro, subtotal_validado, desconto, coupon_id_card, desc_parc_card = _validar_itens_e_total(
+            (total_seguro, subtotal_validado, desconto, coupon_id_card,
+             desc_parc_card, _exclusivo_card) = _validar_itens_e_total(
                 items_req, d.get('delivery_fee', 0), (d.get('coupon_code') or '').strip(),
                 d.get('total_amount_items', 0), restaurant_id=d.get('restaurant_id'),
                 client_id=client_profile_id,
@@ -1497,23 +1515,34 @@ def processar_pagamento_cartao():
             return jsonify({"erro": "Valor do pedido inválido."}), 400
 
         # Clube Inksa: benefício do nível do cliente (frete grátis / % desconto)
+        #
+        # ⚠️ NÃO EMPILHA COM CUPOM EXCLUSIVO. Mesma regra do outro caminho de
+        # pedido (linha ~905) — e é aqui que este projeto costuma criar buraco:
+        # `payment.py` grava pedido em DUAS funções, e regra que entra só numa
+        # deixa a outra pagando o dobro em silêncio.
+        if _exclusivo_card:
+            logging.info("🔒 Cupom exclusivo aplicado — benefício do Clube não empilha")
         try:
-            from ..utils.club import client_checkout_benefits
-            _cb = client_checkout_benefits(client_profile_id)
-            _club_card = 0.0
-            if _cb.get('free_delivery'):
-                _club_card += float(d.get('delivery_fee', 0) or 0)
-            _pct = float(_cb.get('subtotal_discount_pct') or 0)
-            if _pct > 0:
-                _desc_pct = round(float(subtotal_validado or 0) * _pct / 100.0, 2)
-                _teto = float(_cb.get('max_discount_brl') or 0)
-                if _teto > 0:
-                    _desc_pct = min(_desc_pct, _teto)
-                _club_card += _desc_pct
-            _club_card = round(_club_card, 2)
-            if _club_card > 0:
-                total_seguro = round(max(0.0, total_seguro - _club_card), 2)
-                logging.info(f"🏅 Clube {_cb.get('level_name')}: desconto R${_club_card:.2f} (cartão)")
+            if _exclusivo_card:
+                _cb = {}
+                _club_card = 0.0
+            else:
+                from ..utils.club import client_checkout_benefits
+                _cb = client_checkout_benefits(client_profile_id)
+                _club_card = 0.0
+                if _cb.get('free_delivery'):
+                    _club_card += float(d.get('delivery_fee', 0) or 0)
+                _pct = float(_cb.get('subtotal_discount_pct') or 0)
+                if _pct > 0:
+                    _desc_pct = round(float(subtotal_validado or 0) * _pct / 100.0, 2)
+                    _teto = float(_cb.get('max_discount_brl') or 0)
+                    if _teto > 0:
+                        _desc_pct = min(_desc_pct, _teto)
+                    _club_card += _desc_pct
+                _club_card = round(_club_card, 2)
+                if _club_card > 0:
+                    total_seguro = round(max(0.0, total_seguro - _club_card), 2)
+                    logging.info(f"🏅 Clube {_cb.get('level_name')}: desconto R${_club_card:.2f} (cartão)")
         except Exception as _club_err:
             logging.warning(f"⚠️ Falha ao aplicar clube (cartão): {_club_err}")
 
