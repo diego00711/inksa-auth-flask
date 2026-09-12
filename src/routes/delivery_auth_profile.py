@@ -47,6 +47,66 @@ def delivery_token_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+
+def heartbeat_auth_required(f):
+    """Como o `delivery_token_required`, mas TAMBÉM aceita a credencial de turno.
+
+    O serviço em primeiro plano do Android bate aqui com o app fechado, onde não
+    existe ninguém pra renovar a sessão. Ele usa o token estreito de
+    `utils/heartbeat_token.py` — e este é o único lugar em que ele vale.
+
+    ⚠️ ESTE É O PEDAÇO QUE DERRUBOU A PRODUÇÃO EM 12/09/2026.
+
+    A primeira versão reescrevia o decorador inteiro. O worker travou 42s depois
+    de subir (WORKER TIMEOUT, sem exceção nenhuma) e a API ficou 20 minutos
+    fora. Reli linha a linha e não achei o mecanismo.
+
+    Por isso esta versão NÃO reescreve nada: ela CHAMA o decorador de sempre e
+    só age quando ele recusa. O caminho de sucesso — que é 99,9% do tráfego,
+    porque o app manda token de sessão válido — passa exatamente pelo mesmo
+    código de antes, sem uma linha diferente. O que eu não entendi fica
+    confinado ao caminho do 401.
+
+    Chamar `f` de novo depois de um 401 é seguro: num 401 o decorador de dentro
+    devolve antes de executar `f`, então a rota não rodou ainda.
+    """
+    caminho_de_sempre = delivery_token_required(f)
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        resposta = caminho_de_sempre(*args, **kwargs)
+
+        # Só um 401/403 significa "não provou quem é". Qualquer outra coisa
+        # (200, 404, 500) já é a resposta final e passa direto.
+        if isinstance(resposta, tuple):
+            status = resposta[1] if len(resposta) > 1 else 200
+        else:
+            status = getattr(resposta, "status_code", 200)
+        if status not in (401, 403):
+            return resposta
+
+        logger.info("[HBAUTH] sessao recusou (%s), tentando credencial de turno", status)
+        try:
+            from ..utils.heartbeat_token import validar as validar_heartbeat
+            auth_header = request.headers.get('Authorization') or ''
+            partes = auth_header.strip().split()
+            dono = validar_heartbeat(partes[-1]) if partes else None
+        except Exception:
+            # Nunca troca um 401 honesto por um 500: se a credencial de turno
+            # falhar de qualquer jeito, devolve o que a sessão já tinha dito.
+            logger.exception("[HBAUTH] erro ao validar credencial de turno")
+            return resposta
+
+        if not dono:
+            return resposta
+
+        logger.info("[HBAUTH] credencial de turno aceita")
+        g.user_auth_id = dono
+        g.veio_do_servico_nativo = True
+        return f(*args, **kwargs)
+
+    return decorated_function
+
 # ==============================================
 # PERFIL PÚBLICO DO ENTREGADOR (quem vê é o cliente que está recebendo)
 # ==============================================
@@ -141,7 +201,7 @@ def delivery_public_profile(delivery_id):
 # HEARTBEAT
 # ==============================================
 @delivery_auth_profile_bp.route('/heartbeat', methods=['POST', 'OPTIONS'])
-@delivery_token_required
+@heartbeat_auth_required
 def delivery_heartbeat():
     """Sinal de vida do app do entregador enquanto ele está online.
 
