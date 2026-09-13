@@ -125,10 +125,19 @@ def enviar_teste(token: str, user_type: str = "client") -> dict:
 # ⚠️ O id é contrato entre este arquivo e o JS dos apps. Mudar de um lado só
 # faz o som sumir sem erro nenhum em lugar nenhum.
 CANAL_URGENTE = 'inksa_urgente'
+# Canal das campanhas (oferta relampago). O `_som` no nome nao e enfeite: o
+# canal `inksa_ofertas` nasceu sem som em 13/09/2026 e canal do Android e
+# IMUTAVEL -- acrescentar som ao mesmo id nao teria efeito em quem ja abriu o
+# app. Id novo foi a unica saida.
+#
+# ⚠️ So funciona a partir do APK que EMPACOTA res/raw/oferta_relampago.mp3 e
+# CRIA este canal. Mandar pra um canal inexistente e pior que nao mandar
+# canal nenhum: o Android descarta a notificacao em silencio.
+CANAL_CAMPANHA = 'inksa_ofertas_som'
 
 
 def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
-                     urgente: bool = False):
+                     urgente: bool = False, canal: str = None):
     """Monta a Message do FCM. Existe pra corrigir o PUSH DUPLICADO.
 
     O bug: a mensagem ia com `notification=` no nível de cima. No WEB, isso faz
@@ -166,6 +175,24 @@ def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
         )
         config['priority'] = 'high'
 
+    # Canal explícito (campanha). O urgente já definiu o dele acima.
+    #
+    # `sound` aqui NÃO é redundante com o canal: no Android 8+ quem manda é o
+    # canal, mas em 7 e abaixo (que não tem canal nenhum) é este campo que toca.
+    #
+    # `priority='high'` é o que faz a oferta CHEGAR com o app fechado. Sem ele o
+    # aparelho em Doze segura o push até a próxima janela de sincronismo — que
+    # pode ser 15 minutos depois. Numa oferta que dura 5, chegar atrasado é o
+    # mesmo que não chegar, e ainda gera a reclamação de "já expirou".
+    if canal and not urgente:
+        notif = messaging.AndroidNotification(
+            title=title, body=body,
+            channel_id=canal,
+            sound='oferta_relampago',
+            default_vibrate_timings=True,
+        )
+        config['priority'] = 'high'
+
     return messaging.Message(
         data={**corpo_dados, 'urgente': '1' if urgente else '0'},
         android=messaging.AndroidConfig(notification=notif, **config),
@@ -173,7 +200,8 @@ def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
     )
 
 
-def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> dict:
+def send_campaign(destinos: list, title: str, body: str, data: dict = None,
+                  canal: str = CANAL_CAMPANHA) -> dict:
     """Envia a MESMA notificação pra vários clientes de uma vez.
 
     `destinos` = lista de (client_profile_id, fcm_token).
@@ -199,7 +227,7 @@ def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> d
         if not token:
             continue
         try:
-            messaging.send(_montar_mensagem(token, title, body, data))
+            messaging.send(_montar_mensagem(token, title, body, data, canal=canal))
             resultado["enviados"] += 1
         except messaging.UnregisteredError:
             # App desinstalado ou token trocado: marca pra limpeza.
