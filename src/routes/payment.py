@@ -1009,6 +1009,20 @@ def criar_preferencia_mercado_pago():
                 consume_coupon(_coupon_id_cash, client_profile_id, pedido_id)
 
             logging.info(f"💵 Pedido em dinheiro {pedido_id} — itens validados, total real R${total_seguro:.2f}.")
+
+            # AVISA A LOJA AQUI — pedido em dinheiro NÃO TEM WEBHOOK.
+            #
+            # Ele nasce já com status 'pending' (ver o insert lá em cima), ou
+            # seja, chega pronto pro restaurante sem passar por aprovação de
+            # pagamento nenhuma. O aviso que eu criei hoje ficou pendurado nos
+            # dois webhooks — e nenhum dos dois roda neste caminho.
+            #
+            # Resultado no teste do Diego em 13/09/2026 (pedido #1007): a loja
+            # não tocou. É a MESMA armadilha dos dois caminhos de pedido que
+            # foi consertada de manhã, repetida à tarde por eu ter olhado só
+            # onde o dinheiro entra e não onde o PEDIDO nasce.
+            _avisar_loja_pedido_pago(pedido_id, dados_pedido.get('restaurant_id'))
+
             return jsonify({
                 'mensagem': 'Pedido em dinheiro criado com sucesso!',
                 'pedido_id': pedido_id,
@@ -1700,6 +1714,17 @@ def processar_pagamento_cartao():
                 'margem_frete': margem_frete,
                 'id_transacao_mp': str(payment_id),
             }).eq('id', pedido_id).execute()
+
+            # QUARTO caminho que ativa o pedido, e o quarto que precisa avisar.
+            # Cartão aprovado NA HORA não espera webhook nenhum: vira 'pending'
+            # aqui e a rota devolve. Sem esta linha a loja só descobriria na
+            # próxima sondagem da tela — calada, como no #1006 e no #1007.
+            #
+            # São quatro, e é sempre a mesma pergunta: "onde o pedido fica
+            # visível pro restaurante?". Hoje: dinheiro (nasce pending), cartão
+            # aprovado na hora (aqui), webhook do MP e webhook do Asaas.
+            _avisar_loja_pedido_pago(pedido_id, d.get('restaurant_id'))
+
             return jsonify({"status": "approved", "pedido_id": pedido_id, "payment_id": payment_id}), 200
 
         if status in ('in_process', 'pending'):
