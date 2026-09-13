@@ -995,7 +995,7 @@ def reservar_relampago(banner_id):
 _MINUTOS_PRA_CONSIDERAR_FECHADO = 15
 
 
-def _publico_do_relampago(cur, banner, publico, so_app_fechado, campanha):
+def _publico_do_relampago(cur, banner, publico, so_app_fechado, campanha, quem_disparou=None):
     """Monta a lista de (client_id, fcm_token) que vai receber o push.
 
     `publico` diz QUEM entra:
@@ -1023,6 +1023,20 @@ def _publico_do_relampago(cur, banner, publico, so_app_fechado, campanha):
         # fechado. Fail-open aqui só custa um push a mais pra quem está no app.
         condicoes.append("(cp.last_seen IS NULL OR cp.last_seen < NOW() - make_interval(mins => %s))")
         args.append(_MINUTOS_PRA_CONSIDERAR_FECHADO)
+
+    if publico == 'so_eu':
+        # TESTE EM SI MESMO. Manda só pro perfil de CLIENTE de quem está
+        # disparando, e ignora tudo que filtraria um envio de verdade: app
+        # fechado, teto do dia e "já recebeu esta rodada".
+        #
+        # Sem isso não dá pra testar, e o motivo é irônico: quem está no admin
+        # acabou de usar o app, então o filtro de "app fechado" exclui
+        # justamente a pessoa que quer ver a notificação chegar.
+        cur.execute("SELECT id, fcm_token FROM client_profiles "
+                    " WHERE user_id = %s AND NULLIF(TRIM(fcm_token),'') IS NOT NULL",
+                    (str(quem_disparou),))
+        r = cur.fetchone()
+        return [(r['id'], r['fcm_token'])] if r else []
 
     if publico == 'ja_pediram':
         condicoes.append(
@@ -1083,7 +1097,7 @@ def disparar_relampago(banner_id):
 
     corpo = request.get_json(silent=True) or {}
     publico = (corpo.get('publico') or 'todos').strip().lower()
-    if publico not in ('todos', 'ja_pediram', 'no_raio'):
+    if publico not in ('todos', 'ja_pediram', 'no_raio', 'so_eu'):
         return jsonify({"error": "publico inválido"}), 400
     rodada = (corpo.get('rodada') or 'inicio').strip().lower()
     if rodada not in ('inicio', 'ultima_chamada'):
@@ -1141,7 +1155,7 @@ def disparar_relampago(banner_id):
                 return jsonify({"error": "A loja não tem coordenada — não dá pra calcular raio"}), 409
 
             campanha = "relampago:%s:%s" % (banner_id, rodada)
-            destinos = _publico_do_relampago(cur, b, publico, so_app_fechado, campanha)
+            destinos = _publico_do_relampago(cur, b, publico, so_app_fechado, campanha, uid)
 
             # Corta DEPOIS de montar a lista: quem sobrar continua elegível e
             # entra no próximo disparo, porque o `push_campaign_log` só registra
@@ -1153,7 +1167,9 @@ def disparar_relampago(banner_id):
                 destinos = destinos[:quantos]
 
             # Teto diário: só na primeira rodada (ver o aviso no topo).
-            if rodada == 'inicio' and destinos:
+            # No teste em si mesmo o teto do dia não vale — ele existe pra
+            # proteger o CLIENTE de bombardeio, e aqui o cliente é você.
+            if rodada == 'inicio' and destinos and publico != 'so_eu':
                 try:
                     cur.execute("SELECT value FROM platform_settings "
                                 "WHERE key = 'push_campaign_daily_cap'")
@@ -1204,6 +1220,11 @@ def disparar_relampago(banner_id):
 
             invalidos = set(res.get('invalidos') or [])
             enviados = [cid for cid, _ in destinos if cid not in invalidos]
+            if publico == 'so_eu':
+                # Teste não entra no histórico: senão a segunda tentativa
+                # voltaria "ninguém elegível" e pareceria que o envio parou
+                # de funcionar.
+                enviados = []
             if enviados:
                 psycopg2.extras.execute_values(
                     cur,
