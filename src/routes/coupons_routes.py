@@ -995,7 +995,7 @@ def reservar_relampago(banner_id):
 _MINUTOS_PRA_CONSIDERAR_FECHADO = 15
 
 
-def _publico_do_relampago(cur, banner, publico, so_app_fechado, campanha, quem_disparou=None):
+def _publico_do_relampago(cur, banner, publico, so_app_fechado, campanha, email_teste=None):
     """Monta a lista de (client_id, fcm_token) que vai receber o push.
 
     `publico` diz QUEM entra:
@@ -1025,16 +1025,31 @@ def _publico_do_relampago(cur, banner, publico, so_app_fechado, campanha, quem_d
         args.append(_MINUTOS_PRA_CONSIDERAR_FECHADO)
 
     if publico == 'so_eu':
-        # TESTE EM SI MESMO. Manda só pro perfil de CLIENTE de quem está
-        # disparando, e ignora tudo que filtraria um envio de verdade: app
-        # fechado, teto do dia e "já recebeu esta rodada".
+        # TESTE NUM CELULAR SÓ. Ignora tudo que filtraria um envio de verdade:
+        # app fechado, teto do dia e "já recebeu esta rodada".
         #
         # Sem isso não dá pra testar, e o motivo é irônico: quem está no admin
         # acabou de usar o app, então o filtro de "app fechado" exclui
         # justamente a pessoa que quer ver a notificação chegar.
-        cur.execute("SELECT id, fcm_token FROM client_profiles "
-                    " WHERE user_id = %s AND NULLIF(TRIM(fcm_token),'') IS NOT NULL",
-                    (str(quem_disparou),))
+        #
+        # ⚠️ POR E-MAIL, e não pelo usuário logado. Em 13/09/2026 eu fiz pelo
+        # logado e não achou ninguém: a conta de ADMIN do Diego
+        # (diegoweber@inksadelivery.com.br) não tem perfil de cliente — a de
+        # cliente dele é outro e-mail (@gmail). São usuários separados, e supor
+        # que a mesma pessoa é o mesmo `user_id` nos dois papéis estava errado.
+        #
+        # De quebra ficou melhor: dá pra testar no celular de qualquer pessoa
+        # (a Pamela, um testador), não só no próprio.
+        if not email_teste:
+            return []
+        cur.execute("""
+            SELECT cp.id, cp.fcm_token
+              FROM client_profiles cp
+              JOIN auth.users u ON u.id = cp.user_id
+             WHERE lower(u.email) = lower(%s)
+               AND NULLIF(TRIM(cp.fcm_token), '') IS NOT NULL
+             LIMIT 1
+        """, (email_teste.strip(),))
         r = cur.fetchone()
         return [(r['id'], r['fcm_token'])] if r else []
 
@@ -1103,6 +1118,8 @@ def disparar_relampago(banner_id):
     if rodada not in ('inicio', 'ultima_chamada'):
         return jsonify({"error": "rodada inválida"}), 400
     so_app_fechado = corpo.get('so_app_fechado', True) is not False
+    # E-mail do CLIENTE que vai receber o teste (publico='so_eu').
+    email_teste = (corpo.get('email_teste') or '').strip() or None
 
     # QUANTAS PESSOAS AVISAR DESTA VEZ.
     #
@@ -1155,7 +1172,7 @@ def disparar_relampago(banner_id):
                 return jsonify({"error": "A loja não tem coordenada — não dá pra calcular raio"}), 409
 
             campanha = "relampago:%s:%s" % (banner_id, rodada)
-            destinos = _publico_do_relampago(cur, b, publico, so_app_fechado, campanha, uid)
+            destinos = _publico_do_relampago(cur, b, publico, so_app_fechado, campanha, email_teste)
 
             # Corta DEPOIS de montar a lista: quem sobrar continua elegível e
             # entra no próximo disparo, porque o `push_campaign_log` só registra
@@ -1194,8 +1211,18 @@ def disparar_relampago(banner_id):
             if not destinos:
                 return jsonify({"status": "success", "data": {
                     "enviados": 0, "elegiveis": 0,
-                    "aviso": "Ninguém elegível: ou já receberam esta rodada, "
-                             "ou estão com o app aberto, ou não têm notificação ligada."
+                    # No teste, o aviso genérico não ajuda: ele lista três
+                    # motivos que o teste justamente ignora, e a pessoa fica
+                    # procurando defeito onde não tem. Diz o motivo REAL.
+                    "aviso": (
+                        f"Nenhum cliente com notificação ligada no e-mail "
+                        f"{email_teste or '(vazio)'}. Confira se é a conta do APP DO "
+                        f"CLIENTE (não a do admin) e se as notificações foram aceitas "
+                        f"nesse celular."
+                        if publico == 'so_eu' else
+                        "Ninguém elegível: ou já receberam esta rodada, "
+                        "ou estão com o app aberto, ou não têm notificação ligada."
+                    )
                 }}), 200
 
             loja = b['restaurant_name'] or 'uma loja perto de você'
