@@ -454,10 +454,40 @@ def delete_banner(banner_id):
             return jsonify({"error": "Erro de conexão com o banco de dados"}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT id FROM banners WHERE id = %s", (str(banner_id),))
-            if not cur.fetchone():
+            cur.execute("SELECT id, coupon_id FROM banners WHERE id = %s", (str(banner_id),))
+            alvo = cur.fetchone()
+            if not alvo:
                 return jsonify({"error": "Banner não encontrado"}), 404
-            
+
+            # A OFERTA RELÂMPAGO MORRE COM O BANNER.
+            #
+            # O cupom dela só pode ser ativado tocando no banner (é
+            # `somente_digitado`, não aparece em lugar nenhum do app). Sem o
+            # banner ele vira órfão: ativo no banco, inalcançável na prática, e
+            # ninguém lembra por que existe.
+            #
+            # Aconteceu em 13/09/2026 — o Diego apagou o banner de teste do
+            # Gelaê e o cupom ficou lá sozinho.
+            #
+            # SÓ apaga cupom de relâmpago (`reserva_minutos`) e SÓ se nunca foi
+            # usado. Cupom com uso vira histórico de pedido: apagar levaria a
+            # reserva junto (CASCADE) e quebraria o rastro de quem pagou quanto.
+            if alvo['coupon_id']:
+                cur.execute("""
+                    DELETE FROM coupons
+                     WHERE id = %s AND reserva_minutos IS NOT NULL
+                       AND COALESCE(uses_count, 0) = 0
+                """, (alvo['coupon_id'],))
+                if cur.rowcount:
+                    logger.info("Oferta relâmpago %s apagada junto com o banner %s",
+                                alvo['coupon_id'], banner_id)
+                else:
+                    # Já foi usado: desativa em vez de apagar, pra não deixar
+                    # um cupom vivo que ninguém consegue mais ativar.
+                    cur.execute("UPDATE coupons SET is_active = FALSE, updated_at = NOW() "
+                                " WHERE id = %s AND reserva_minutos IS NOT NULL",
+                                (alvo['coupon_id'],))
+
             cur.execute("DELETE FROM banners WHERE id = %s", (str(banner_id),))
             conn.commit()
             
