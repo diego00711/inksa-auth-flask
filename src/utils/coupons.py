@@ -199,8 +199,14 @@ def precos_para_o_cupom(coupon, itens_do_pedido):
                .select('price, promo_price')
                .eq('id', str(alvo)).limit(1).execute())
         if not r.data:
+            # Mesmo motivo do log acima: daqui pra frente as duas causas de {}
+            # levam à MESMA mensagem na tela ("adicione o item ao carrinho"),
+            # e sem distinguir uma da outra a investigação não anda.
+            logger.info("oferta de item: menu_items nao devolveu linha pro id %s", alvo)
             return {}
-        return {str(alvo): float(preco_vigente(r.data[0]))}
+        preco = float(preco_vigente(r.data[0]))
+        logger.info("oferta de item: alvo=%s no carrinho, preco do banco=%.2f", alvo, preco)
+        return {str(alvo): preco}
     except Exception:
         logger.warning("Não deu pra ler o preço do item %s da oferta", alvo, exc_info=True)
         # Devolve vazio: o evaluate recusa a oferta. É o lado certo pra errar —
