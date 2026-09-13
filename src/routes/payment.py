@@ -1723,6 +1723,58 @@ def processar_pagamento_cartao():
 
 
 # ✅ WEBHOOK COM LOGS DETALHADOS PARA DIAGNÓSTICO
+def _avisar_loja_pedido_pago(pedido_id, restaurant_id):
+    """Push de PEDIDO NOVO pra loja, no instante em que o pagamento aprova.
+
+    ⚠️ ESTE AVISO NÃO EXISTIA, E O BURACO ERA EXATAMENTE AQUI.
+
+    Em 13/09/2026 a Pamela pediu na Me Mimei Confeitaria (pedido #1006, PIX
+    aprovado). A loja estava aberta, com token de push válido — e não tocou
+    nada. Ficou 12 minutos parado até o Diego mandar WhatsApp. A resposta dela
+    foi "Vou aceitar não tocou".
+
+    POR QUE PASSOU DESPERCEBIDO TANTO TEMPO
+
+    O push de pedido novo existe, e está certo — mas mora em `orders.py`, na
+    rota que cria o pedido AGUARDANDO PAGAMENTO. Pedido pago online nasce por
+    OUTRO caminho (aqui no payment.py) e só vira pedido de verdade quando o
+    webhook aprova. Nesse caminho ninguém avisava ninguém: o webhook trocava o
+    status pra 'pending' — o comentário dele até diz "ativa o pedido para o
+    restaurante" — e a loja só descobria na próxima sondagem da tela, calada.
+
+    É o mesmo buraco de sempre: regra que entra num caminho de pedido e não no
+    outro. Ver a nota `inksa-dois-caminhos-pedido`.
+
+    O `type: new_order` não é enfeite — o service worker do web usa ele pra
+    decidir o `requireInteraction`, que é o que faz o aviso FICAR na tela em
+    vez de sumir em segundos. E `urgente=True` manda no canal de alta
+    importância do Android, que é o que faz barulho.
+
+    Nunca levanta exceção: pedido pago não pode falhar porque o aviso falhou.
+    """
+    try:
+        from ..services.notification_service import send_push_notification
+        r = (supabase_client.table('restaurant_profiles')
+             .select('fcm_token').eq('id', str(restaurant_id)).limit(1).execute())
+        token = (r.data or [{}])[0].get('fcm_token')
+        if not token:
+            # Não é detalhe: loja sem token NUNCA vai ser avisada, e isso
+            # precisa aparecer no log antes de virar pedido perdido.
+            logging.warning("⚠️ Pedido %s aprovado e a loja %s não tem token de push",
+                            pedido_id, restaurant_id)
+            return
+        send_push_notification(
+            token,
+            "Novo pedido recebido!",
+            "Você tem um novo pedido para confirmar",
+            {"order_id": str(pedido_id), "type": "new_order"},
+            urgente=True,
+        )
+        logging.info("🔔 Loja %s avisada do pedido %s", restaurant_id, pedido_id)
+    except Exception as e:
+        logging.warning("Falha ao avisar a loja do pedido %s: %s", pedido_id, e)
+
+
 @mp_payment_bp.route('/pagamentos/webhook_mp', methods=['POST'])
 def mercadopago_webhook():
     webhook_secret = os.environ.get("MERCADO_PAGO_WEBHOOK_SECRET")
@@ -1888,6 +1940,10 @@ def mercadopago_webhook():
                         
                         if dados_verificacao.get('status') == 'pending':
                             logging.info("🎉 SUCESSO TOTAL! Pedido atualizado corretamente!")
+                            # Mesmo buraco do webhook do Asaas: o status virava
+                            # 'pending' e ninguém avisava a loja.
+                            _avisar_loja_pedido_pago(external_reference,
+                                                     pedido_do_bd.get('restaurant_id'))
                         else:
                             logging.error(f"⚠️ PROBLEMA! Status esperado: 'pending', mas está: {dados_verificacao.get('status')}")
                     else:
@@ -2029,6 +2085,8 @@ def asaas_webhook():
                 'payment_provider': 'asaas',
             }).eq('id', pedido_id).execute()
             logging.info(f"🎉 Pedido {pedido_id} APROVADO via Asaas ({event})")
+            # A loja PRECISA saber agora. Ver o porquê em _avisar_loja_pedido_pago.
+            _avisar_loja_pedido_pago(pedido_id, pedido.get('restaurant_id'))
 
         elif event == 'PAYMENT_REFUNDED':
             supabase_client.table('orders').update({
