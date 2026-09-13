@@ -1274,6 +1274,10 @@ def disparar_relampago(banner_id):
             "tokens_limpos": len(invalidos),
             "publico": publico, "rodada": rodada,
             "sobraram": sobraram,
+            # O MOTIVO da falha vai junto. Sem isto o admin via "0 enviados" e
+            # não tinha como saber se foi token vencido, credencial do Firebase
+            # ou rede — e quem estava do outro lado (eu) também não.
+            "erros": (res.get("erros") or [])[:3],
         }}), 200
 
     except Exception:

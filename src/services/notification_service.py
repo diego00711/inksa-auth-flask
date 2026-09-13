@@ -207,6 +207,14 @@ def send_campaign(destinos: list, title: str, body: str, data: dict = None) -> d
         except Exception as e:
             logger.warning("FCM campanha: falha em %s: %s", str(client_id)[:8], e)
             resultado["falhas"] += 1
+            # GUARDA O MOTIVO, não só a contagem.
+            #
+            # Em 13/09/2026 o Diego testou o push da oferta relâmpago e nada
+            # chegou. Eu passei meia hora conferindo service worker, token e
+            # primeiro plano — e não tinha como saber o que o FCM tinha dito,
+            # porque aqui só se contava "1 falha". "Falhou" sem motivo não é
+            # diagnóstico, é adivinhação.
+            resultado.setdefault("erros", []).append(f"{type(e).__name__}: {e}")
 
     logger.info("FCM campanha: %d enviados, %d falhas, %d inválidos",
                 resultado["enviados"], resultado["falhas"], len(resultado["invalidos"]))
