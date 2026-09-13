@@ -3,6 +3,7 @@
 from flask import request, jsonify
 from ..utils.helpers import get_db_connection, get_user_id_from_token
 import os
+import logging
 import traceback
 from flask import Blueprint
 import psycopg2
@@ -241,13 +242,18 @@ def handle_profile():
             if 'opening_hours' in updates and updates['opening_hours'] is not None:
                 updates['opening_hours'] = psycopg2.extras.Json(updates['opening_hours'])
 
+            # Avisos dos Correios sobre o endereço. Nasce vazio aqui em cima
+            # porque a resposta lá embaixo sempre lê esta lista — o bloco que a
+            # preenche é condicional, esta linha não pode ser.
+            _avisos_endereco = []
+
             # Geocode server-side: se o endereço está sendo salvo sem coordenadas,
             # resolve lat/lng aqui (fallback para quando o front não conseguiu).
             if ('address_street' in updates or 'address_city' in updates) and \
                not (updates.get('latitude') and updates.get('longitude')):
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _c:
                     _c.execute(
-                        "SELECT address_street, address_number, address_neighborhood, address_city, address_state, latitude, longitude FROM restaurant_profiles WHERE user_id = %s",
+                        "SELECT address_street, address_number, address_neighborhood, address_city, address_state, address_zipcode, latitude, longitude FROM restaurant_profiles WHERE user_id = %s",
                         (user_id,),
                     )
                     _cur_prof = _c.fetchone() or {}
@@ -261,6 +267,25 @@ def handle_profile():
                     if _lat is not None:
                         updates['latitude'] = _lat
                         updates['longitude'] = _lng
+
+                # CONFERE O ENDEREÇO CONTRA OS CORREIOS.
+                #
+                # Não bloqueia — avisa. A Me Mimei salvou "nº 126, Guarujá, CEP
+                # 88521-000" em 27/08/2026 e o CEP cobre os números 493 a 1564:
+                # o número fica no outro trecho da rua. Ninguém tinha como
+                # perceber, e o erro só apareceu em 13/09 com o entregador
+                # rodando à toa e a cliente esperando.
+                #
+                # A base dos Correios tem buraco (loteamento novo, rua sem faixa
+                # cadastrada), então travar o cadastro trocaria um problema raro
+                # por um comum. O aviso sobe na resposta e quem decide é gente.
+                _cep = updates.get('address_zipcode', _cur_prof.get('address_zipcode'))
+                if _cep:
+                    try:
+                        from ..utils.cep_correios import confere_endereco
+                        _avisos_endereco = confere_endereco(_cep, _number, _neigh)
+                    except Exception:
+                        logging.warning("Conferência de CEP falhou", exc_info=True)
 
             # Ao ABRIR o restaurante, registra heartbeat (o job de limpeza fecha
             # restaurantes abertos sem heartbeat recente — sessão abandonada/token expirado)
@@ -302,7 +327,14 @@ def handle_profile():
                 conn.commit()
                 if not updated:
                     return jsonify({"status": "error", "error": "Profile not found"}), 404
-                return jsonify({"status": "success", "data": dict(updated)})
+                # O salvamento deu certo; os avisos dos Correios vão JUNTO, pra
+                # a tela poder mostrar "salvo, mas confira isto". Sai do JSON
+                # quando não há nada a dizer, pra não obrigar quem consome a
+                # tratar uma lista vazia.
+                _resp = {"status": "success", "data": dict(updated)}
+                if _avisos_endereco:
+                    _resp["avisos_endereco"] = _avisos_endereco
+                return jsonify(_resp)
     
     except Exception as e:
         if conn: 

@@ -177,6 +177,47 @@ def geocode_cached(street, number, neighborhood, city, state, zipcode):
     return lat, lng
 
 
+def _sem_acento(s):
+    """'São Paulo' -> 'sao paulo'. Comparar cidade sem isto dá falso negativo."""
+    import unicodedata
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', str(s or '').strip().lower())
+        if unicodedata.category(c) != 'Mn'
+    )
+
+
+def _municipio_do_resultado(addr):
+    """O Nominatim chama município de nomes diferentes conforme o lugar.
+
+    `city` é o comum, mas em muito município brasileiro vem só `town`,
+    `municipality` ou `village`. Olhar só `city` faria a conferência recusar
+    endereço bom em cidade pequena — que é justamente pra onde a Inksa quer ir.
+    """
+    for chave in ('city', 'town', 'municipality', 'village', 'city_district'):
+        if addr.get(chave):
+            return addr[chave]
+    return ''
+
+
+def _municipio_bate(addr, city, state):
+    """O ponto devolvido é da cidade que foi pedida?
+
+    Fail-OPEN de propósito quando o Nominatim não diz o município: recusar sem
+    saber derrubaria endereço bom, e a consequência aqui (loja sem coordenada,
+    invisível na vitrine) é pior que a do erro que a checagem evita.
+    """
+    achado = _municipio_do_resultado(addr)
+    if not achado:
+        return True
+    if _sem_acento(achado) != _sem_acento(city):
+        return False
+    # Cidade igual em estado diferente existe (São Paulo/SP e São Paulo/RS).
+    uf = addr.get('ISO3166-2-lvl4') or ''   # ex.: 'BR-SC'
+    if state and uf and len(uf) >= 2:
+        return _sem_acento(uf[-2:]) == _sem_acento(state)
+    return True
+
+
 def geocode_address(street, number, neighborhood, city, state, zipcode):
     """
     Geocodifica um endereço completo para latitude e longitude usando Nominatim (OpenStreetMap).
@@ -220,7 +261,9 @@ def geocode_address(street, number, neighborhood, city, state, zipcode):
         'q': full_address,
         'format': 'json',
         'limit': 1,
-        'addressdetails': 0,
+        # 1, e não 0: é de `address` que sai a cidade usada pra conferir se o
+        # ponto devolvido é mesmo da cidade pedida. Ver _municipio_bate().
+        'addressdetails': 1,
         # Sem isto, "Centro, Lages, SC" pode casar com um Centro em outro
         # pais. Os apps ja mandavam countrycodes=br; o backend nao mandava.
         'countrycodes': 'br',
@@ -229,12 +272,31 @@ def geocode_address(street, number, neighborhood, city, state, zipcode):
     try:
         response = requests.get(nominatim_url, params=params, headers=headers, timeout=8)
         response.raise_for_status() # Lança um erro para status HTTP 4xx/5xx
-        
+
         results = response.json()
-        
+
         if results and len(results) > 0:
             lat = float(results[0].get('lat'))
             lon = float(results[0].get('lon'))
+            # ⚠️ CONFERE A CIDADE ANTES DE ACEITAR.
+            #
+            # Sem isto o Nominatim devolve o "mais parecido" que achou no
+            # Brasil inteiro, e a gente grava como se fosse. Medido em
+            # 13/09/2026: o MESMO texto ("Rua Rodolfo Reis Figueira, 76, São
+            # Miguel, Lages") existe duas vezes nos endereços de cliente — um
+            # em Lages e outro a 81 km, em outro município. Ponto errado desses
+            # não é detalhe: vira entregador dirigindo pra fora da cidade e
+            # frete calculado em cima de uma distância que não existe.
+            #
+            # Comparar CIDADE, e não distância de um centro fixo: a plataforma
+            # é multi-cidade de propósito (ver platform_max_delivery_radius).
+            # Qualquer raio chumbado em Lages quebraria a expansão.
+            if city and not _municipio_bate(results[0].get('address') or {}, city, state):
+                logging.warning(
+                    "Geocodificação RECUSADA para '%s': resultado caiu em '%s', "
+                    "não em '%s'. Coordenada descartada.",
+                    full_address, _municipio_do_resultado(results[0].get('address') or {}), city)
+                return None, None
             logging.info(f"Geocodificação bem-sucedida para '{full_address}': Lat={lat}, Lon={lon}")
             return lat, lon
         else:
