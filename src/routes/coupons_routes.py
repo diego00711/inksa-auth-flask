@@ -909,7 +909,7 @@ def reservar_relampago(banner_id):
                         AND (b.ends_at   IS NULL OR b.ends_at   >= NOW())) AS no_ar,
                        c.id AS coupon_id, c.code, c.reserva_minutos,
                        c.is_active AS cupom_ativo, c.max_uses, c.uses_count,
-                       r.slug
+                       c.menu_item_id, r.slug
                   FROM banners b
                   LEFT JOIN coupons c            ON c.id = b.coupon_id
                   LEFT JOIN restaurant_profiles r ON r.id = b.restaurant_id
@@ -967,6 +967,8 @@ def reservar_relampago(banner_id):
         return jsonify({"status": "success", "data": {
             "codigo": b['code'],
             "slug": b['slug'],
+            # Pra onde a tela leva: com item, abre o produto; sem, cai na loja.
+            "menu_item_id": str(b['menu_item_id']) if b['menu_item_id'] else None,
             "restaurant_id": str(b['restaurant_id']) if b['restaurant_id'] else None,
             "expira_em": reserva['expires_at'].isoformat(),
             "primeira_vez": criou_agora,
@@ -1088,6 +1090,21 @@ def disparar_relampago(banner_id):
         return jsonify({"error": "rodada inválida"}), 400
     so_app_fechado = corpo.get('so_app_fechado', True) is not False
 
+    # QUANTAS PESSOAS AVISAR DESTA VEZ.
+    #
+    # Existe pra não prometer 50 lanches quando só há 10. O `max_uses` já impede
+    # o 11º de USAR, mas aí o estrago já foi feito: 40 pessoas recebem um convite
+    # e levam "esta oferta acabou" na cara. Avisar de 10 em 10 e repetir é o que
+    # transforma um teto num ritmo.
+    #
+    # 1 = mandar pra UMA pessoa. Serve pra testar em si mesmo antes de soltar.
+    # Vazio/0 = sem limite (todo mundo que se encaixar no público).
+    try:
+        quantos = int(corpo.get('quantos') or 0)
+    except (TypeError, ValueError):
+        quantos = 0
+    quantos = max(0, quantos)
+
     from ..services.notification_service import send_campaign
 
     conn = get_db_connection()
@@ -1125,6 +1142,15 @@ def disparar_relampago(banner_id):
 
             campanha = "relampago:%s:%s" % (banner_id, rodada)
             destinos = _publico_do_relampago(cur, b, publico, so_app_fechado, campanha)
+
+            # Corta DEPOIS de montar a lista: quem sobrar continua elegível e
+            # entra no próximo disparo, porque o `push_campaign_log` só registra
+            # quem recebeu de verdade. Assim "mandar de 10 em 10" funciona
+            # apertando o mesmo botão de novo.
+            sobraram = 0
+            if quantos and len(destinos) > quantos:
+                sobraram = len(destinos) - quantos
+                destinos = destinos[:quantos]
 
             # Teto diário: só na primeira rodada (ver o aviso no topo).
             if rodada == 'inicio' and destinos:
@@ -1199,6 +1225,7 @@ def disparar_relampago(banner_id):
             "falhas": res.get('falhas', 0),
             "tokens_limpos": len(invalidos),
             "publico": publico, "rodada": rodada,
+            "sobraram": sobraram,
         }}), 200
 
     except Exception:
@@ -1291,6 +1318,7 @@ def criar_relampago(banner_id):
         minimo = 0.0
 
     codigo = (d.get('code') or '').strip().upper()
+    item_id = (d.get('menu_item_id') or '').strip() or None
 
     conn = get_db_connection()
     if not conn:
@@ -1321,22 +1349,39 @@ def criar_relampago(banner_id):
                 base = _re.sub(r'[^A-Z0-9]', '', (loja['restaurant_name'] or 'LOJA').upper())[:10]
                 codigo = f"RELAMPAGO{base}"
 
+            # Item: com ele, `discount_value` deixa de ser desconto e passa a
+            # ser o PREÇO ALVO do item ("X-Bacon a R$ 9,99"). Sem ele, o cupom
+            # desconta o pedido inteiro — e é assim que a Coca saía de graça.
+            if item_id:
+                cur.execute("SELECT id, name, price FROM menu_items "
+                            "WHERE id = %s AND restaurant_id = %s",
+                            (item_id, restaurant_id))
+                it = cur.fetchone()
+                if not it:
+                    return jsonify({"error": "Item não encontrado nessa loja"}), 404
+                if valor >= float(it['price'] or 0):
+                    return jsonify({"error": f"O preço da oferta (R$ {valor:.2f}) tem que ser "
+                                             f"MENOR que o do item (R$ {float(it['price']):.2f})"}), 400
+                tipo = 'item_price'
+                descricao = f"Relâmpago — {it['name']} por R$ {valor:.2f}"
+            else:
+                descricao = f"Oferta relâmpago — {loja['restaurant_name']}"
+
             cur.execute("""
                 INSERT INTO coupons
                     (code, discount_type, discount_value, min_order_value,
                      max_uses, uses_count, max_uses_per_client, valid_until,
                      is_active, restaurant_id, paid_by, description,
-                     somente_digitado, reserva_minutos)
-                VALUES (%s, %s, %s, %s, %s, 0, 1, %s, TRUE, %s, 'platform', %s, TRUE, %s)
+                     somente_digitado, reserva_minutos, menu_item_id)
+                VALUES (%s, %s, %s, %s, %s, 0, 1, %s, TRUE, %s, 'platform', %s, TRUE, %s, %s)
                 RETURNING id, code
             """, (codigo, tipo, valor, minimo, max_uses, b['ends_at'],
-                  restaurant_id,
-                  f"Oferta relâmpago — {loja['restaurant_name']}", minutos))
+                  restaurant_id, descricao, minutos, item_id))
             cupom = cur.fetchone()
 
             cur.execute("UPDATE banners SET coupon_id = %s, restaurant_id = %s, "
-                        "updated_at = NOW() WHERE id = %s",
-                        (cupom['id'], restaurant_id, str(banner_id)))
+                        "menu_item_id = %s, updated_at = NOW() WHERE id = %s",
+                        (cupom['id'], restaurant_id, item_id, str(banner_id)))
             conn.commit()
 
         return jsonify({"status": "success", "data": {
