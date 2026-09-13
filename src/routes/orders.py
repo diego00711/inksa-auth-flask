@@ -231,36 +231,44 @@ DELIVERY_INCIDENT_POLICY = {
     'payment_issue':      {'fault': 'none',       'pay_restaurant': False, 'pay_courier': False, 'refund_client': False},
 }
 
-def generate_verification_code(length=6):
-    """Código NUMÉRICO de 6 dígitos que autoriza retirada e entrega.
+# Tentativas erradas de código que UM PEDIDO aguenta antes de travar.
+#
+# É ISTO que segura o código de 4 dígitos em pé — não o tamanho dele.
+MAX_TENTATIVAS_CODIGO = 5
 
-    secrets, NÃO random: o `random` do Python é Mersenne Twister, previsível
-    depois de observar saídas suficientes. E estes códigos não são enfeite —
-    o de entrega é o que libera "entregue" (com repasse ao entregador) e o de
-    retirada é o que tira o pedido do balcão. Quem consegue prever a sequência
-    fecha entrega sem entregar.
 
-    POR QUE 6 DÍGITOS, E NÃO 4
+def generate_verification_code(length=4):
+    """Código NUMÉRICO de 4 dígitos que autoriza retirada e entrega."""
 
-    Era 4 caracteres de um alfabeto de 32 (letras e números, sem I/O/0/1):
-    1.048.576 combinações. Passar pra número puro facilita a vida de quem
-    digita — teclado numérico, sem confundir O com zero, fácil de falar em voz
-    alta —, mas encurta o espaço de busca de um jeito perigoso.
-
-    A conta, contra o limite de 10 tentativas/min das rotas /pickup e
-    /complete, e considerando que um pedido vive cerca de uma hora:
-
-        4 dígitos  =    10.000 -> 600 tentativas na janela = 6% de chance
-        6 dígitos  = 1.000.000 -> 600 tentativas na janela = 0,06% de chance
-
-    Seis dígitos devolvem a segurança que os 4 alfanuméricos tinham. Quatro
-    dígitos numéricos NÃO servem aqui: 6% por pedido é alto demais pra uma
-    fraude que fecha entrega sem entregar.
-
-    ⚠️ O que protege não é o tamanho sozinho — é o tamanho SOMADO ao limite de
-    tentativas. Se um dia alguém tirar o @limiter dessas rotas, isto aqui vira
-    vidraça.
-    """
+    # secrets, NÃO random: o `random` do Python é Mersenne Twister, previsível
+    # depois de observar saídas suficientes. E estes códigos não são enfeite — o
+    # de entrega é o que libera "entregue" (com repasse ao entregador) e o de
+    # retirada é o que tira o pedido do balcão. Quem prevê a sequência fecha
+    # entrega sem entregar.
+    #
+    # POR QUE 4 DÍGITOS VOLTARAM A SER SEGUROS (13/09/2026)
+    #
+    # Isto já foi 4, virou 6, e voltou pra 4 — por um motivo que mudou no meio.
+    #
+    # Com 6 dígitos e o limite de 10 tentativas/MINUTO das rotas /pickup e
+    # /complete, um pedido que vive uma hora aguenta 600 tentativas:
+    #
+    #     4 dígitos  =    10.000 -> 600 tentativas = 6%    de chance
+    #     6 dígitos  = 1.000.000 -> 600 tentativas = 0,06% de chance
+    #
+    # Por isso 6 era obrigatório: o freio era de TEMPO, e tempo o atacante tem.
+    #
+    # Agora o freio é por PEDIDO (orders.code_attempts, teto de 5). O espaço de
+    # busca deixa de ser o que decide:
+    #
+    #     4 dígitos + 5 tentativas por pedido = 0,05% -- melhor que os 0,06%
+    #     que os 6 dígitos davam.
+    #
+    # E 4 dígitos é o que a pessoa consegue falar no telefone, digitar de luva e
+    # ditar na porta do cliente sem errar. Decisão do Diego, e a conta fecha.
+    #
+    # ⚠️ O QUE PROTEGE É O TETO POR PEDIDO. Se alguém tirar o code_attempts,
+    # isto aqui vira vidraça — e pior que antes, porque o código encolheu.
     return ''.join(secrets.choice(string.digits) for _ in range(length))
 
 def is_valid_status_transition(current_status, new_status):
@@ -735,7 +743,8 @@ def pickup_order(order_id):
 
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT status, pickup_code, restaurant_id, delivery_id FROM orders WHERE id = %s", (str(order_id),))
+            cur.execute("SELECT status, pickup_code, restaurant_id, delivery_id, code_attempts "
+                        "FROM orders WHERE id = %s", (str(order_id),))
             order = cur.fetchone()
             if not order:
                 return jsonify({"error": "Pedido não encontrado"}), 404
@@ -758,8 +767,31 @@ def pickup_order(order_id):
                     "error": f"Pedido não está pronto para retirada. Status atual: {STATUS_DISPLAY_MAP.get(order['status'])}"
                 }), 400
 
+            # TETO DE TENTATIVAS POR PEDIDO — é isto que segura os 4 dígitos.
+            #
+            # O @limiter das rotas trava por MINUTO, e tempo o atacante tem: um
+            # pedido que vive uma hora aguentaria 600 palpites, o que contra
+            # 10.000 combinações dá 6% de chance. Contando por PEDIDO, são 5 no
+            # total e o espaço de busca deixa de decidir (0,05%).
+            #
+            # Conta a tentativa ANTES de responder, senão errar de graça é
+            # exatamente o que o atacante quer.
+            if int(order.get('code_attempts') or 0) >= MAX_TENTATIVAS_CODIGO:
+                return jsonify({
+                    "error": "Muitas tentativas com código errado neste pedido. "
+                             "Fale com o suporte da Inksa para liberar."
+                }), 429
+
             if order['pickup_code'] != code:
-                return jsonify({"error": "Código de retirada inválido"}), 403
+                cur.execute("UPDATE orders SET code_attempts = COALESCE(code_attempts,0) + 1 "
+                            "WHERE id = %s", (str(order_id),))
+                conn.commit()
+                restam = MAX_TENTATIVAS_CODIGO - int(order.get('code_attempts') or 0) - 1
+                return jsonify({
+                    "error": "Código de retirada inválido."
+                             + (f" Restam {restam} tentativa(s)." if restam > 0 else
+                                " Foi a última tentativa: fale com o suporte.")
+                }), 403
 
             cur.execute("UPDATE orders SET status = 'delivering', updated_at = NOW() WHERE id = %s", (str(order_id),))
             # Busca client_id para notificação antes do commit
@@ -836,6 +868,11 @@ def complete_order(order_id):
                 # Sem esta coluna a liquidação em dinheiro devolveria 0 e o
                 # cupom da própria loja acabaria pago pela Inksa.
                 "COALESCE(o.desconto_parceiro, 0) AS desconto_parceiro, "
+                # Sem esta, o teto de tentativas lê None -> 0 -> NUNCA trava, e
+                # o código de 4 dígitos fica exposto justamente na rota que
+                # move dinheiro. Coluna que falta num SELECT não dá erro: o
+                # .get() devolve None e a regra some calada.
+                "COALESCE(o.code_attempts, 0) AS code_attempts, "
                 "rp.delivery_type "
                 "FROM orders o JOIN restaurant_profiles rp ON rp.id = o.restaurant_id "
                 "WHERE o.id = %s",
@@ -882,9 +919,32 @@ def complete_order(order_id):
             # pedido. Com entregador Inksa o código continua obrigatório — se o
             # cliente não aparece, o caminho certo é a ocorrência, não marcar
             # entregue sem prova.
+            # TETO DE TENTATIVAS POR PEDIDO — é isto que segura os 4 dígitos.
+            #
+            # O @limiter das rotas trava por MINUTO, e tempo o atacante tem: um
+            # pedido que vive uma hora aguentaria 600 palpites, o que contra
+            # 10.000 combinações dá 6% de chance. Contando por PEDIDO, são 5 no
+            # total e o espaço de busca deixa de decidir (0,05%).
+            #
+            # Conta a tentativa ANTES de responder, senão errar de graça é
+            # exatamente o que o atacante quer.
+            if int(order.get('code_attempts') or 0) >= MAX_TENTATIVAS_CODIGO:
+                return jsonify({
+                    "error": "Muitas tentativas com código errado neste pedido. "
+                             "Fale com o suporte da Inksa para liberar."
+                }), 429
+
             if code:
                 if order['delivery_code'] != code:
-                    return jsonify({"error": "Código de entrega inválido"}), 403
+                    cur.execute("UPDATE orders SET code_attempts = COALESCE(code_attempts,0) + 1 "
+                                "WHERE id = %s", (str(order_id),))
+                    conn.commit()
+                    restam = MAX_TENTATIVAS_CODIGO - int(order.get('code_attempts') or 0) - 1
+                    return jsonify({
+                        "error": "Código de entrega inválido."
+                                 + (f" Restam {restam} tentativa(s)." if restam > 0 else
+                                    " Foi a última tentativa: fale com o suporte.")
+                    }), 403
                 confirmado_por, nota_confirmacao = 'code', None
             else:
                 # NA RETIRADA O CÓDIGO É SEMPRE OBRIGATÓRIO, mesmo em loja de
