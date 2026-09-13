@@ -179,11 +179,17 @@ def precos_para_o_cupom(coupon, itens_do_pedido):
         return {}
 
     # O item está mesmo no carrinho? Sem isso, uma consulta por nada.
-    tem_no_carrinho = any(
-        str((i or {}).get('menu_item_id') or '') == str(alvo)
-        for i in (itens_do_pedido or [])
-    )
+    recebidos = [str((i or {}).get('menu_item_id') or '') for i in (itens_do_pedido or [])]
+    tem_no_carrinho = any(r == str(alvo) for r in recebidos)
     if not tem_no_carrinho:
+        # LOGA O QUE CHEGOU, não só "não achei".
+        #
+        # Em 13/09/2026 o Diego estava com o item DA OFERTA no carrinho e mesmo
+        # assim levava "Adicione o item da oferta ao carrinho". Daqui não dava
+        # pra saber se o app mandou id errado, id nenhum, ou outro formato —
+        # e sem isso a investigação vira adivinhação sobre o aparelho dele.
+        logger.info("oferta de item: alvo=%s nao esta no carrinho; recebidos=%r",
+                    alvo, recebidos)
         return {}
 
     try:
