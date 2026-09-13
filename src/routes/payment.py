@@ -21,7 +21,7 @@ from ..utils.precos import preco_vigente
 from ..utils.helpers import get_user_id_from_token, supabase_admin
 from .orders import generate_verification_code
 from ..utils.coupons import (evaluate_coupon, consume_coupon, contar_usos_do_cliente,
-                             reserva_do_cliente)
+                             reserva_do_cliente, precos_para_o_cupom)
 from ..utils import asaas
 from ..utils.gateway import payment_provider
 from src.extensions import limiter
@@ -883,6 +883,10 @@ def criar_preferencia_mercado_pago():
                     # o evaluate nem olha.
                     reserva_expira_em=reserva_do_cliente(
                         (coupon or {}).get('id'), client_profile_id),
+                    # Oferta presa a um item: sem o preço DO BANCO daquele item
+                    # no carrinho, o evaluate recusa. Cupom comum nem consulta.
+                    itens_do_carrinho=precos_para_o_cupom(
+                        coupon, dados_pedido.get('itens') or []),
                 )
                 if evalr['valid'] and evalr['discount_amount'] > 0:
                     backend_discount = evalr['discount_amount']
@@ -1417,6 +1421,10 @@ def _validar_itens_e_total(items_from_request, delivery_fee, coupon_code, subtot
             # arquivo grava pedido em DUAS funções, e regra que entra só numa
             # vira buraco — já aconteceu neste projeto.
             reserva_expira_em=reserva_do_cliente((coupon or {}).get('id'), client_id),
+            # ⚠️ MESMA regra do outro caminho. Este arquivo grava pedido em DUAS
+            # funções; sem isto aqui, a oferta de item valeria como cupom comum
+            # no cartão e descontaria o pedido inteiro.
+            itens_do_carrinho=precos_para_o_cupom(coupon, items_from_request or []),
         )
         if evalr['valid'] and evalr['discount_amount'] > 0:
             desconto = evalr['discount_amount']

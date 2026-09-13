@@ -7,7 +7,8 @@ from flask import Blueprint, request, jsonify
 import psycopg2
 import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token
-from ..utils.coupons import evaluate_coupon, contar_usos_do_cliente, reserva_do_cliente
+from ..utils.coupons import (evaluate_coupon, contar_usos_do_cliente, reserva_do_cliente,
+                             precos_para_o_cupom)
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +266,11 @@ def validate_coupon():
         # Validação/cálculo centralizado (mesma lógica do fechamento do pedido)
         result = evaluate_coupon(dict(coupon) if coupon else None, order_total, delivery_fee,
                                  restaurant_id=restaurant_id, usos_deste_cliente=usos,
-                                 client_id=cliente_id, reserva_expira_em=reserva)
+                                 client_id=cliente_id, reserva_expira_em=reserva,
+                                 # O preview precisa da MESMA conta do fechamento,
+                                 # senão o carrinho diz "vale" e o pedido recusa.
+                                 itens_do_carrinho=precos_para_o_cupom(
+                                     coupon, (request.get_json(silent=True) or {}).get('itens') or []))
         if not result["valid"]:
             return jsonify({"valid": False, "message": result["message"]}), 200
 
@@ -358,7 +363,14 @@ def cupons_disponiveis():
                 r = evaluate_coupon(c, subtotal, delivery_fee,
                                     restaurant_id=restaurant_id,
                                     usos_deste_cliente=usos, client_id=client_id,
-                                    reserva_expira_em=reserva_do_cliente(c['id'], client_id, cur))
+                                    reserva_expira_em=reserva_do_cliente(c['id'], client_id, cur),
+                                    # Esta rota é GET e não recebe os itens do
+                                    # carrinho — e não precisa: oferta relâmpago
+                                    # nasce `somente_digitado = TRUE`, então ela
+                                    # é filtrada da consulta lá em cima e nunca
+                                    # chega aqui. Lista vazia deixa a recusa
+                                    # explícita se um dia chegar.
+                                    itens_do_carrinho={})
                 if not r["valid"] or r["discount_amount"] <= 0:
                     continue
                 saida.append({

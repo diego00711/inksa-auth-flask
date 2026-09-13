@@ -153,8 +153,59 @@ def reserva_do_cliente(coupon_id, client_id, cur=None):
                 pass
 
 
+def precos_para_o_cupom(coupon, itens_do_pedido):
+    """Preço do item que ESTE cupom cobre, se ele estiver no carrinho.
+
+    Devolve {menu_item_id: preco_unitario} ou {} — o formato que
+    `evaluate_coupon(itens_do_carrinho=...)` espera.
+
+    POR QUE ESTA FUNÇÃO EXISTE, EM VEZ DE USAR OS PREÇOS JÁ CALCULADOS
+
+    No fluxo online o cupom é avaliado ANTES do laço que precifica os itens
+    (payment.py: cupom por volta da linha 874, itens a partir da 1020).
+    Reordenar aquilo pra ter os preços na mão mexeria no caminho que grava
+    pedido de verdade, pra ganhar o que uma consulta resolve.
+
+    Então: só busca quando o cupom É de item (`menu_item_id`), e busca SÓ
+    aquele item. Cupom comum não paga nada por isto.
+
+    O preço vem do BANCO, nunca do que o app mandou — o app manda o preço que
+    ele acha, e cupom que confia nisso é cupom que o cliente escolhe o valor.
+    Usa `preco_vigente`, o mesmo resolvedor do fechamento, pra respeitar
+    promoção da loja.
+    """
+    alvo = (coupon or {}).get('menu_item_id')
+    if not alvo:
+        return {}
+
+    # O item está mesmo no carrinho? Sem isso, uma consulta por nada.
+    tem_no_carrinho = any(
+        str((i or {}).get('menu_item_id') or '') == str(alvo)
+        for i in (itens_do_pedido or [])
+    )
+    if not tem_no_carrinho:
+        return {}
+
+    try:
+        from .helpers import supabase as _sb
+        from .precos import preco_vigente
+        r = (_sb.table('menu_items')
+               .select('price, promo_price')
+               .eq('id', str(alvo)).limit(1).execute())
+        if not r.data:
+            return {}
+        return {str(alvo): float(preco_vigente(r.data[0]))}
+    except Exception:
+        logger.warning("Não deu pra ler o preço do item %s da oferta", alvo, exc_info=True)
+        # Devolve vazio: o evaluate recusa a oferta. É o lado certo pra errar —
+        # aceitar sem saber o preço é o que fazia a plataforma pagar por item
+        # que nem estava no carrinho.
+        return {}
+
+
 def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=None,
-                    usos_deste_cliente=0, client_id=None, reserva_expira_em=None):
+                    usos_deste_cliente=0, client_id=None, reserva_expira_em=None,
+                    itens_do_carrinho=None):
     """Valida um cupom já buscado (dict da linha) e calcula o desconto.
 
     `coupon` pode vir do psycopg2 (DictCursor) ou do supabase (select '*') —
@@ -251,6 +302,51 @@ def evaluate_coupon(coupon, subtotal, delivery_fee=0.0, now=None, restaurant_id=
     if subtotal < min_val:
         return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
                 "message": f"Pedido mínimo para este cupom é R$ {min_val:.2f}"}
+
+    # ─── OFERTA PRESA A UM ITEM ──────────────────────────────────────────────
+    #
+    # "Lanche a R$ 9,99" não é desconto no pedido, é PREÇO daquele lanche. Com
+    # `menu_item_id` preenchido, `discount_value` é o preço ALVO do item, e o
+    # desconto é a diferença — sobre UMA unidade.
+    #
+    # Por que uma unidade: sem isso, 10 X-Bacon sairiam a R$ 9,99 cada. A oferta
+    # é pra trazer o cliente, não pra abastecer a rua.
+    #
+    # `itens_do_carrinho` = {menu_item_id: preco_unitario}. Sem ele não dá pra
+    # saber se o item está no carrinho, e a oferta é RECUSADA — este é o único
+    # caminho em que um dado ausente não pode virar "vale": era assim que a
+    # Coca de R$ 6 saía de graça.
+    item_alvo = coupon.get('menu_item_id')
+    if item_alvo:
+        if not itens_do_carrinho:
+            return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                    "message": "Adicione o item da oferta ao carrinho para usá-la"}
+        preco_no_carrinho = None
+        for k, v in (itens_do_carrinho or {}).items():
+            if str(k) == str(item_alvo):
+                preco_no_carrinho = _to_float(v)
+                break
+        if preco_no_carrinho is None:
+            return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                    "message": "Esta oferta é de um item específico — adicione ele ao carrinho"}
+
+        preco_alvo = _to_float(coupon.get('discount_value'))
+        discount = round(max(0.0, preco_no_carrinho - preco_alvo), 2)
+        if discount <= 0:
+            # O item já custa igual ou menos que o preço da oferta (promoção da
+            # loja, por exemplo). Não há o que descontar, e fingir que há faria
+            # a plataforma pagar por nada.
+            return {"valid": False, "discount_amount": 0.0, "discount_type": disc_type,
+                    "message": "Este item já está por um preço igual ou melhor"}
+
+        paid_by = (coupon.get('paid_by') or 'platform').lower()
+        r_disc, p_disc = (discount, 0.0) if paid_by == 'restaurant' else (0.0, discount)
+        return {"valid": True, "discount_amount": discount,
+                "discount_type": "item_price", "message": "Oferta aplicada!",
+                "paid_by": paid_by, "exclusivo": bool(coupon.get('reserva_minutos')),
+                "menu_item_id": str(item_alvo),
+                "restaurant_discount": round(r_disc, 2),
+                "platform_discount": round(p_disc, 2)}
 
     value = _to_float(coupon.get('discount_value'))
     if disc_type == 'percentage':
