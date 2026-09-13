@@ -232,22 +232,22 @@ def validate_coupon():
             # buscado — senão o cliente veria "cupom válido" e o desconto seria
             # recusado no fechamento.
             cur.execute("""
-                -- ⚠️ ESTA LISTA É CONTRATO COM evaluate_coupon(). Coluna nova
-                -- que a avaliação leia e não esteja aqui não dá erro: o
-                -- `.get()` devolve None e a regra some em silêncio.
+                -- ⚠️ `*` DE PROPÓSITO. NÃO trocar por lista de colunas.
                 --
-                -- Foi o que aconteceu em 13/09/2026, no teste do Diego:
-                --   menu_item_id  ausente -> a oferta de item caía no switch de
-                --                            tipos e virava "Tipo de cupom
-                --                            inválido" com a reserva viva
-                --   reserva_minutos ausente -> TODA a trava da oferta relâmpago
-                --                            (login / reserva / expirou) ficava
-                --                            inerte aqui no preview
-                -- O fechamento não tinha o furo porque lá é `select('*')`.
-                SELECT id, code, discount_type, discount_value, min_order_value,
-                       max_uses, uses_count, max_uses_per_client, valid_until,
-                       is_active, restaurant_id, paid_by, owner_client_id,
-                       menu_item_id, reserva_minutos
+                -- Aqui havia uma lista enumerada, e ela esqueceu duas colunas
+                -- que `evaluate_coupon` lê. Coluna que falta num SELECT não dá
+                -- erro nenhum: o `.get()` devolve None e a regra some calada.
+                -- Em 13/09/2026, no teste do Diego:
+                --   menu_item_id ausente    -> a oferta presa a item caía no
+                --      switch de discount_type e virava "Tipo de cupom
+                --      inválido", com a reserva do cliente ainda correndo
+                --   reserva_minutos ausente -> TODA a trava da relâmpago
+                --      (entre na conta / toque na oferta / expirou) inerte
+                -- O fechamento do pedido nunca teve o furo — lá é `select('*')`.
+                --
+                -- A linha NUNCA vai crua pra resposta: o retorno lá embaixo é
+                -- montado campo a campo. Então `*` não expõe coluna nova.
+                SELECT *
                 FROM public.coupons
                 WHERE UPPER(code) = %s
                   AND (restaurant_id IS NULL OR restaurant_id = %s)
@@ -347,14 +347,9 @@ def cupons_disponiveis():
             # Três origens: o cupom PESSOAL dele, o da LOJA do carrinho e o de
             # CAMPANHA da plataforma. Cupom pessoal de outra pessoa nem é lido.
             cur.execute("""
-                -- Mesmo contrato do /validate: ver o aviso lá em cima. Aqui o
-                -- relâmpago nem chega (é `somente_digitado`), mas um cupom
-                -- preso a item que NÃO seja relâmpago chegaria — e sem estas
-                -- duas colunas ele sumiria da lista sem motivo aparente.
-                SELECT id, code, discount_type, discount_value, min_order_value,
-                       max_uses, uses_count, max_uses_per_client, valid_until,
-                       is_active, restaurant_id, paid_by, owner_client_id, description,
-                       menu_item_id, reserva_minutos
+                -- ⚠️ `*` de propósito, mesmo motivo do /validate lá em cima.
+                -- A saída desta rota também é montada campo a campo.
+                SELECT *
                   FROM public.coupons
                  WHERE is_active
                    -- Cupom de campanha externa não entra na lista do carrinho:
