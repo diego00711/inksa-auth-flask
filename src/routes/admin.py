@@ -2979,3 +2979,113 @@ def admin_upload_logo(restaurant_id):
     finally:
         if conn:
             conn.close()
+
+
+@admin_bp.route("/restaurants/<uuid:restaurant_id>/migrar-fotos", methods=["POST"])
+@admin_required
+def admin_migrar_fotos(restaurant_id):
+    """Traz as fotos do cardápio de um servidor de fora pro nosso armazenamento.
+
+    POR QUE EXISTE
+
+    O cardápio da Mister fast-food foi importado em 13/09/2026 e as 60 imagens
+    continuaram apontando pro servidor da Come Come — um CONCORRENTE. Se eles
+    tirarem as imagens, renomearem a pasta ou bloquearem link de fora, o
+    cardápio inteiro fica cego de uma vez, e a gente descobre pelo cliente.
+
+    Serve pra qualquer importação futura: é a mesma situação toda vez que um
+    cardápio entra de fora.
+
+    ⚠️ EM LOTES, e não tudo de uma vez. Cada imagem é um download mais um
+    upload; 60 delas passam do tempo que o gunicorn dá pra uma requisição
+    (ver a nota do apagão de 13/09 — o worker morre em silêncio). `limite`
+    controla o lote e a resposta diz quantas faltam: é apertar de novo.
+
+    ⚠️ CONFERE O TIPO DO CONTEÚDO, não o status. Host que devolve página de
+    erro com HTTP 200 é comum — este projeto já foi mordido por isso com os
+    sons do app do cliente. Sem esta checagem a gente guardaria HTML dentro de
+    um arquivo .jpg e a foto sumiria sem erro nenhum.
+
+    Nunca desiste no meio: imagem que falhar fica como está, com o motivo na
+    resposta, e as outras seguem.
+    """
+    corpo = request.get_json(silent=True) or {}
+    try:
+        limite = max(1, min(int(corpo.get("limite") or 20), 40))
+    except (TypeError, ValueError):
+        limite = 20
+
+    if supabase is None:
+        return jsonify({"status": "error", "error": "Armazenamento indisponível"}), 503
+
+    # O que já é nosso não se toca. Sem isto, apertar duas vezes baixaria e
+    # subiria tudo de novo, gerando lixo no balde a cada clique.
+    marca_nossa = (os.environ.get("SUPABASE_URL") or "supabase.co").rstrip("/")
+
+    conn = None
+    migradas, falhas, restantes = [], [], 0
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "error": "Erro de conexão com o banco"}), 500
+
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                "SELECT id, name, image_url FROM menu_items "
+                " WHERE restaurant_id = %s AND image_url IS NOT NULL AND image_url <> '' "
+                "   AND image_url NOT LIKE %s "
+                " ORDER BY name",
+                (str(restaurant_id), f"%{marca_nossa}%"),
+            )
+            pendentes = [dict(r) for r in cur.fetchall()]
+
+        restantes = max(0, len(pendentes) - limite)
+
+        for item in pendentes[:limite]:
+            url_antiga = item["image_url"]
+            try:
+                r = requests.get(url_antiga, timeout=12, headers={
+                    "User-Agent": "InksaDelivery/1.0 (suporte@inksadelivery.com.br)"
+                })
+                tipo = (r.headers.get("content-type") or "").lower()
+                if r.status_code != 200 or not tipo.startswith("image/"):
+                    falhas.append({"item": item["name"],
+                                   "motivo": f"resposta {r.status_code}, tipo '{tipo or 'desconhecido'}'"})
+                    continue
+                if len(r.content) > 6 * 1024 * 1024:
+                    falhas.append({"item": item["name"], "motivo": "imagem acima de 6 MB"})
+                    continue
+
+                ext = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+                       "image/webp": ".webp", "image/gif": ".gif"}.get(tipo.split(";")[0], ".jpg")
+                nome = f"{restaurant_id}/{item['id']}{ext}"
+
+                supabase.storage.from_("menu-images").upload(
+                    path=nome, file=r.content,
+                    file_options={"content-type": tipo.split(";")[0], "upsert": "true"},
+                )
+                nova = supabase.storage.from_("menu-images").get_public_url(nome)
+
+                with conn.cursor() as cur2:
+                    cur2.execute("UPDATE menu_items SET image_url = %s, updated_at = NOW() WHERE id = %s",
+                                 (nova, item["id"]))
+                conn.commit()
+                migradas.append(item["name"])
+            except Exception as e:
+                conn.rollback()
+                falhas.append({"item": item["name"], "motivo": f"{type(e).__name__}: {e}"[:120]})
+
+        log_admin_action_auto(
+            "cardapio.migrar-fotos",
+            f"Loja {restaurant_id}: {len(migradas)} fotos trazidas, {len(falhas)} falhas, {restantes} restantes")
+
+        return jsonify({"status": "success", "data": {
+            "migradas": len(migradas), "falhas": falhas, "restantes": restantes,
+            "nomes": migradas,
+        }}), 200
+    except Exception as e:
+        logging.exception("Falha ao migrar fotos da loja %s", restaurant_id)
+        return jsonify({"status": "error", "error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
