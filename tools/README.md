@@ -63,3 +63,35 @@ SELECT table_name, string_agg(column_name, ',' ORDER BY ordinal_position) AS col
  WHERE table_schema = 'public'
  GROUP BY table_name ORDER BY table_name;
 ```
+
+---
+
+# tools/acha_storage_contaminado.py
+
+Procura acesso a Storage feito pelo cliente Supabase que FAZ LOGIN.
+
+```bash
+python tools/acha_storage_contaminado.py src
+```
+
+## Por que existe
+
+`supabase` e `supabase_admin` nascem com a MESMA service key, então parecem
+iguais. Não são: o `supabase` é o que roda `sign_in_with_password`, e o
+supabase-py, ao logar, troca o header Authorization do **cliente inteiro** pelo
+token daquele usuário. Dali em diante, naquele worker, `supabase.storage` vai
+como `authenticated` em vez de `service_role`.
+
+`service_role` tem BYPASSRLS. `authenticated` não. Então gravar em bucket sem
+policy de INSERT falha com `new row violates row-level security` — **só nos
+workers onde alguém já logou**. Worker recém-subido funciona.
+
+Em 14/09/2026 a capa da Mister fast-food subiu e, 30 minutos depois, a migração
+de fotos falhou. Mesma rota, mesmo código, worker diferente.
+
+| bucket | tem policy de INSERT? | sintoma |
+|---|---|---|
+| menu-images, logos, incident-photos, rewards-images | **não** | quebra no worker contaminado |
+| avatars, delivery-avatars, banner-images | sim (`authenticated`) | nunca reclamou — e foi isso que escondeu |
+
+26 chamadas em 8 arquivos foram migradas. A trava impede a volta.

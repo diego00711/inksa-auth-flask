@@ -1,7 +1,7 @@
 # src/routes/restaurant.py - VERSÃO CORRIGIDA COM CARDÁPIO
 
 from flask import request, jsonify
-from ..utils.helpers import get_db_connection, get_user_id_from_token
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase_admin
 import os
 import logging
 import traceback
@@ -480,13 +480,13 @@ def upload_logo():
 
         unique_filename = f"{user_id}_{str(uuid.uuid4())}{file_ext}"
         
-        upload_result = supabase.storage.from_("logos").upload(
+        upload_result = supabase_admin.storage.from_("logos").upload(
             path=unique_filename,
             file=file.read(),
             file_options={"content-type": file.mimetype, "upsert": "true"}
         )
         
-        public_url = supabase.storage.from_("logos").get_public_url(unique_filename)
+        public_url = supabase_admin.storage.from_("logos").get_public_url(unique_filename)
         
         conn = get_db_connection()
         if not conn:

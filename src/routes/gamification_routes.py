@@ -10,7 +10,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 import psycopg2.extras
 
-from ..utils.helpers import get_user_id_from_token, supabase
+from ..utils.helpers import get_user_id_from_token, supabase, supabase_admin
 
 _CORS_ORIGINS = [
     "http://localhost:3000", "http://127.0.0.1:3000",
@@ -1927,14 +1927,14 @@ def upload_reward_image():
 
     try:
         file_content = file.read()
-        supabase.storage.from_(_REWARD_IMG_BUCKET).upload(
+        supabase_admin.storage.from_(_REWARD_IMG_BUCKET).upload(
             path=unique_name,
             file=file_content,
             file_options={"content-type": content_type},
         )
 
         try:
-            url_resp = supabase.storage.from_(_REWARD_IMG_BUCKET).get_public_url(unique_name)
+            url_resp = supabase_admin.storage.from_(_REWARD_IMG_BUCKET).get_public_url(unique_name)
             if hasattr(url_resp, "data"):
                 public_url = url_resp.data
             elif hasattr(url_resp, "publicURL"):

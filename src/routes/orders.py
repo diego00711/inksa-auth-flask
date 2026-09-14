@@ -10,7 +10,7 @@ import psycopg2
 import psycopg2.extras
 import logging
 import sentry_sdk
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from src.extensions import limiter
 from ..utils.pedido_itens import eh_linha_de_frete
 
@@ -1497,12 +1497,12 @@ def upload_incident_photo(order_id):
         import os as _os
         ext = _os.path.splitext(file.filename)[1] or '.jpg'
         unique = f"incident_{order_id}_{uuid.uuid4()}{ext}"
-        supabase.storage.from_("incident-photos").upload(
+        supabase_admin.storage.from_("incident-photos").upload(
             path=unique,
             file=file.read(),
             file_options={"content-type": file.mimetype or "image/jpeg", "upsert": "true"},
         )
-        public_url = supabase.storage.from_("incident-photos").get_public_url(unique)
+        public_url = supabase_admin.storage.from_("incident-photos").get_public_url(unique)
         return jsonify({"status": "success", "photo_url": public_url}), 200
     except Exception as e:
         logger.error(f"Erro ao enviar foto da ocorrência {order_id}: {e}", exc_info=True)

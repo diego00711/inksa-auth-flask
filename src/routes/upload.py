@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
-from ..utils.helpers import supabase, get_user_id_from_token
+from ..utils.helpers import supabase, supabase_admin, get_user_id_from_token
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ def upload_banner_image():
             logger.info(f"Arquivo lido: {len(file_content)} bytes")
             
             # CORREÇÃO: Upload para o bucket 'banner-images' com a sintaxe correta
-            response = supabase.storage.from_('banner-images').upload(
+            response = supabase_admin.storage.from_('banner-images').upload(
                 path=unique_filename,
                 file=file_content,
                 file_options={
@@ -86,7 +86,7 @@ def upload_banner_image():
             
             # Obter URL pública da imagem
             try:
-                public_url_response = supabase.storage.from_('banner-images').get_public_url(unique_filename)
+                public_url_response = supabase_admin.storage.from_('banner-images').get_public_url(unique_filename)
                 
                 if hasattr(public_url_response, 'error') and public_url_response.error:
                     logger.error(f"Erro ao obter URL pública: {public_url_response.error}")
@@ -162,7 +162,7 @@ def delete_banner_image(filename):
         
         try:
             # Deletar do Supabase Storage
-            response = supabase.storage.from_('banner-images').remove([filename])
+            response = supabase_admin.storage.from_('banner-images').remove([filename])
             
             if hasattr(response, 'error') and response.error:
                 logger.error(f"Erro ao deletar do Supabase: {response.error}")

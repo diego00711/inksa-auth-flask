@@ -29,7 +29,30 @@ logger = logging.getLogger(__name__)
 #                       usuário logado -> erro "not_admin" / "session_not_found".
 #   `supabase_admin` -> instância dedicada, service_role, que NUNCA faz
 #                       sign_in/sign_up. Use SEMPRE este para auth.admin.*
-#                       (delete_user, update_user_by_id, invite_user_by_email…).
+#                       (delete_user, update_user_by_id, invite_user_by_email…)
+#                       E TAMBÉM para TODO acesso a Storage (ver abaixo).
+#
+# ⚠️ O STORAGE CAI NA MESMA ARMADILHA — e isso passou despercebido por meses.
+#
+# Este aviso existia desde sempre, mas concluía só "não use para auth.admin.*".
+# A contaminação não é do módulo auth: quando `sign_in_with_password` roda, o
+# supabase-py troca o header Authorization do CLIENTE INTEIRO pelo token do
+# usuário. PostgREST e Storage passam a ir como `authenticated`, não como
+# `service_role`.
+#
+# Consequência real, encontrada em 14/09/2026: `service_role` tem BYPASSRLS,
+# `authenticated` não. Então subir arquivo num bucket SEM policy de INSERT
+# (menu-images, logos, incident-photos, rewards-images) falha com
+#     StorageException 400: "new row violates row-level security"
+# ...mas SÓ nos workers onde alguém já logou. No worker recém-subido funciona.
+# É por isso que a capa da loja subiu e a migração de fotos, 30 min depois,
+# não — mesma rota, mesmo código, worker diferente.
+#
+# Os buckets com policy pra `authenticated` (avatars, delivery-avatars,
+# banner-images) nunca deram sinal, o que escondeu o problema.
+#
+# REGRA: `supabase_admin.storage`, SEMPRE. `supabase.storage` não existe mais
+# em nenhuma rota (26 chamadas migradas em 8 arquivos).
 supabase: Optional[Client] = None
 supabase_admin: Optional[Client] = None
 try:

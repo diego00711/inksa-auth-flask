@@ -15,7 +15,7 @@ from decimal import Decimal
 from functools import wraps
 from flask_cors import cross_origin
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from ..utils.geocoding_utils import geocode_address
 
 logging.basicConfig(level=logging.INFO)
@@ -518,12 +518,12 @@ def upload_avatar():
         # ✅ CORREÇÃO 2: Tentar remover arquivo antigo primeiro (opcional)
         try:
             # Listar arquivos existentes para este perfil
-            file_list = supabase.storage.from_(bucket_name).list("public")
+            file_list = supabase_admin.storage.from_(bucket_name).list("public")
             old_files = [f for f in file_list if f['name'].startswith(f"{profile_id}_")]
             
             if old_files:
                 old_file_paths = [f"public/{f['name']}" for f in old_files]
-                supabase.storage.from_(bucket_name).remove(old_file_paths)
+                supabase_admin.storage.from_(bucket_name).remove(old_file_paths)
                 logger.info(f"Arquivos antigos removidos: {old_file_paths}")
                 
         except Exception as cleanup_error:
@@ -536,7 +536,7 @@ def upload_avatar():
         
         while retry_count < max_retries:
             try:
-                result = supabase.storage.from_(bucket_name).upload(
+                result = supabase_admin.storage.from_(bucket_name).upload(
                     path=file_path,
                     file=file_content,
                     file_options={"content-type": avatar_file.content_type}
@@ -567,7 +567,7 @@ def upload_avatar():
 
         # ✅ CORREÇÃO 4: Obter URL pública corretamente
         try:
-            public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
+            public_url = supabase_admin.storage.from_(bucket_name).get_public_url(file_path)
             logger.info(f"URL pública gerada: {public_url}")
         except Exception as url_error:
             logger.error(f"Erro ao gerar URL pública: {url_error}")
@@ -648,12 +648,12 @@ def delete_avatar():
             # Remover arquivos do Supabase Storage
             try:
                 bucket_name = "delivery-avatars"
-                file_list = supabase.storage.from_(bucket_name).list("public")
+                file_list = supabase_admin.storage.from_(bucket_name).list("public")
                 user_files = [f for f in file_list if f['name'].startswith(f"{profile_id}_")]
                 
                 if user_files:
                     file_paths = [f"public/{f['name']}" for f in user_files]
-                    supabase.storage.from_(bucket_name).remove(file_paths)
+                    supabase_admin.storage.from_(bucket_name).remove(file_paths)
                     logger.info(f"Arquivos de avatar removidos: {file_paths}")
                     
             except Exception as storage_error:

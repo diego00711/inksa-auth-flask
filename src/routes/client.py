@@ -3,7 +3,7 @@
 import logging
 from flask import Blueprint, jsonify, request
 import psycopg2.extras
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from functools import wraps
 import os
 import uuid
@@ -270,14 +270,14 @@ def upload_avatar(conn):
         unique_filename = f"avatar_{user_id}_{uuid.uuid4()}{file_ext}"
         
         # Faz o upload para o bucket 'avatars' no Supabase Storage
-        supabase.storage.from_("avatars").upload(
+        supabase_admin.storage.from_("avatars").upload(
             path=unique_filename,
             file=file.read(),
             file_options={"content-type": file.mimetype, "upsert": "true"}
         )
         
         # Obtém a URL pública do arquivo que acabamos de enviar
-        public_url = supabase.storage.from_("avatars").get_public_url(unique_filename)
+        public_url = supabase_admin.storage.from_("avatars").get_public_url(unique_filename)
         
         # Atualiza a coluna 'avatar_url' na tabela 'client_profiles'
         with conn.cursor() as cur:

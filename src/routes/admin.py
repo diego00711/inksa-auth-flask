@@ -1424,7 +1424,7 @@ def upload_admin_avatar():
         import uuid as _uuid
         filename = f"admin_{user_id}_{_uuid.uuid4().hex}.{ext}"
 
-        supabase.storage.from_("banner-images").upload(
+        supabase_admin.storage.from_("banner-images").upload(
             path=filename,
             file=file.read(),
             file_options={"content-type": f"image/{ext}", "upsert": "true"},
@@ -2938,19 +2938,19 @@ def admin_upload_logo(restaurant_id):
 
     conn = None
     try:
-        if supabase is None:
+        if supabase_admin is None:
             return jsonify({"status": "error", "error": "Armazenamento indisponível"}), 503
 
         # Nome com o id da LOJA na frente: dá pra saber de quem é o arquivo
         # olhando o balde, e o uuid evita que uma troca de capa sobrescreva a
         # anterior enquanto alguém ainda está com a vitrine aberta.
         nome = f"{restaurant_id}_{uuid.uuid4()}{ext}"
-        supabase.storage.from_("logos").upload(
+        supabase_admin.storage.from_("logos").upload(
             path=nome,
             file=dados,
             file_options={"content-type": arquivo.mimetype or "image/jpeg", "upsert": "true"},
         )
-        url = supabase.storage.from_("logos").get_public_url(nome)
+        url = supabase_admin.storage.from_("logos").get_public_url(nome)
 
         conn = get_db_connection()
         if not conn:
@@ -3015,7 +3015,7 @@ def admin_migrar_fotos(restaurant_id):
     except (TypeError, ValueError):
         limite = 20
 
-    if supabase is None:
+    if supabase_admin is None:
         return jsonify({"status": "error", "error": "Armazenamento indisponível"}), 503
 
     # O que já é nosso não se toca. Sem isto, apertar duas vezes baixaria e
@@ -3060,11 +3060,11 @@ def admin_migrar_fotos(restaurant_id):
                        "image/webp": ".webp", "image/gif": ".gif"}.get(tipo.split(";")[0], ".jpg")
                 nome = f"{restaurant_id}/{item['id']}{ext}"
 
-                supabase.storage.from_("menu-images").upload(
+                supabase_admin.storage.from_("menu-images").upload(
                     path=nome, file=r.content,
                     file_options={"content-type": tipo.split(";")[0], "upsert": "true"},
                 )
-                nova = supabase.storage.from_("menu-images").get_public_url(nome)
+                nova = supabase_admin.storage.from_("menu-images").get_public_url(nome)
 
                 with conn.cursor() as cur2:
                     cur2.execute("UPDATE menu_items SET image_url = %s, updated_at = NOW() WHERE id = %s",
@@ -3124,7 +3124,7 @@ def admin_fotos_em_lote(restaurant_id):
     dados = envio.read()
     if len(dados) > 40 * 1024 * 1024:
         return jsonify({"status": "error", "error": "O pacote passa de 40 MB"}), 400
-    if supabase is None:
+    if supabase_admin is None:
         return jsonify({"status": "error", "error": "Armazenamento indisponível"}), 503
 
     import zipfile, unicodedata, io as _io
@@ -3164,10 +3164,10 @@ def admin_fotos_em_lote(restaurant_id):
                         continue
                     tipo = {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
                     caminho = f"{restaurant_id}/{item_id}{ext}"
-                    supabase.storage.from_("menu-images").upload(
+                    supabase_admin.storage.from_("menu-images").upload(
                         path=caminho, file=conteudo,
                         file_options={"content-type": tipo, "upsert": "true"})
-                    url = supabase.storage.from_("menu-images").get_public_url(caminho)
+                    url = supabase_admin.storage.from_("menu-images").get_public_url(caminho)
                     with conn.cursor() as c2:
                         c2.execute("UPDATE menu_items SET image_url = %s, updated_at = NOW() WHERE id = %s",
                                    (url, item_id))

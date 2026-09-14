@@ -8,7 +8,7 @@ import psycopg2
 import psycopg2.extras
 from datetime import datetime, date, time
 import logging
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from functools import wraps
 from flask_cors import CORS
 from ..utils.precos import normalizar_promo
@@ -272,8 +272,8 @@ def upload_menu_item_image():
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{user_id}-{uuid.uuid4()}{file_ext}"
         path_on_storage = f"public/{unique_filename}"
-        supabase.storage.from_("menu-images").upload(path=path_on_storage, file=file.read(), file_options={"content-type": file.mimetype})
-        public_url = supabase.storage.from_("menu-images").get_public_url(path_on_storage)
+        supabase_admin.storage.from_("menu-images").upload(path=path_on_storage, file=file.read(), file_options={"content-type": file.mimetype})
+        public_url = supabase_admin.storage.from_("menu-images").get_public_url(path_on_storage)
         return jsonify({"status": "success", "data": {"image_url": public_url}}), 200
     except Exception as e:
         traceback.print_exc()
