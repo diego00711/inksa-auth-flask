@@ -648,7 +648,31 @@ def update_order_status(order_id):
             # FCM: notificacoes por mudanca de status
             try:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ncur:
-                    if new_status_internal == 'accepted':
+                    if new_status_internal == 'cancelled' and updated_order.get('delivery_id'):
+                        # ⚠️ O ENTREGADOR JÁ ESTÁ NA RUA. AVISA ELE.
+                        #
+                        # A loja pode cancelar em 'accepted_by_delivery' — ou
+                        # seja, com alguém já indo buscar. Até 14/09/2026 esse
+                        # cancelamento avisava o restaurante e mais ninguém: o
+                        # entregador seguia dirigindo e descobria no balcão.
+                        # Gasolina, tempo e uma conversa ruim com a loja.
+                        #
+                        # URGENTE de propósito: é o único push do app do
+                        # entregador que faz ele PARAR. Chegar tarde aqui custa
+                        # a viagem inteira.
+                        _ncur.execute(
+                            "SELECT user_id FROM delivery_profiles WHERE id = %s",
+                            (str(updated_order['delivery_id']),))
+                        _dp = _ncur.fetchone()
+                        if _dp:
+                            _tk = _get_fcm_token(_ncur, 'delivery_profiles', str(_dp['user_id']))
+                            _notify(_tk, "Pedido cancelado ❌",
+                                    "A loja cancelou este pedido. Não precisa mais ir buscar.",
+                                    {"order_id": str(order_id), "status": "cancelled",
+                                     "type": "order_cancelled",
+                                     "url": "/delivery/entregas"},
+                                    urgente=True)
+                    elif new_status_internal == 'accepted':
                         # Notifica cliente
                         cli_token = _get_fcm_token(_ncur, 'client_profiles', str(updated_order['client_id']))
                         _notify(cli_token, "Pedido aceito! 🎉", "Seu pedido foi confirmado pelo restaurante",
