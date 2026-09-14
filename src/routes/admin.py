@@ -3089,3 +3089,106 @@ def admin_migrar_fotos(restaurant_id):
     finally:
         if conn:
             conn.close()
+
+
+@admin_bp.route("/restaurants/<uuid:restaurant_id>/fotos-em-lote", methods=["POST"])
+@admin_required
+def admin_fotos_em_lote(restaurant_id):
+    """Recebe um ZIP de fotos e casa cada uma com o item pelo NOME DO ARQUIVO.
+
+    POR QUE EXISTE
+
+    A outra rota (migrar-fotos) puxa a imagem do endereço que já está no item —
+    serve quando o cardápio veio importado com as fotos hospedadas fora. Não
+    serve quando a foto está na máquina de quem cadastra, que é o caso comum:
+    o lojista manda as fotos por WhatsApp e alguém precisa pô-las no sistema,
+    uma a uma, 60 vezes.
+
+    Em 14/09/2026 o Diego pediu explicitamente pra NÃO depender do servidor da
+    Come Come (um concorrente) pra montar o cardápio da Mister fast-food. Com
+    isto ele sobe um arquivo só, do computador dele.
+
+    COMO CASA: pelo nome do arquivo, comparado ao nome do item sem acento e sem
+    pontuação. "x-bacon-com-ovo.jpg" acha "X - bacon com ovo".
+
+    ⚠️ NÃO ADIVINHA POR SEMELHANÇA. Só casa quando bate exatamente (depois de
+    normalizar). Tentei casar por aproximação ao montar este cardápio e o
+    resultado foi foto de sanduíche numa porção de coração — duas vezes.
+    Foto errada num cardápio é pior que foto nenhuma: a pessoa pede achando
+    que vem uma coisa e recebe outra. O que não casar volta na resposta, pra
+    quem enviou renomear e mandar de novo.
+    """
+    if "zip" not in request.files:
+        return jsonify({"status": "error", "error": "Envie o arquivo .zip no campo 'zip'"}), 400
+    envio = request.files["zip"]
+    dados = envio.read()
+    if len(dados) > 40 * 1024 * 1024:
+        return jsonify({"status": "error", "error": "O pacote passa de 40 MB"}), 400
+    if supabase is None:
+        return jsonify({"status": "error", "error": "Armazenamento indisponível"}), 503
+
+    import zipfile, unicodedata, io as _io
+
+    def chave(t):
+        t = unicodedata.normalize("NFD", (t or "").lower())
+        t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+        return re.sub(r"[^a-z0-9]+", "", t)
+
+    conn = None
+    postas, sem_item, falhas = [], [], []
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "error": "Erro de conexão com o banco"}), 500
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT id, name FROM menu_items WHERE restaurant_id = %s", (str(restaurant_id),))
+            porchave = {chave(r["name"]): (r["id"], r["name"]) for r in cur.fetchall()}
+
+        with zipfile.ZipFile(_io.BytesIO(dados)) as z:
+            for nome_arq in z.namelist():
+                if nome_arq.endswith("/"):
+                    continue
+                base = os.path.splitext(os.path.basename(nome_arq))[0]
+                ext = os.path.splitext(nome_arq)[1].lower()
+                if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+                    continue
+                alvo = porchave.get(chave(base))
+                if not alvo:
+                    sem_item.append(os.path.basename(nome_arq))
+                    continue
+                item_id, item_nome = alvo
+                try:
+                    conteudo = z.read(nome_arq)
+                    if len(conteudo) > 6 * 1024 * 1024:
+                        falhas.append({"arquivo": nome_arq, "motivo": "acima de 6 MB"})
+                        continue
+                    tipo = {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
+                    caminho = f"{restaurant_id}/{item_id}{ext}"
+                    supabase.storage.from_("menu-images").upload(
+                        path=caminho, file=conteudo,
+                        file_options={"content-type": tipo, "upsert": "true"})
+                    url = supabase.storage.from_("menu-images").get_public_url(caminho)
+                    with conn.cursor() as c2:
+                        c2.execute("UPDATE menu_items SET image_url = %s, updated_at = NOW() WHERE id = %s",
+                                   (url, item_id))
+                    conn.commit()
+                    postas.append(item_nome)
+                except Exception as e:
+                    conn.rollback()
+                    falhas.append({"arquivo": nome_arq, "motivo": f"{type(e).__name__}: {e}"[:110]})
+
+        log_admin_action_auto("cardapio.fotos-em-lote",
+                              f"Loja {restaurant_id}: {len(postas)} fotos aplicadas, "
+                              f"{len(sem_item)} sem item correspondente, {len(falhas)} falhas")
+        return jsonify({"status": "success", "data": {
+            "aplicadas": len(postas), "nomes": postas,
+            "sem_item": sem_item, "falhas": falhas,
+        }}), 200
+    except zipfile.BadZipFile:
+        return jsonify({"status": "error", "error": "O arquivo não é um .zip válido"}), 400
+    except Exception as e:
+        logging.exception("Falha no envio em lote de fotos da loja %s", restaurant_id)
+        return jsonify({"status": "error", "error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
