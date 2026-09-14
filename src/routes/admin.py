@@ -1,6 +1,7 @@
 # src/routes/admin.py
 import os
 import re
+import uuid
 import csv
 import io
 import logging
@@ -2886,3 +2887,95 @@ def admin_site_visitas():
     finally:
         try: conn.close()
         except Exception: pass
+
+
+@admin_bp.route("/restaurants/<uuid:restaurant_id>/logo", methods=["POST"])
+@admin_required
+def admin_upload_logo(restaurant_id):
+    """Sobe a capa/logo de UMA loja, pelo admin.
+
+    POR QUE EXISTE
+
+    Até 14/09/2026 só o PARCEIRO conseguia pôr a própria logo (rota
+    /api/restaurant/upload-logo, amarrada ao token dele). Quem cadastra loja
+    nova é o Diego — e loja sem imagem aparece na vitrine como um quadrado
+    laranja com um prato desenhado. Ou seja: a loja estreia parecendo
+    abandonada, e fica assim até o lojista lembrar de fazer uma coisa que ele
+    nem sabe que existe.
+
+    A Mister fast-food estava exatamente assim, com 60 itens no cardápio e
+    `logo_url` nulo.
+
+    ⚠️ NÃO afrouxei a rota do parceiro. Ela continua só dele, amarrada ao
+    próprio token; esta aqui é outra porta, com @admin_required. Alargar a
+    existente pra aceitar um id de fora seria dar ao parceiro a chance de
+    escrever no perfil de outro.
+
+    ⚠️ TETO DE TAMANHO, que a rota do parceiro não tem. Sem isto um arquivo de
+    50 MB entra no balde e vira custo de armazenamento e de banda de todo
+    cliente que abrir a vitrine. 4 MB é folgado pra uma capa.
+    """
+    if "logo" not in request.files:
+        return jsonify({"status": "error", "error": "Envie o arquivo no campo 'logo'"}), 400
+
+    arquivo = request.files["logo"]
+    if not arquivo.filename:
+        return jsonify({"status": "error", "error": "Arquivo sem nome"}), 400
+
+    ext = os.path.splitext(arquivo.filename)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        return jsonify({"status": "error", "error": "Use JPG, PNG ou WEBP"}), 400
+
+    dados = arquivo.read()
+    TETO = 4 * 1024 * 1024
+    if len(dados) > TETO:
+        return jsonify({
+            "status": "error",
+            "error": f"Imagem muito grande ({len(dados)//1024//1024} MB). O limite é 4 MB.",
+        }), 400
+    if not dados:
+        return jsonify({"status": "error", "error": "Arquivo vazio"}), 400
+
+    conn = None
+    try:
+        if supabase is None:
+            return jsonify({"status": "error", "error": "Armazenamento indisponível"}), 503
+
+        # Nome com o id da LOJA na frente: dá pra saber de quem é o arquivo
+        # olhando o balde, e o uuid evita que uma troca de capa sobrescreva a
+        # anterior enquanto alguém ainda está com a vitrine aberta.
+        nome = f"{restaurant_id}_{uuid.uuid4()}{ext}"
+        supabase.storage.from_("logos").upload(
+            path=nome,
+            file=dados,
+            file_options={"content-type": arquivo.mimetype or "image/jpeg", "upsert": "true"},
+        )
+        url = supabase.storage.from_("logos").get_public_url(nome)
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "error": "Erro de conexão com o banco"}), 500
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE restaurant_profiles SET logo_url = %s, updated_at = NOW() "
+                "WHERE id = %s RETURNING restaurant_name",
+                (url, str(restaurant_id)),
+            )
+            linha = cur.fetchone()
+            if not linha:
+                conn.rollback()
+                return jsonify({"status": "error", "error": "Loja não encontrada"}), 404
+            conn.commit()
+
+        log_admin_action_auto("restaurante.logo",
+                              f"Capa da loja {linha[0]} ({restaurant_id}) atualizada pelo admin")
+        return jsonify({"status": "success", "data": {"logo_url": url, "restaurant_name": linha[0]}}), 200
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logging.exception("Falha ao subir logo da loja %s", restaurant_id)
+        return jsonify({"status": "error", "error": f"Não foi possível salvar a imagem: {e}"}), 500
+    finally:
+        if conn:
+            conn.close()
