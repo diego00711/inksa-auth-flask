@@ -182,6 +182,16 @@ _TEXT_DEFAULTS: dict[str, str] = {
     # nem toda campanha tem prazo. Então: opcional dos dois lados, e explícito.
     "referral_starts_at": "",
     "referral_ends_at": "",
+
+    # Canal de push do ENTREGADOR. Vazio = `inksa_urgente` (o antigo), que e o
+    # comportamento de sempre. Por `inksa_urgente_v2` so DEPOIS que o APK novo
+    # estiver na rua: o v2 nasce no nativo (MainActivity.java) junto com
+    # res/raw/inksa_alerta.mp3, e quem estiver no APK velho nao tem esse canal
+    # — push pra canal inexistente cai no canal padrao, que e SILENCIOSO.
+    #
+    # ⚠️ Virar isto cedo demais deixa entregador sem aviso sonoro e ninguem
+    # descobre por erro: descobre por corrida perdida.
+    "push_canal_entregador": "",
 }
 
 

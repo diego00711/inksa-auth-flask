@@ -125,6 +125,37 @@ def enviar_teste(token: str, user_type: str = "client") -> dict:
 # ⚠️ O id é contrato entre este arquivo e o JS dos apps. Mudar de um lado só
 # faz o som sumir sem erro nenhum em lugar nenhum.
 CANAL_URGENTE = 'inksa_urgente'
+# Canal NOVO do entregador (APK de 16/09/2026 em diante). Nasce no NATIVO
+# (MainActivity.java), junto com res/raw/inksa_alerta.mp3, e toca no fluxo de
+# ALARME em vez do de notificacao.
+#
+# ⚠️ POR QUE A TROCA E POR AJUSTE E NAO POR CODIGO: enquanto houver entregador
+# com o APK velho, mandar pro `_v2` deixa ELE MUDO — canal que nao existe faz o
+# Android cair no canal padrao, que e silencioso. Entao quem vira a chave e o
+# Diego, no admin, DEPOIS de o APK novo estar na rua. Sem deploy, e reversivel
+# no mesmo lugar se algo der errado.
+CANAL_URGENTE_V2 = 'inksa_urgente_v2'
+
+
+def _canal_do_entregador():
+    """Canal que o push urgente deve usar AGORA.
+
+    Le `platform_settings.push_canal_entregador`. Vazio ou desconhecido -> o
+    canal antigo, que e o comportamento de hoje. Fail-safe de proposito: errar
+    aqui e deixar entregador sem aviso sonoro, e aviso que nao toca custa
+    corrida perdida.
+    """
+    try:
+        from ..utils.platform_settings import get_settings
+        escolhido = str(get_settings().get('push_canal_entregador') or '').strip()
+    except Exception:
+        logger.exception("push_canal_entregador indisponivel; usando o canal antigo")
+        return CANAL_URGENTE, 'default'
+    if escolhido == CANAL_URGENTE_V2:
+        # ⚠️ O `sound` tem que bater com o nome do arquivo em res/raw, SEM
+        # extensao. Errar aqui nao da erro: so nao toca.
+        return CANAL_URGENTE_V2, 'inksa_alerta'
+    return CANAL_URGENTE, 'default'
 # Canal das campanhas (oferta relampago). O `_som` no nome nao e enfeite: o
 # canal `inksa_ofertas` nasceu sem som em 13/09/2026 e canal do Android e
 # IMUTAVEL -- acrescentar som ao mesmo id nao teria efeito em quem ja abriu o
@@ -167,10 +198,11 @@ def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
         # priority='high' acorda o aparelho em Doze; sem isso o push pode
         # esperar a próxima janela de sincronismo e chegar minutos depois —
         # inútil pra um pedido esperando aceite.
+        _canal, _som = _canal_do_entregador()
         notif = messaging.AndroidNotification(
             title=title, body=body,
-            channel_id=CANAL_URGENTE,
-            sound='default',
+            channel_id=_canal,
+            sound=_som,
             default_vibrate_timings=True,
         )
         config['priority'] = 'high'
