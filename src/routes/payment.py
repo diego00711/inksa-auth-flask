@@ -797,6 +797,14 @@ def criar_preferencia_mercado_pago():
             'notes': dados_pedido.get('notes', ''),
             'client_latitude': dados_pedido.get('client_latitude'),
             'client_longitude': dados_pedido.get('client_longitude'),
+            # DE ONDE veio a coordenada. O app do entregador usa isto pra
+            # decidir entre navegar por ponto ou por texto: 'gps' e o aparelho
+            # do cliente (metros), 'endereco' e geocodificacao (nivel de rua).
+            # Aceita so os dois valores conhecidos — qualquer outra coisa vira
+            # NULL, que significa "nao sei" e mantem a regra antiga.
+            'client_coord_origem': (dados_pedido.get('client_coord_origem')
+                                    if dados_pedido.get('client_coord_origem') in ('gps', 'endereco')
+                                    else None),
             # Distância do SERVIDOR quando ela existe. É ela que a trava de
             # alcance por veículo consulta depois — se ficasse a do app, a
             # trava estaria perguntando ao próprio interessado.
@@ -1625,6 +1633,14 @@ def processar_pagamento_cartao():
             'notes': d.get('notes', ''),
             'client_latitude': d.get('client_latitude'),
             'client_longitude': d.get('client_longitude'),
+            # DE ONDE veio a coordenada. O app do entregador usa isto pra
+            # decidir entre navegar por ponto ou por texto: 'gps' e o aparelho
+            # do cliente (metros), 'endereco' e geocodificacao (nivel de rua).
+            # Aceita so os dois valores conhecidos — qualquer outra coisa vira
+            # NULL, que significa "nao sei" e mantem a regra antiga.
+            'client_coord_origem': (d.get('client_coord_origem')
+                                    if d.get('client_coord_origem') in ('gps', 'endereco')
+                                    else None),
             # Distância do SERVIDOR quando ela existe. É ela que a trava de
             # alcance por veículo consulta depois — se ficasse a do app, a
             # trava estaria perguntando ao próprio interessado.

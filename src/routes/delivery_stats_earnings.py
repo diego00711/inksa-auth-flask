@@ -210,7 +210,7 @@ def get_dashboard_stats():
                     o.valor_repassado_entregador,
                     o.delivery_address, o.pickup_code,
                     o.payment_method, o.change_for,
-                    o.client_latitude, o.client_longitude,
+                    o.client_latitude, o.client_longitude, o.client_coord_origem,
                     CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
                     rp.restaurant_name,
                     rp.address_street, rp.address_number,
@@ -240,6 +240,10 @@ def get_dashboard_stats():
                     'client_name': order.get('client_name'),
                     'client_latitude': float(order['client_latitude']) if order.get('client_latitude') is not None else None,
                     'client_longitude': float(order['client_longitude']) if order.get('client_longitude') is not None else None,
+                    # Sem isto o app do entregador nao sabe se a coordenada e
+                    # do GPS (metros) ou geocodificada (nivel de rua) — e
+                    # escolhe errado entre navegar por ponto ou por texto.
+                    'client_coord_origem': order.get('client_coord_origem'),
                     'restaurant_name': order.get('restaurant_name'),
                     'restaurant_street': order.get('address_street'),
                     'restaurant_number': order.get('address_number'),
