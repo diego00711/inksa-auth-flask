@@ -135,6 +135,22 @@ CANAL_URGENTE = 'inksa_urgente'
 # Diego, no admin, DEPOIS de o APK novo estar na rua. Sem deploy, e reversivel
 # no mesmo lugar se algo der errado.
 CANAL_URGENTE_V2 = 'inksa_urgente_v2'
+# Canal do MEIO, criado pelo JS (notificationService.js) e por isso distribuido
+# por OTA -- chega a todo mundo no proximo open, sem passar pela loja.
+#
+# POR QUE ELE EXISTE, JA QUE O `_v2` E MELHOR
+# Em 16/09/2026 a tela de notificacoes do Android de um entregador nao mostrava
+# categoria nenhuma: o `inksa_urgente` nunca tinha sido criado naquele aparelho.
+# E tem um motivo provavel -- o JS pedia `sound: 'default'`, e o plugin do
+# Capacitor NAO trata 'default' como palavra especial: ele monta o caminho
+# literal `android.resource://<pkg>/raw/default`, um recurso que nao existe no
+# pacote instalado. O `_v3` nasce SEM o campo `sound`, e ai o proprio Android
+# usa o som padrao de verdade do sistema.
+#
+# ⚠️ NAO substitui o `_v2`. O plugin do Capacitor fixa USAGE_NOTIFICATION, o
+# fluxo que nao sobe com os botoes de volume; o fluxo de ALARME so no nativo.
+# O `_v3` e o degrau que da pra subir hoje, o `_v2` e o destino.
+CANAL_URGENTE_V3 = 'inksa_urgente_v3'
 
 
 def _canal_do_entregador():
@@ -155,6 +171,12 @@ def _canal_do_entregador():
         # ⚠️ O `sound` tem que bater com o nome do arquivo em res/raw, SEM
         # extensao. Errar aqui nao da erro: so nao toca.
         return CANAL_URGENTE_V2, 'inksa_alerta'
+    if escolhido == CANAL_URGENTE_V3:
+        # `default` aqui e o valor documentado do FCM para "som padrao do
+        # aparelho", e so vale em Android 7 ou anterior -- do 8 pra frente quem
+        # decide e o canal. Nao confundir com o `sound: 'default'` do JS, que e
+        # o bug que este canal conserta.
+        return CANAL_URGENTE_V3, 'default'
     return CANAL_URGENTE, 'default'
 # Canal das campanhas (oferta relampago). O `_som` no nome nao e enfeite: o
 # canal `inksa_ofertas` nasceu sem som em 13/09/2026 e canal do Android e
