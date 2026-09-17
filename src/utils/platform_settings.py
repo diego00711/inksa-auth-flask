@@ -212,7 +212,11 @@ _TEXT_DEFAULTS: dict[str, str] = {
     # ⚠️ Mexer aqui e barato, mas nao e de graca: notificacao repetida demais e
     # o caminho mais curto pro entregador desligar a notificacao do app — e ai
     # perdemos o canal inteiro, nao so o reforco.
-    "push_reforco_oferta_segundos": "15,30",
+    # ⚠️ 20 e 40 nao sao numeros redondos por acaso: `dispatch_offer_seconds`
+    # e 60, e o dono da oferta agora recebe um push em t=0 (o motor avisa quem
+    # escolheu). Assim o aviso cai uma vez em cada terco da janela dele, em vez
+    # de deixar os ultimos 30 s no silencio.
+    "push_reforco_oferta_segundos": "20,40",
 }
 
 

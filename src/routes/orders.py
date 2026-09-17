@@ -704,27 +704,75 @@ def update_order_status(order_id):
                             """, (order_id,))
                             _o = _ncur.fetchone()
                             if _o:
+                                _settings_push = _gs()
+
+                                # ATRIBUIÇÃO: ACORDAR UM, NÃO SETE.
+                                #
+                                # Com `dispatch_assign_enabled = 1` o pedido é
+                                # oferecido a UM entregador por vez e a lista do
+                                # app mostra o pedido SÓ pra ele. Avisar todos
+                                # aqui fazia seis abrirem o app pra achar a lista
+                                # vazia — e a escolha é por NOTA, não por
+                                # velocidade, então o rápido também perdia. Isso
+                                # ensina que correr não serve, que é a pior coisa
+                                # que um aviso pode ensinar.
+                                #
+                                # Rodando o motor JÁ AQUI, a oferta nasce no
+                                # mesmo instante do "Pronto" (antes ela esperava
+                                # alguém abrir o app), e quem avisa o escolhido é
+                                # o próprio tick, em _avisar_dono_da_oferta.
+                                _ofertado = False
                                 try:
-                                    _peso = float(peso_do_pedido(_ncur, _o['items']) or 0)
+                                    if int(_settings_push.get('dispatch_assign_enabled') or 0) == 1:
+                                        _run_dispatch_tick(_ncur, _settings_push)
+                                        conn.commit()
+                                        _ncur.execute(
+                                            "SELECT offer_courier_id FROM orders "
+                                            " WHERE id = %s AND offer_expires_at > NOW()", (order_id,))
+                                        _of = _ncur.fetchone()
+                                        _ofertado = bool(_of and _of['offer_courier_id'])
+                                        logger.info("Pronto #%s: motor %s", order_id,
+                                                    "ofertou a 1 entregador" if _ofertado else "nao achou ninguem elegivel")
                                 except Exception:
-                                    _peso = 0.0
-                                # A distancia entra junto: sem ela o push
-                                # acordaria a bicicleta pra uma entrega que a
-                                # lista dela ja nao mostra. Push que leva a uma
-                                # tela vazia e pior que push nenhum.
-                                _tokens = tokens_para_avisar(
-                                    _peso, _o['latitude'], _o['longitude'], _gs(),
-                                    distancia_km=_o.get('delivery_distance_km'))
-                                logger.info("Push 'entrega disponível': %d entregador(es) aptos e online (peso %.0f kg)",
-                                            len(_tokens), _peso)
-                                for _tk in _tokens:
-                                    _notify(_tk, "Entrega disponivel! 🛵",
-                                            "Um pedido esta pronto para coleta",
-                                            {"order_id": str(order_id), "status": "ready",
-                                             # idem: o worker do entregador
-                                             # espera 'new_delivery'.
-                                             "type": "new_delivery"},
-                                            urgente=True)
+                                    conn.rollback()
+                                    logger.warning("Motor de despacho falhou no 'Pronto'", exc_info=True)
+
+                                # ⚠️ REDE DE SEGURANÇA, NÃO REDUNDÂNCIA.
+                                #
+                                # O motor exige `is_available = TRUE`; o push de
+                                # broadcast usa `esta_trabalhando()`, que é
+                                # DELIBERADAMENTE mais largo — existe pra alcançar
+                                # quem está com o app fechado esperando corrida no
+                                # WhatsApp. Se o motor não achou ninguém, é
+                                # exatamente a hora em que o aviso largo é a única
+                                # coisa que traz alguém de volta pra fila.
+                                #
+                                # Ou seja: o broadcast deixou de ser o padrão e
+                                # virou o plano B. Quando o motor acha alguém, o
+                                # aviso é cirúrgico; quando não acha, acorda todo
+                                # mundo — porque aí ninguém está vendo nada mesmo.
+                                if not _ofertado:
+                                    try:
+                                        _peso = float(peso_do_pedido(_ncur, _o['items']) or 0)
+                                    except Exception:
+                                        _peso = 0.0
+                                    # A distancia entra junto: sem ela o push
+                                    # acordaria a bicicleta pra uma entrega que a
+                                    # lista dela ja nao mostra. Push que leva a uma
+                                    # tela vazia e pior que push nenhum.
+                                    _tokens = tokens_para_avisar(
+                                        _peso, _o['latitude'], _o['longitude'], _settings_push,
+                                        distancia_km=_o.get('delivery_distance_km'))
+                                    logger.info("Push 'entrega disponível' (plano B): %d entregador(es) aptos (peso %.0f kg)",
+                                                len(_tokens), _peso)
+                                    for _tk in _tokens:
+                                        _notify(_tk, "Entrega disponivel! 🛵",
+                                                "Um pedido esta pronto para coleta",
+                                                {"order_id": str(order_id), "status": "ready",
+                                                 # idem: o worker do entregador
+                                                 # espera 'new_delivery'.
+                                                 "type": "new_delivery"},
+                                                urgente=True)
 
                                 # UM TOQUE SO NAO BASTA DENTRO DE UM CAPACETE.
                                 #
@@ -1893,8 +1941,50 @@ def get_pending_restaurant_review():
         if conn:
             conn.close()
 
+def _avisar_dono_da_oferta(cur, order_id, courier_user_id, segundos):
+    """Toca no celular de quem ACABOU de receber a oferta.
+
+    ⚠️ ISTO FALTAVA, E ERA O MAIOR BURACO DO DESPACHO (achado em 17/09/2026).
+
+    O motor atribuía a oferta em silêncio. O único push que existia saía no
+    handler de `ready`, ANTES de haver oferta, e ia pra todos os aptos: seis
+    celulares tocavam pra uma vaga que o sétimo ganhava por nota. Pior, do
+    SEGUNDO entregador em diante ninguém era avisado de nada — quem recebia a
+    oferta repassada só descobria se abrisse o app por acaso, e os 60 s
+    queimavam sozinhos com o cliente esperando.
+
+    Avisando aqui, no exato ponto em que a oferta nasce, TODA oferta passa a ser
+    audível — a primeira e as repassadas — e o aviso vai só pra quem consegue
+    aceitar. A pergunta "quem eu acordo?" passa a ter a mesma resposta que
+    "quem pode pegar?", o que antes eram duas respostas diferentes.
+
+    ⚠️ Nunca propaga exceção. Push é o aviso; a oferta em si já está gravada.
+    Deixar o FCM derrubar o tick seria trocar um aviso perdido por um pedido
+    que não anda.
+
+    ⚠️ `offer_courier_id` guarda o delivery_profiles.USER_ID, não o `id` do
+    perfil. Buscar pela coluna errada devolve None sem erro nenhum.
+    """
+    try:
+        cur.execute(
+            "SELECT fcm_token FROM delivery_profiles WHERE user_id = %s",
+            (courier_user_id,))
+        row = cur.fetchone()
+        token = row['fcm_token'] if row else None
+        if not token:
+            return
+        _notify(token, "Corrida pra você! 🛵",
+                f"Você tem {int(segundos)}s para aceitar. Toque para ver.",
+                {"order_id": str(order_id), "status": "ready",
+                 # o worker do entregador espera exatamente esta chave
+                 "type": "new_delivery"},
+                urgente=True)
+    except Exception:
+        logger.warning("Aviso da oferta falhou (pedido %s)", order_id, exc_info=True)
+
+
 def _run_dispatch_tick(cur, settings):
-    """Motor de atribuição (lazy, roda no poll do entregador). Para cada pedido
+    """Motor de atribuição. Para cada pedido
     SEM entregador e SEM oferta ativa: se a oferta anterior expirou, marca quem
     'passou'; então oferta ao entregador ELEGÍVEL mais próximo (aprovado,
     disponível, cadastro completo, fora de cooldown, dentro do raio do veículo
@@ -2113,6 +2203,9 @@ def _run_dispatch_tick(cur, settings):
                     WHERE id = %s""",
                 (cand['user_id'], offer_seconds, passed, od['id']),
             )
+            # A oferta só serve se o dono souber que a tem. Ver a explicação
+            # inteira em _avisar_dono_da_oferta.
+            _avisar_dono_da_oferta(cur, od['id'], cand['user_id'], offer_seconds)
         else:
             # Ninguém elegível agora. Limpa a oferta; se a lista de "passou"
             # esgotou os disponíveis, zera pra tentar de novo (decliners seguem

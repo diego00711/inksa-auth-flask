@@ -509,12 +509,100 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=300,
     )
     logger.info("[SCHEDULER] Lembrete de carrinho: a cada 10 minutos")
+    _dispatch_secs = int(os.environ.get("DISPATCH_TICK_SECONDS", "10"))
+    _scheduler.add_job(
+        func=_dispatch_tick_job,
+        trigger="interval",
+        seconds=_dispatch_secs,
+        id="dispatch_tick",
+        name="Motor de despacho (oferta e repasse)",
+        replace_existing=True,
+        # ⚠️ Os três de baixo importam MAIS aqui que nos jobs lentos:
+        #   max_instances=1  -> dois ticks juntos brigariam pelo mesmo pedido.
+        #                       O SKIP LOCKED do SQL já protege, mas não há
+        #                       motivo pra duas rodadas ao mesmo tempo.
+        #   coalesce=True    -> depois de um boot demorado, não disparar as N
+        #                       execuções perdidas de uma vez.
+        #   misfire 30s      -> atraso maior que isso, deixa pro próximo.
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
+    logger.info("[SCHEDULER] Motor de despacho: a cada %d segundos", _dispatch_secs)
     _scheduler.start()
 
     logger.info(
         "[SCHEDULER] Started — daily payouts at %02d:%02d %s",
         hour, minute, tz,
     )
+
+
+def _dispatch_tick_job() -> None:
+    """Roda o motor de despacho por conta própria.
+
+    ⚠️ ANTES DISTO, O MOTOR NÃO TINHA RELÓGIO (corrigido em 17/09/2026).
+
+    `_run_dispatch_tick` só era chamado de dentro de `/orders/available` — a
+    rota que o app do entregador puxa a cada 20 s, **e só com a tela ligada**
+    (`visibilitychange` para a sondagem). Consequências que ninguém via:
+
+      * Todos com o celular no bolso e a tela apagada = motor parado. O pedido
+        ficava em `ready` sem oferta nenhuma, esperando alguém acender a tela.
+      * O prazo da oferta (`dispatch_offer_seconds`) era só um MÍNIMO: o repasse
+        real acontecia no primeiro poll depois do vencimento, de quem quer que
+        fosse. Sem ninguém polando, não acontecia.
+
+    Com este job o prazo passa a valer de verdade: vencido, o repasse sai em até
+    um tick — e quem recebe é avisado, porque agora o tick manda push.
+
+    ⚠️ NÃO logar quando não há nada a fazer. Roda 8.640 vezes por dia, e o log
+    do Render é a única fonte de diagnóstico que sobrou (o Sentry não entrega).
+    Um job falante aqui enterra todo o resto.
+
+    ⚠️ `get_settings()` tem cache de 60 s, então checar a flag a cada 10 s custa
+    uma ida ao banco por minuto, não seis por minuto.
+    """
+    from .utils.platform_settings import get_settings
+    from .utils.helpers import get_db_connection
+
+    try:
+        settings = get_settings()
+        # Flag desligada = modo broadcast, em que o motor não tem papel. Sai
+        # sem nem abrir conexão.
+        if int(settings.get('dispatch_assign_enabled') or 0) != 1:
+            return
+    except (TypeError, ValueError):
+        return
+    except Exception:
+        logger.exception("[DESPACHO] settings indisponivel; tick pulado")
+        return
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("[DESPACHO] sem conexao com o banco; tick pulado")
+            return
+        import psycopg2.extras
+        # Import adiado de propósito: em tempo de módulo isto seria import
+        # circular com as rotas.
+        from .routes.orders import _run_dispatch_tick
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            _run_dispatch_tick(cur, settings)
+        conn.commit()
+    except Exception:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logger.exception("[DESPACHO] tick automatico falhou")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def get_scheduler() -> BackgroundScheduler | None:

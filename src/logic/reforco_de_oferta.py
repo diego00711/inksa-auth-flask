@@ -244,12 +244,24 @@ def _disparar(order_id: str, toque: int, total: int) -> None:
             return
 
         # Texto diferente do primeiro aviso de proposito. Notificacao repetida
-        # com o MESMO texto o olho descarta como "ja vi isso"; dizer que ainda
-        # esta esperando e informacao nova, e e verdade.
-        titulo = "Entrega ainda disponivel! 🛵"
-        corpo = ("Ninguem pegou este pedido ainda. Toque para ver."
-                 if toque < total else
-                 "Ultima chamada: o pedido continua esperando.")
+        # com o MESMO texto o olho descarta como "ja vi isso"; dizer o que
+        # mudou e informacao nova.
+        #
+        # E o texto muda com o MODO, porque a verdade e outra em cada um. Em
+        # atribuicao a corrida e DELE e vai passar pro proximo; em broadcast
+        # ninguem pegou ainda. Dizer "ninguem pegou" pra quem esta com a oferta
+        # na mao seria mentira, e mentira em notificacao gasta o credito do
+        # aviso inteiro.
+        if modo_atribuicao:
+            titulo = "Sua corrida ainda espera 🛵"
+            corpo = ("Aceite antes que passe pro proximo entregador."
+                     if toque < total else
+                     "Ultima chamada: em instantes ela passa pro proximo.")
+        else:
+            titulo = "Entrega ainda disponivel! 🛵"
+            corpo = ("Ninguem pegou este pedido ainda. Toque para ver."
+                     if toque < total else
+                     "Ultima chamada: o pedido continua esperando.")
 
         from ..services.notification_service import send_push_notification
         enviados = 0
