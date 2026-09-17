@@ -192,6 +192,27 @@ _TEXT_DEFAULTS: dict[str, str] = {
     # ⚠️ Virar isto cedo demais deixa entregador sem aviso sonoro e ninguem
     # descobre por erro: descobre por corrida perdida.
     "push_canal_entregador": "",
+
+    # REFORCO DA OFERTA DE ENTREGA. Segundos, separados por virgula, contados a
+    # partir do "pedido pronto".
+    #
+    # ⚠️ PRA DESLIGAR, ESCREVA `0` — NAO apague o campo. O merge logo abaixo faz
+    # `valor or padrao`, entao campo vazio CAI NO PADRAO e o reforco continua
+    # ligado. Apagar pra desligar e a armadilha obvia deste arquivo inteiro, e
+    # ela ja mordeu antes (fator de rua, teto de cupom).
+    #
+    # Existe porque o aviso compete com o ronco do motor e com o capacete: um
+    # toque perdido nao tem segunda chance. Repeticao resolve o que volume nao
+    # resolve enquanto o som de alarme (APK 1.0.7) nao esta na rua.
+    #
+    # ⚠️ So dispara enquanto o pedido continuar 'ready' e SEM entregador. Quem
+    # ja aceitou nunca recebe reforco, e quem aceitou entre um toque e outro
+    # interrompe a serie.
+    #
+    # ⚠️ Mexer aqui e barato, mas nao e de graca: notificacao repetida demais e
+    # o caminho mais curto pro entregador desligar a notificacao do app — e ai
+    # perdemos o canal inteiro, nao so o reforco.
+    "push_reforco_oferta_segundos": "15,30",
 }
 
 

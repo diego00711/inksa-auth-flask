@@ -517,6 +517,21 @@ def start_scheduler(app=None) -> None:
     )
 
 
+def get_scheduler() -> BackgroundScheduler | None:
+    """O scheduler em execucao, ou None se ele nao subiu.
+
+    Existe pra quem precisa agendar trabalho AVULSO em tempo de requisicao — o
+    reforco da oferta de entrega (logic/reforco_de_oferta.py) e o primeiro caso.
+    Os jobs daqui de cima sao fixos e nascem no boot; esses nascem por pedido.
+
+    ⚠️ Devolver None e um estado normal, nao um erro: `DISABLE_SCHEDULER` existe
+    e vale pra teste. Quem chama TEM que tratar, e sem derrubar o que veio
+    antes — trabalho agendado aqui e sempre complemento de algo que ja
+    aconteceu, nunca o caminho principal.
+    """
+    return _scheduler
+
+
 def stop_scheduler() -> None:
     """Gracefully stops the scheduler (useful in tests)."""
     global _scheduler

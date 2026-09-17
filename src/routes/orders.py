@@ -725,6 +725,23 @@ def update_order_status(order_id):
                                              # espera 'new_delivery'.
                                              "type": "new_delivery"},
                                             urgente=True)
+
+                                # UM TOQUE SO NAO BASTA DENTRO DE UM CAPACETE.
+                                #
+                                # O som do aviso e curto, grave e toca no fluxo
+                                # de notificacao — perde pro ronco do motor. Ate
+                                # o APK com som de alarme chegar na loja, a
+                                # unica alavanca por software e repetir.
+                                #
+                                # Fica DEPOIS do envio e isolado: o reforco e
+                                # complemento, nunca pode derrubar o aviso que
+                                # ja saiu. E a serie morre sozinha assim que
+                                # alguem aceitar.
+                                try:
+                                    from ..logic.reforco_de_oferta import agendar as _agendar_reforco
+                                    _agendar_reforco(order_id)
+                                except Exception:
+                                    logger.warning("Reforco da oferta nao agendado", exc_info=True)
                         except Exception:
                             logger.warning("Push de entrega disponível falhou", exc_info=True)
             except Exception as _e:
