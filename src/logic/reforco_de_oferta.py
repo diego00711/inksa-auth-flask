@@ -25,12 +25,37 @@ notificacao do app, e ai perdemos o canal inteiro — nao so o reforco. Por isso
 
   1. **So enquanto ninguem aceitou.** Cada disparo re-le o pedido: se saiu de
      `ready` ou ja tem `delivery_id`, a serie morre ali.
-  2. **So pra quem pode pegar.** Recalcula os aptos a cada toque, com a mesma
-     regra do primeiro push (`tokens_para_avisar`). Quem ficou online no meio
-     do caminho entra; quem saiu, sai.
-  3. **Desligavel sem deploy.** `platform_settings.push_reforco_oferta_segundos`
-     vazio desliga tudo. Nao inventei um numero fixo no codigo justamente
-     porque o numero certo so a rua diz.
+  2. **So pra quem PODE PEGAR — e isso depende do modo do motor.**
+  3. **Desligavel sem deploy.** `push_reforco_oferta_segundos` = `0` desliga.
+     Nao inventei numero fixo no codigo porque o numero certo so a rua diz.
+
+## ⚠️ OS DOIS MODOS DO MOTOR DE DESPACHO, E POR QUE ISSO MUDA TUDO AQUI
+
+`platform_settings.dispatch_assign_enabled` decide quem enxerga o pedido:
+
+**Ligado (`1`, que e o estado de hoje) — ATRIBUICAO.** `_run_dispatch_tick`
+escolhe UM entregador por nota (distancia, tempo parado, avaliacao, equilibrio)
+e oferta so pra ele por `dispatch_offer_seconds` (60 s hoje). O
+`/orders/available` mostra o pedido **exclusivamente** a quem tem a oferta na
+mao. Vencido o prazo, ele entra em `offer_passed_ids` e o motor repassa.
+
+**Desligado (`0`) — BROADCAST.** Todo apto dentro do raio ve o pedido na lista.
+
+Na primeira versao deste arquivo o reforco mandava pra TODOS os aptos nos dois
+modos. No modo atribuicao isso acorda gente que abre o app e acha a lista
+**vazia** — e o proprio orders.py ja tinha essa licao escrita em dois lugares:
+*"push que leva a uma tela vazia e pior que push nenhum"*. Corrigido: no modo
+atribuicao o reforco vai **so pra quem esta com a oferta**, e se nao houver
+oferta valida naquele instante ele nao manda nada.
+
+E no modo atribuicao o reforco vale AINDA MAIS: a oferta exclusiva tem prazo:
+se o dono nao ouvir, queima os 60 s inteiros e o pedido so anda quando o motor
+repassar. Tocar de novo aos 15 s e aos 30 s e exatamente o que evita isso.
+
+⚠️ **Buraco conhecido que este arquivo NAO resolve:** `_run_dispatch_tick` nao
+manda push nenhum quando REPASSA a oferta. Quem recebe a oferta depois da
+primeira so descobre se, por acaso, abrir o app. Consertar isso e no motor, nao
+aqui.
 
 ## POR QUE NO APSCHEDULER, E NAO NUMA THREAD SOLTA
 
@@ -149,6 +174,8 @@ def _disparar(order_id: str, toque: int, total: int) -> None:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT o.status, o.delivery_id, o.items, o.delivery_distance_km,
+                       o.offer_courier_id,
+                       (o.offer_expires_at IS NOT NULL AND o.offer_expires_at > NOW()) AS oferta_valida,
                        rp.latitude, rp.longitude
                   FROM orders o
                   JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
@@ -167,18 +194,53 @@ def _disparar(order_id: str, toque: int, total: int) -> None:
 
             from ..utils.carga import tokens_para_avisar, peso_do_pedido
             from ..utils.platform_settings import get_settings
+            settings = get_settings()
 
+            # ⚠️ QUEM AVISAR DEPENDE DO MODO DO MOTOR DE DESPACHO.
+            #
+            # Com `dispatch_assign_enabled = 1` (que e o estado de hoje), o motor
+            # oferta o pedido a UM entregador por vez, por `dispatch_offer_seconds`,
+            # e o `/orders/available` mostra o pedido SO pra ele. Mandar reforco
+            # pra todo mundo nesse modo acorda gente que vai abrir o app e achar
+            # a lista VAZIA — e push que leva a tela vazia e pior que push
+            # nenhum: ensina o entregador a ignorar o aviso.
+            #
+            # Com o modo desligado (broadcast por raio), todo apto ve o pedido, e
+            # ai avisar todo apto e o certo.
             try:
-                peso = float(peso_do_pedido(cur, pedido['items']) or 0)
-            except Exception:
-                peso = 0.0
+                modo_atribuicao = int(settings.get('dispatch_assign_enabled') or 0) == 1
+            except (TypeError, ValueError):
+                modo_atribuicao = False
 
-            tokens = tokens_para_avisar(
-                peso, pedido['latitude'], pedido['longitude'], get_settings(),
-                distancia_km=pedido.get('delivery_distance_km'))
+            if modo_atribuicao:
+                # Sem oferta valida agora nao ha a quem reforcar: ou o motor
+                # ainda nao ofertou, ou o prazo venceu e ele vai repassar. Nos
+                # dois casos, calar e o certo — quem nao tem o pedido na mao
+                # nao consegue aceitar.
+                if not pedido['offer_courier_id'] or not pedido['oferta_valida']:
+                    logger.info("[REFORCO] pedido %s toque %d: sem oferta valida no modo atribuicao; nada a reforcar",
+                                order_id, toque)
+                    return
+                # offer_courier_id guarda o delivery_profiles.USER_ID (e o que o
+                # /available compara). Buscar por `id` aqui devolveria None sem
+                # erro nenhum — e o reforco sumiria calado.
+                cur.execute(
+                    "SELECT fcm_token FROM delivery_profiles WHERE user_id = %s",
+                    (pedido['offer_courier_id'],))
+                _dono = cur.fetchone()
+                tokens = [_dono['fcm_token']] if _dono and _dono['fcm_token'] else []
+            else:
+                try:
+                    peso = float(peso_do_pedido(cur, pedido['items']) or 0)
+                except Exception:
+                    peso = 0.0
+
+                tokens = tokens_para_avisar(
+                    peso, pedido['latitude'], pedido['longitude'], settings,
+                    distancia_km=pedido.get('delivery_distance_km'))
 
         if not tokens:
-            logger.info("[REFORCO] pedido %s toque %d: ninguem apto e online agora", order_id, toque)
+            logger.info("[REFORCO] pedido %s toque %d: ninguem pra avisar agora", order_id, toque)
             return
 
         # Texto diferente do primeiro aviso de proposito. Notificacao repetida
