@@ -2561,11 +2561,31 @@ def accept_order_by_delivery(order_id):
             return jsonify({'error': 'Erro de conexão com banco de dados'}), 500
 
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_id,))
+            cur.execute(
+                "SELECT id, COALESCE(approved, FALSE) AS approved "
+                "  FROM delivery_profiles WHERE user_id = %s", (user_id,))
             delivery_profile = cur.fetchone()
             if not delivery_profile:
                 logger.error(f"Perfil de entregador não encontrado para user_id={user_id}")
                 return jsonify({'error': 'Perfil de entregador não encontrado'}), 404
+
+            # TRAVA FINAL DA APROVAÇÃO — mesma razão da trava de entrega própria
+            # logo abaixo, e com a mesma cicatriz: a listagem e o push já barram
+            # quem não foi aprovado (get_available_orders e carga.tokens_para_avisar),
+            # mas um app com LISTA VELHA EM CACHE ainda conseguia aceitar.
+            #
+            # O caso real não é o entregador novo — é o que foi aprovado,
+            # trabalhou, teve a aprovação revogada pelo admin e continua com a
+            # tela carregada. Sem isto, ele pega comida e dinheiro de cliente
+            # depois de a plataforma ter decidido que ele não deveria.
+            #
+            # Regra que existe num lugar e falta no outro vira buraco pelo outro.
+            if not delivery_profile['approved']:
+                logger.warning("Entregador %s nao aprovado tentou aceitar %s", user_id, order_id)
+                return jsonify({
+                    'error': 'Seu cadastro ainda não foi aprovado. '
+                             'Assim que for, as entregas aparecem aqui.'
+                }), 403
 
             delivery_profile_id = delivery_profile['id']
 
