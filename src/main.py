@@ -473,7 +473,19 @@ def health_check():
         _pool = _pool_status()
     except Exception as _e_pool:
         _pool = {"erro_ao_ler": str(_e_pool)}
+    # Termômetro do MOTOR DE DESPACHO. Até 17/09/2026 o motor só rodava quando
+    # um entregador puxava a lista com a tela ligada; agora ele tem um job
+    # próprio a cada 10s. Só que esse job é calado de propósito (8.640 rodadas
+    # por dia), então sem isto aqui "o motor está batendo?" não tinha resposta
+    # — e, sem pedido pendente pra observar, nem o comportamento respondia.
+    # `ultima_rodada` mais velha que ~1 minuto significa relógio parado.
+    try:
+        from .scheduler import dispatch_status as _dispatch_status
+        _despacho = _dispatch_status()
+    except Exception as _e_disp:
+        _despacho = {"erro_ao_ler": str(_e_disp)}
     return jsonify({
+        "despacho": _despacho,
         "status": "ok" if db_status == "connected" else "degraded",
         "timestamp": datetime.now().isoformat(),
         "service": "inksa-auth-flask",

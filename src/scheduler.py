@@ -528,6 +528,7 @@ def start_scheduler(app=None) -> None:
         coalesce=True,
         misfire_grace_time=30,
     )
+    _DISPATCH_SAUDE["intervalo_s"] = _dispatch_secs
     logger.info("[SCHEDULER] Motor de despacho: a cada %d segundos", _dispatch_secs)
     _scheduler.start()
 
@@ -535,6 +536,25 @@ def start_scheduler(app=None) -> None:
         "[SCHEDULER] Started — daily payouts at %02d:%02d %s",
         hour, minute, tz,
     )
+
+
+# Termômetro do motor de despacho, pro /api/health.
+#
+# POR QUE ISTO EXISTE: o job de despacho é calado de propósito (roda 8.640
+# vezes por dia; log em toda rodada enterraria o resto). Só que isso o torna
+# INVISÍVEL — "o motor está batendo?" só se responderia no painel do Render, e
+# nem sempre há um pedido pendente pra observar o efeito. Um contador em
+# memória custa nada e transforma a pergunta num GET.
+#
+# Mesma lógica do `commit` e do `fcm` que já estão no health: sem expor, a
+# resposta depende de esperar o caso ruim acontecer.
+_DISPATCH_SAUDE: dict = {"ultima_rodada": None, "rodadas": 0, "ultimo_erro": None,
+                         "intervalo_s": None}
+
+
+def dispatch_status() -> dict:
+    """Cópia do termômetro do motor. Só leitura, pro /api/health."""
+    return dict(_DISPATCH_SAUDE)
 
 
 def _dispatch_tick_job() -> None:
@@ -562,19 +582,28 @@ def _dispatch_tick_job() -> None:
     ⚠️ `get_settings()` tem cache de 60 s, então checar a flag a cada 10 s custa
     uma ida ao banco por minuto, não seis por minuto.
     """
+    from datetime import datetime, timezone
     from .utils.platform_settings import get_settings
     from .utils.helpers import get_db_connection
+
+    # Marca a batida ANTES de qualquer trabalho: o que este campo responde é
+    # "o relógio está andando?", e ele tem que dizer a verdade mesmo quando a
+    # rodada não faz nada (flag desligada, sem pedido pendente).
+    _DISPATCH_SAUDE["ultima_rodada"] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    _DISPATCH_SAUDE["rodadas"] += 1
 
     try:
         settings = get_settings()
         # Flag desligada = modo broadcast, em que o motor não tem papel. Sai
         # sem nem abrir conexão.
         if int(settings.get('dispatch_assign_enabled') or 0) != 1:
+            _DISPATCH_SAUDE["ultimo_erro"] = None
             return
     except (TypeError, ValueError):
         return
     except Exception:
         logger.exception("[DESPACHO] settings indisponivel; tick pulado")
+        _DISPATCH_SAUDE["ultimo_erro"] = "settings indisponivel"
         return
 
     conn = None
@@ -590,13 +619,17 @@ def _dispatch_tick_job() -> None:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             _run_dispatch_tick(cur, settings)
         conn.commit()
-    except Exception:
+        _DISPATCH_SAUDE["ultimo_erro"] = None
+    except Exception as _e:
         if conn:
             try:
                 conn.rollback()
             except Exception:
                 pass
         logger.exception("[DESPACHO] tick automatico falhou")
+        # Guardado pro health: erro que se repete a cada 10s vira enxurrada no
+        # log e o motivo se perde no meio. Aqui ele fica parado, legivel.
+        _DISPATCH_SAUDE["ultimo_erro"] = f"{type(_e).__name__}: {_e}"[:200]
     finally:
         if conn:
             try:
