@@ -193,7 +193,27 @@ def precos_para_o_cupom(coupon, itens_do_pedido):
         return {}
 
     try:
-        from .helpers import supabase as _sb
+        # ⚠️ `supabase_admin`, NUNCA `supabase`. Os dois nascem com a chave de
+        # serviço, mas o `supabase` COMPARTILHADO é o mesmo objeto em que
+        # routes/auth.py chama `sign_in_with_password` — e essa chamada troca o
+        # header de Authorization do CLIENTE INTEIRO, não só do módulo auth.
+        # Depois dela ele deixa de ser `service_role` e passa a valer como
+        # `authenticated`, sujeito a RLS.
+        #
+        # E a RLS de `menu_items` tem UMA política de SELECT: "restaurantes veem
+        # os próprios itens". Um cliente não é restaurante, então a consulta
+        # devolve ZERO LINHAS — sem erro, sem exceção, sem log de banco.
+        #
+        # O estrago em 17/09/2026: a primeira oferta relâmpago de verdade
+        # (Me Mimei, 9 clientes avisados por push) recusava todo mundo com
+        # "Adicione o item da oferta ao carrinho" — com o item NO carrinho. E o
+        # backend roda com UM worker: bastou uma pessoa logar pra contaminar o
+        # cliente pra todos até o próximo deploy, o que faz o defeito parecer
+        # intermitente e some quando se vai investigar depois de um restart.
+        #
+        # Esta linha escapou da varredura de 16/09 porque aquela caçava
+        # `supabase.storage`; o buraco é o mesmo, a chamada é que é de tabela.
+        from .helpers import supabase_admin as _sb
         from .precos import preco_vigente
         r = (_sb.table('menu_items')
                .select('price, promo_price')
