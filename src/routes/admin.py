@@ -911,6 +911,128 @@ def admin_dashboard():
     finally:
         conn.close()
 
+
+# ─── LISTA POR TRÁS DO CARD "ENTREGADORES APTOS" (17/09/2026) ──────────────
+#
+# O card dizia "1 de 1 — Todos os online recebem pedido" e parava ali. Era um
+# número sem porta: o admin via que havia UM entregador e não tinha como saber
+# QUEM, nem se ele estava mesmo lá. No mesmo dia em que isto nasceu, o único
+# "apto" estava online desde a tarde e sem dar sinal de vida havia 5 horas.
+#
+# ⚠️ O MOTOR DE DESPACHO NÃO OLHA O SINAL. `_run_dispatch_tick` exige
+# is_available = TRUE e não confere last_heartbeat — então quem esqueceu o
+# botão ligado continua recebendo oferta, e cada oferta queima 60 s até
+# repassar. A coluna "último sinal" desta lista é o que torna isso visível.
+#
+# As travas de "apto" são `_GATE_COORD` e `_GATE_CADASTRO`, as MESMAS do número
+# do card (`_SQL_ENTREGADORES`). Se a lista tivesse a regra dela, um dia o card
+# diria "2 aptos" e a lista mostraria 1 — e ninguém saberia em qual acreditar.
+#
+# Régua do sinal (o app bate a cada 2 min com a tela ligada — ver
+# carga.esta_trabalhando):
+#   ≤ 5 min   → app aberto agora
+#   ≤ 3 h     → app em segundo plano (o push ainda considera "trabalhando")
+#   > 3 h     → sem sinal: se está online, recebe oferta e provavelmente não vê
+_SQL_ENTREGADORES_LISTA = f"""
+    SELECT dp.id,
+           NULLIF(TRIM(CONCAT_WS(' ', dp.first_name, dp.last_name)), '') AS nome,
+           dp.vehicle_type,
+           dp.phone,
+           (dp.is_available IS TRUE)                              AS online,
+           ({_GATE_COORD})                                         AS tem_coord,
+           ({_GATE_CADASTRO})                                      AS cadastro_ok,
+           (NULLIF(TRIM(dp.fcm_token), '') IS NOT NULL)            AS tem_push,
+           dp.online_desde,
+           dp.last_heartbeat,
+           dp.location_updated_at,
+           CASE WHEN dp.dispatch_cooldown_until > now()
+                THEN dp.dispatch_cooldown_until END                AS em_pausa_ate,
+           floor(EXTRACT(EPOCH FROM (now() - dp.last_heartbeat)) / 60)::int AS min_sem_sinal,
+           floor(EXTRACT(EPOCH FROM (now() - dp.online_desde))   / 60)::int AS min_online,
+           (SELECT COUNT(*) FROM orders o
+             WHERE o.delivery_id = dp.id AND o.status = 'delivered'
+               AND {_HOJE_SP('o.updated_at')})::int                AS entregas_hoje,
+           EXISTS (SELECT 1 FROM orders o
+                    WHERE o.delivery_id = dp.id
+                      AND o.status IN ('accepted_by_delivery', 'delivering')) AS em_entrega,
+           -- offer_courier_id guarda o USER_ID, não o id do perfil.
+           EXISTS (SELECT 1 FROM orders o
+                    WHERE o.offer_courier_id = dp.user_id
+                      AND o.offer_expires_at > now()
+                      AND o.delivery_id IS NULL)                   AS com_oferta
+      FROM delivery_profiles dp
+     WHERE dp.approved IS TRUE
+       AND (dp.is_available IS TRUE
+            OR dp.last_heartbeat > now() - interval '7 days')
+     ORDER BY dp.is_available DESC, dp.last_heartbeat DESC NULLS LAST
+"""
+
+
+@admin_bp.route("/entregadores/agora", methods=["GET", "OPTIONS"])
+def admin_entregadores_agora():
+    """Quem está online, quem está apto, e há quanto tempo sem dar sinal."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    _, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+    if error:
+        return error
+    if not _is_admin(user_type):
+        return jsonify({"error": "Acesso negado"}), 403
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Erro de conexão com banco"}), 500
+    try:
+        try:
+            conn.autocommit = True  # só leitura
+        except Exception:
+            pass
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(_SQL_ENTREGADORES_LISTA)
+            linhas = cur.fetchall()
+
+        def iso(v):
+            return v.isoformat() if v else None
+
+        lista = []
+        for r in linhas:
+            faltas = []
+            if not r["tem_coord"]:
+                faltas.append("sem localização")
+            if not r["cadastro_ok"]:
+                faltas.append("cadastro incompleto")
+            lista.append({
+                "id": str(r["id"]),
+                "nome": r["nome"] or "(sem nome)",
+                "veiculo": r["vehicle_type"],
+                "telefone": r["phone"],
+                "online": r["online"],
+                # Mesma conta do card: online E com localização E com cadastro.
+                "apto": bool(r["online"] and r["tem_coord"] and r["cadastro_ok"]),
+                "faltas": faltas,
+                "tem_push": r["tem_push"],
+                "online_desde": iso(r["online_desde"]) if r["online"] else None,
+                "min_online": r["min_online"] if (r["online"] and r["online_desde"]) else None,
+                "ultimo_sinal": iso(r["last_heartbeat"]),
+                "min_sem_sinal": r["min_sem_sinal"],
+                "ultima_posicao": iso(r["location_updated_at"]),
+                "em_pausa_ate": iso(r["em_pausa_ate"]),
+                "entregas_hoje": r["entregas_hoje"],
+                "em_entrega": r["em_entrega"],
+                "com_oferta": r["com_oferta"],
+            })
+
+        return jsonify({
+            "online": [e for e in lista if e["online"]],
+            "offline": [e for e in lista if not e["online"]],
+        }), 200
+    except Exception:
+        logger.exception("Erro no /api/admin/entregadores/agora")
+        return jsonify({"error": "Não foi possível carregar os entregadores"}), 500
+    finally:
+        conn.close()
+
+
 @admin_bp.route("/alerts-summary", methods=["GET", "OPTIONS"])
 def admin_alerts_summary():
     """Contadores leves pros AVISOS do admin (sino + badges do menu): tickets de

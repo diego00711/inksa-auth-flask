@@ -1475,3 +1475,291 @@ def criar_relampago(banner_id):
             conn.close()
         except Exception:
             pass
+
+
+# ─── BOTÃO "ENVIAR PUSH" DA TELA DE CUPONS (17/09/2026) ─────────────────────
+#
+# Até aqui o único push de cupom era o AUTOMÁTICO (`_anunciar_cupom`), que sai
+# sozinho quando um PARCEIRO cria um cupom e vai só pra quem já pediu na loja
+# dele. O admin não tinha como anunciar um cupom que já existia, nem escolher
+# pra quem.
+#
+# ⚠️ É A MESMA ENGRENAGEM, NÃO UMA SEGUNDA. A chave de campanha é a mesma do
+# automático (`coupon:<id>`), então as regras que já existiam continuam
+# valendo sem precisar ser repetidas:
+#   • UMA VEZ POR CUPOM POR CLIENTE — quem já recebeu pelo automático não
+#     recebe de novo pelo botão (índice único de push_campaign_log);
+#   • TETO DIÁRIO (push_campaign_daily_cap) — protege o cliente de bombardeio.
+# Um botão que ignorasse isso seria o jeito mais rápido de fazer cliente
+# silenciar o app — e com 36 clientes, cada um que silencia é 3% da base.
+#
+# O QUE NÃO DÁ PRA ANUNCIAR, E POR QUÊ (`_por_que_nao_anunciar`):
+#   • "só digitado": é cupom de campanha de fora (rádio, panfleto). Cada uso
+#     prova que AQUELE canal trouxe o pedido. Mandar por push acabaria com a
+#     medição — o BANDFM deixaria de medir a rádio.
+#   • oferta relâmpago: tem relógio e reserva por cliente; é disparada pela
+#     tela de Banners, que sabe da janela da campanha.
+#   • desativado, vencido ou esgotado: anunciar o que não pode ser usado é a
+#     pior propaganda que existe.
+#
+# ⚠️ CUPOM PESSOAL (`owner_client_id`) SÓ VAI PRO DONO. Os de indicação têm
+# `max_uses = 1`: se fossem anunciados pra todos, o primeiro que usasse levaria
+# o prêmio de quem indicou. Pro dono, o push vira lembrete — que é útil.
+
+def _por_que_nao_anunciar(c):
+    """None se o cupom pode ser anunciado; senão, o motivo em português."""
+    if not c['is_active']:
+        return "Cupom desativado. Ative antes de anunciar."
+    if c['somente_digitado']:
+        return ("Cupom \"só digitado\" é de campanha de fora (rádio, panfleto): cada uso "
+                "prova que aquele canal trouxe o pedido. Anunciar por push acabaria "
+                "com essa medição.")
+    if c['reserva_minutos']:
+        return ("Oferta relâmpago é disparada pela tela de Banners — lá o envio "
+                "respeita a janela da campanha e o relógio de cada cliente.")
+    if c['vencido']:
+        return "Cupom vencido — não há o que anunciar."
+    if c['max_uses'] is not None and int(c['uses_count'] or 0) >= int(c['max_uses']):
+        return "Cupom esgotado: já foi usado o número máximo de vezes."
+    return None
+
+
+def _publicos_do_cupom(c):
+    """Os públicos que fazem sentido PARA ESTE cupom, na ordem da tela."""
+    if c['owner_client_id']:
+        return ['dono']
+    if c['restaurant_id']:
+        return ['ja_pediram', 'no_raio', 'todos']
+    return ['todos']
+
+
+def _destinos_do_cupom(cur, c, publico, campanha, email_teste=None):
+    """(client_id, fcm_token) de quem recebe. Reaproveita o seletor da relâmpago.
+
+    `_publico_do_relampago` já resolve 'todos' / 'ja_pediram' / 'no_raio' /
+    'so_eu' com as travas de token e de "já recebeu esta campanha" — e foi
+    testado com o Diego em 13/09. Duplicar essa lógica aqui criaria duas regras
+    pra mesma pergunta, e aí uma delas fica errada.
+
+    `so_app_fechado=False` de propósito: a relâmpago pula quem está com o app
+    aberto porque essa pessoa JÁ VÊ o banner na tela. Cupom não tem banner — o
+    cliente com o app aberto não está vendo o cupom, e o aviso serve pra ele.
+    """
+    if publico == 'dono':
+        cur.execute("""
+            SELECT cp.id, cp.fcm_token FROM client_profiles cp
+             WHERE cp.id = %s
+               AND NULLIF(TRIM(cp.fcm_token), '') IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM push_campaign_log l
+                                WHERE l.client_id = cp.id AND l.campanha = %s)
+        """, (str(c['owner_client_id']), campanha))
+        return [(r['id'], r['fcm_token']) for r in cur.fetchall()]
+
+    loja = {'restaurant_id': c['restaurant_id'], 'loja_lat': c['loja_lat'],
+            'loja_lng': c['loja_lng'], 'raio_km': c['raio_km']}
+    return _publico_do_relampago(cur, loja, publico, False, campanha, email_teste)
+
+
+def _teto_diario(cur):
+    try:
+        cur.execute("SELECT value FROM platform_settings WHERE key = 'push_campaign_daily_cap'")
+        r = cur.fetchone()
+        return int(str(r['value']).strip()) if r else 1
+    except Exception:
+        return 1
+
+
+def _sem_quem_estourou_o_teto(cur, destinos, teto):
+    """Tira quem já recebeu `teto` campanhas HOJE (dia de Lages, não de UTC)."""
+    if not destinos:
+        return destinos
+    cur.execute("""
+        SELECT client_id FROM push_campaign_log
+         WHERE client_id = ANY(%s::uuid[])
+           AND (sent_at AT TIME ZONE 'America/Sao_Paulo')::date
+               = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+         GROUP BY client_id HAVING COUNT(*) >= %s
+    """, ([str(cid) for cid, _ in destinos], teto))
+    estourados = {str(r['client_id']) for r in cur.fetchall()}
+    return [(cid, tk) for cid, tk in destinos if str(cid) not in estourados]
+
+
+@coupons_bp.route('/admin/<uuid:coupon_id>/disparar', methods=['POST', 'OPTIONS'])
+def disparar_cupom(coupon_id):
+    """Anuncia um cupom por push. Só admin.
+
+    Body: {
+      "simular": true,            // NÃO envia: devolve quantos receberiam
+      "publico": "ja_pediram" | "no_raio" | "todos" | "dono" | "so_eu",
+      "quantos": 10,              // lote; vazio/0 = todos de uma vez
+      "email_teste": "x@y.com"    // só com publico = so_eu
+    }
+
+    POR QUE EXISTE O "simular". Notificação não tem desfazer. O disparo da
+    relâmpago (tela de Banners) só conta pra quantos foi DEPOIS de enviar — o
+    admin aperta no escuro. Aqui a tela pergunta antes e mostra "vai pra 17
+    clientes" em cada público, com as mesmas travas do envio de verdade. A
+    conta do simular e a do envio saem da MESMA função, então não divergem.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    uid, utype, err = get_user_id_from_token(request.headers.get('Authorization'))
+    if err:
+        return err
+    if utype != 'admin':
+        return jsonify({"error": "Apenas admin anuncia cupom"}), 403
+
+    corpo = request.get_json(silent=True) or {}
+    simular = corpo.get('simular') is True
+    publico = (corpo.get('publico') or '').strip().lower()
+    email_teste = (corpo.get('email_teste') or '').strip() or None
+    try:
+        quantos = max(0, int(corpo.get('quantos') or 0))
+    except (TypeError, ValueError):
+        quantos = 0
+
+    from ..services.notification_service import send_campaign
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "DB indisponível"}), 503
+    res, destinos, sobraram, invalidos = {}, [], 0, set()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # `vencido` compara com NOW() em UTC porque é assim que
+            # evaluate_coupon decide "Este cupom expirou" (_parse_dt trata o
+            # valid_until sem fuso como UTC). Usar outra régua aqui faria o
+            # botão anunciar um cupom que o carrinho recusa.
+            cur.execute("""
+                SELECT c.*,
+                       (c.valid_until IS NOT NULL
+                        AND c.valid_until < (NOW() AT TIME ZONE 'UTC')) AS vencido,
+                       r.restaurant_name,
+                       r.latitude  AS loja_lat,
+                       r.longitude AS loja_lng,
+                       COALESCE(r.own_delivery_radius_km, 10) AS raio_km
+                  FROM coupons c
+                  LEFT JOIN restaurant_profiles r ON r.id = c.restaurant_id
+                 WHERE c.id = %s
+            """, (str(coupon_id),))
+            c = cur.fetchone()
+            if not c:
+                return jsonify({"error": "Cupom não encontrado"}), 404
+
+            motivo = _por_que_nao_anunciar(c)
+            campanha = "coupon:%s" % c['id']
+            permitidos = _publicos_do_cupom(c)
+            sem_coord = c['loja_lat'] is None or c['loja_lng'] is None
+            teto = _teto_diario(cur)
+
+            # ── SIMULAÇÃO: quantos receberiam, público por público ──────────
+            if simular:
+                if motivo:
+                    return jsonify({"status": "success",
+                                    "data": {"pode": False, "motivo": motivo}}), 200
+                publicos = []
+                for p in permitidos:
+                    if p == 'no_raio' and sem_coord:
+                        publicos.append({"id": p, "elegiveis": 0,
+                                         "obs": "A loja não tem coordenada — não dá pra calcular raio."})
+                        continue
+                    d = _destinos_do_cupom(cur, c, p, campanha)
+                    d = _sem_quem_estourou_o_teto(cur, d, teto) if teto > 0 else []
+                    publicos.append({"id": p, "elegiveis": len(d)})
+                cur.execute("SELECT COUNT(*) AS n FROM push_campaign_log WHERE campanha = %s",
+                            (campanha,))
+                ja = int(cur.fetchone()['n'])
+                return jsonify({"status": "success", "data": {
+                    "pode": True,
+                    "publicos": publicos,
+                    "ja_receberam": ja,
+                    "teto_diario": teto,
+                    "loja": c['restaurant_name'],
+                    "pessoal": bool(c['owner_client_id']),
+                }}), 200
+
+            # ── ENVIO DE VERDADE ───────────────────────────────────────────
+            if motivo:
+                return jsonify({"error": motivo}), 409
+            if publico != 'so_eu' and publico not in permitidos:
+                return jsonify({"error": "Esse público não se aplica a este cupom."}), 400
+            if publico == 'no_raio' and sem_coord:
+                return jsonify({"error": "A loja não tem coordenada — não dá pra calcular raio."}), 409
+            if teto <= 0 and publico != 'so_eu':
+                return jsonify({"error": "Campanhas por push estão desligadas "
+                                         "(push_campaign_daily_cap = 0)."}), 409
+
+            destinos = _destinos_do_cupom(cur, c, publico, campanha, email_teste)
+            # O teto sai ANTES do corte de lote (a relâmpago faz o contrário).
+            # Assim "avisar 10" entrega 10 de verdade, em vez de separar 10 e
+            # depois descobrir que 3 deles já tinham estourado o dia.
+            # No teste o teto não vale: ele protege o CLIENTE, e ali é você.
+            if publico != 'so_eu':
+                destinos = _sem_quem_estourou_o_teto(cur, destinos, teto)
+            if quantos and len(destinos) > quantos:
+                sobraram = len(destinos) - quantos
+                destinos = destinos[:quantos]
+
+            if not destinos:
+                return jsonify({"status": "success", "data": {
+                    "enviados": 0, "elegiveis": 0,
+                    "aviso": (
+                        f"Nenhum cliente com notificação ligada no e-mail "
+                        f"{email_teste or '(vazio)'}. Confira se é a conta do APP DO "
+                        f"CLIENTE (não a do admin)."
+                        if publico == 'so_eu' else
+                        "Ninguém elegível agora: ou já receberam este cupom, ou já "
+                        "receberam o limite de avisos de hoje, ou não têm notificação ligada."
+                    ),
+                }}), 200
+
+            loja = c['restaurant_name'] or 'Inksa'
+            titulo, corpo_push = _texto_do_cupom(c, loja)
+            if publico == 'dono':
+                titulo = "🎁 Seu cupom: " + titulo[:1].lower() + titulo[1:]
+
+            res = send_campaign(destinos, titulo, corpo_push, {
+                'type': 'coupon', 'coupon_code': c['code'],
+                'restaurant_id': str(c['restaurant_id']) if c['restaurant_id'] else '',
+                'url': '/',
+            })
+
+            invalidos = set(res.get('invalidos') or [])
+            enviados = [cid for cid, _ in destinos if cid not in invalidos]
+            # O teste NÃO entra no histórico: senão ele bloquearia o envio de
+            # verdade pra você mesmo, pela regra de uma vez por cupom.
+            if enviados and publico != 'so_eu':
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO push_campaign_log (client_id, campanha, tipo) VALUES %s "
+                    "ON CONFLICT (client_id, campanha) DO NOTHING",
+                    [(cid, campanha, 'coupon') for cid in enviados])
+            if invalidos:
+                cur.execute("UPDATE client_profiles SET fcm_token = NULL "
+                            "WHERE id = ANY(%s::uuid[])", ([str(x) for x in invalidos],))
+            conn.commit()
+            logger.info("Cupom %s anunciado manualmente (%s): %d enviados de %d",
+                        c['code'], publico, res.get('enviados', 0), len(destinos))
+
+        return jsonify({"status": "success", "data": {
+            "enviados": res.get('enviados', 0),
+            "elegiveis": len(destinos),
+            "sobraram": sobraram,
+            "falhas": res.get('falhas', 0),
+            "tokens_limpos": len(invalidos),
+            "erros": (res.get("erros") or [])[:3],
+        }}), 200
+
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao anunciar cupom %s", coupon_id)
+        return jsonify({"error": "Erro interno"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

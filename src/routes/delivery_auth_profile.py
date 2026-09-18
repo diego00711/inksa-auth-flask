@@ -460,6 +460,23 @@ def handle_profile():
                 # teste em produção.
                 if update_data.get('is_available') is True:
                     set_clauses.append('"last_heartbeat" = NOW()')
+                    # "ONLINE DESDE": carimba só na TRANSIÇÃO offline -> online.
+                    #
+                    # No SET de um UPDATE, o Postgres lê a coluna com o valor
+                    # ANTIGO da linha — então o `is_available` do CASE é o de
+                    # antes deste comando. Ligar quem já estava ligado mantém o
+                    # horário original; ligar quem estava desligado carimba agora.
+                    #
+                    # Sem isso, cada toque no botão (e o app religa sozinho pela
+                    # intenção guardada) zeraria o contador, e o admin veria
+                    # "online há 2 min" de quem está na rua desde o almoço.
+                    #
+                    # ⚠️ Sem COALESCE de propósito: quem já estava online antes
+                    # desta coluna existir fica NULL até o próximo desligar/ligar,
+                    # e a tela mostra "—". Chutar NOW() ali seria mentir pra baixo.
+                    set_clauses.append(
+                        '"online_desde" = CASE WHEN is_available IS TRUE '
+                        'THEN online_desde ELSE NOW() END')
 
                 params.append(profile_id)
 
