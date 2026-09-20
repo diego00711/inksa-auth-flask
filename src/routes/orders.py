@@ -371,6 +371,26 @@ def handle_orders():
                 # Cliente não vê pedidos que ele "excluiu" (arquivou).
                 query += " AND o.archived_at IS NULL"
 
+            else:
+                # ⚠️ FAIL-CLOSED. A consulta começa em `WHERE 1=1` e só ganha
+                # filtro dentro dos dois ramos acima. Qualquer outro tipo de
+                # usuário autenticado caía aqui SEM FILTRO NENHUM e levava a
+                # plataforma inteira: todo pedido, de toda loja, com
+                # `pickup_code`, `delivery_code`, endereço e telefone do
+                # cliente — porque o SELECT é `o.*`.
+                #
+                # Achado em 20/09/2026, ao inverter a conferência da retirada:
+                # de nada adianta tirar o código das rotas do entregador se
+                # esta aqui devolve o de todo mundo. Nenhum app chama esta rota
+                # como entregador ou admin (conferido nos quatro), então fechar
+                # não tira função de ninguém.
+                #
+                # Fechado por LISTA DO QUE PODE, não do que não pode: um tipo
+                # de usuário novo amanhã nasce sem acesso, em vez de nascer com
+                # acesso a tudo.
+                logger.warning("GET /api/orders negado para user_type=%s", user_type)
+                return jsonify({"error": "Acesso não autorizado"}), 403
+
             if status_filter:
                 query += " AND o.status = %s"
                 params.append(status_filter)
@@ -2969,21 +2989,30 @@ def get_pickup_code_for_delivery_or_restaurant(order_id):
                     return jsonify({"error": "Pedido não encontrado ou não pertence a este restaurante"}), 404
                 return jsonify({"pickup_code": row['pickup_code']}), 200
 
+            # ⚠️ O ENTREGADOR NÃO RECEBE MAIS O CÓDIGO (20/09/2026).
+            #
+            # O sentido da conferência foi invertido: antes o entregador MOSTRAVA
+            # o código e o parceiro DIGITAVA; agora o parceiro mostra na tela
+            # dele e quem digita é o entregador, no próprio app.
+            #
+            # A troca move o trabalho de quem está no aperto (o parceiro, na
+            # chapa, com o pedido saindo) pra quem está esperando — e mantém a
+            # prova de pé: o entregador precisa obter um número que ele não tem,
+            # e só consegue de frente pro balcão.
+            #
+            # Por isso o código não pode chegar aqui de jeito nenhum. Se
+            # chegasse, "confirmar retirada" viraria apertar um botão, e daria
+            # pra marcar o pedido como retirado de casa.
+            #
+            # É também o motivo de NÃO existir trava de GPS: o próprio código
+            # já é a prova de presença. Raio de 100 m dependeria da coordenada
+            # da loja, e duas das sete lojas não têm coordenada nenhuma — nelas
+            # a trava nunca abriria.
             if user_type == 'delivery':
-                cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
-                dprof = cur.fetchone()
-                if not dprof:
-                    return jsonify({"error": "Perfil de entregador não encontrado"}), 404
-
-                cur.execute("""
-                    SELECT pickup_code
-                    FROM orders
-                    WHERE id = %s AND delivery_id = %s
-                """, (str(order_id), dprof['id']))
-                row = cur.fetchone()
-                if not row:
-                    return jsonify({"error": "Pedido não encontrado ou não atribuído a este entregador"}), 404
-                return jsonify({"pickup_code": row['pickup_code']}), 200
+                return jsonify({
+                    "error": "O código da retirada fica com o parceiro. "
+                             "Peça pra ele mostrar na tela do pedido."
+                }), 403
 
             return jsonify({"error": "Acesso não autorizado"}), 403
 
@@ -3040,6 +3069,9 @@ def get_order_codes_compatible(order_id):
                     "pickup_code": row['pickup_code']
                 }), 200
 
+            # Mesma regra da rota /pickup-code: o entregador recebe o STATUS,
+            # nunca o código. Ver o comentário longo lá — em resumo, é ele quem
+            # digita agora, e um número que ele já tem não prova nada.
             if user_type == 'delivery':
                 cur.execute("SELECT id FROM delivery_profiles WHERE user_id = %s", (user_auth_id,))
                 dprof = cur.fetchone()
@@ -3047,7 +3079,7 @@ def get_order_codes_compatible(order_id):
                     return jsonify({"error": "Perfil de entregador não encontrado"}), 404
 
                 cur.execute("""
-                    SELECT pickup_code, status
+                    SELECT status
                     FROM orders
                     WHERE id = %s AND delivery_id = %s
                 """, (str(order_id), dprof['id']))
@@ -3057,7 +3089,6 @@ def get_order_codes_compatible(order_id):
                 return jsonify({
                     "order_id": str(order_id),
                     "status": row['status'],
-                    "pickup_code": row['pickup_code']
                 }), 200
 
             return jsonify({"error": "Acesso não autorizado"}), 403

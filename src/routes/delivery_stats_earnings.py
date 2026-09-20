@@ -208,7 +208,12 @@ def get_dashboard_stats():
                 SELECT
                     o.id, o.numero, o.status, o.total_amount, o.delivery_fee, o.created_at,
                     o.valor_repassado_entregador,
-                    o.delivery_address, o.pickup_code,
+                    -- ⚠️ SEM `o.pickup_code` (20/09/2026). A conferência da
+                    -- retirada foi invertida: o parceiro mostra o código na
+                    -- tela dele e o ENTREGADOR digita no app. Um código que
+                    -- viaja junto da lista do entregador não prova nada —
+                    -- daria pra confirmar a retirada de casa.
+                    o.delivery_address,
                     o.payment_method, o.change_for,
                     o.client_latitude, o.client_longitude, o.client_coord_origem,
                     CONCAT(cp.first_name, ' ', cp.last_name) as client_name,
@@ -251,7 +256,6 @@ def get_dashboard_stats():
                     'restaurant_city': order.get('address_city'),
                     'restaurant_latitude': float(order['restaurant_latitude']) if order.get('restaurant_latitude') is not None else None,
                     'restaurant_longitude': float(order['restaurant_longitude']) if order.get('restaurant_longitude') is not None else None,
-                    'pickup_code': order.get('pickup_code'),
                     'payment_method': order.get('payment_method'),
                     'change_for': float(order.get('change_for') or 0.0),
                 })
