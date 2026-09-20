@@ -374,13 +374,15 @@ def minha_taxa(conn):
         return jsonify({"status": "error", "error": "Perfil não encontrado"}), 404
 
     from ..utils.platform_settings import (
-        effective_commission_rate, calculate_platform_commission, get_settings)
+        commission_breakdown, calculate_platform_commission, get_settings,
+        ROTULO_CATEGORIA)
     rid = str(loja['id'])
     # Deriva as duas taxas da MESMA função que cobra de verdade, em vez de
     # repetir a fórmula aqui. Fórmula duplicada é fórmula que um dia diverge —
     # e divergir numa tela de preço significa ensinar a conta errada.
     base = float(get_settings()['commission_rate'])
-    entrega = float(effective_commission_rate(rid))
+    quebra = commission_breakdown(rid)
+    entrega = float(quebra['rate'])
     retirada = float(calculate_platform_commission(100, rid, retirada=True)) / 100.0
 
     # DE ONDE VEM ESSA TAXA. Só o número não basta numa tela que ensina a
@@ -407,12 +409,24 @@ def minha_taxa(conn):
         from flask import current_app
         current_app.logger.exception("minha_taxa: nível do clube indisponível (segue sem ele)")
 
+    # O NOME DA CATEGORIA SAI DAQUI, NÃO DO FRONT. A categoria já vem decidida
+    # pela mesma conta que cobra (commission_breakdown); só falta o rótulo. Se
+    # cada tela montasse esse nome sozinha, bastaria uma delas não saber do
+    # Embaixador pra o parceiro ler "Fundador" e pagar zero — ou o contrário.
+    # Quando a categoria é o Clube, quem nomeia é o nível conquistado.
+    categoria = quebra['categoria']
+    rotulo = ROTULO_CATEGORIA.get(categoria) or nivel_nome or ROTULO_CATEGORIA['padrao']
+
     return jsonify({
         "status": "success",
         "data": {
             "taxa_base_pct":     round(base * 100, 2),
             "taxa_entrega_pct":  round(entrega * 100, 2),
             "taxa_retirada_pct": round(retirada * 100, 2),
+            # Categoria vigente — é o que a faixa "hoje você é X, paga Y%" usa.
+            "categoria":         categoria,
+            "categoria_rotulo":  rotulo,
+            "categoria_ate":     quebra['ate'].isoformat() if quebra['ate'] else None,
             "fundador":          bool(loja['fundador']),
             "fundador_ate":      loja['fundador_ate'].isoformat() if loja['fundador_ate'] else None,
             "aceita_retirada":   bool(loja['accepts_pickup']),

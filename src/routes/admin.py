@@ -5,6 +5,7 @@ import uuid
 import csv
 import io
 import logging
+from datetime import date as _date
 from functools import wraps
 
 import requests
@@ -795,6 +796,90 @@ def set_restaurant_founding(restaurant_id):
             pass
         logger.exception("Erro ao atualizar selo de fundador")
         return jsonify({"status": "error", "message": "Erro interno ao atualizar fundador."}), 500
+    finally:
+        conn.close()
+
+
+@admin_bp.route("/restaurants/<uuid:restaurant_id>/embaixador", methods=["POST"])
+@admin_required
+def set_restaurant_embaixador(restaurant_id):
+    """Marca/desmarca o restaurante como Parceiro Embaixador (não paga NADA até
+    a data da campanha). Body: {"embaixador": bool, "ate": "2026-12-31"}.
+
+    ⚠️ NÃO É O FUNDADOR COM OUTRO NOME, e a diferença está na forma da janela:
+
+      • Fundador: 6 meses CONTADOS DA MARCAÇÃO. Janela por parceiro — quem
+        entra em novembro ganha os mesmos 6 meses de quem entrou em agosto.
+      • Embaixador: uma DATA FIXA que vale pra todo mundo (a campanha acaba no
+        dia 31/12 pra quem entrou em setembro e pra quem entrou em dezembro).
+
+    Por isso aqui não existe `embaixador_desde` nem `INTERVAL`: quem manda é a
+    data, e o padrão dela mora em platform_settings.embaixador_padrao_ate — um
+    lugar só pra esticar a campanha inteira, sem passar parceiro por parceiro.
+
+    `ate` no body é a exceção (um parceiro que negociou prazo diferente); sem
+    ele vale o padrão da plataforma.
+    """
+    data = request.get_json(silent=True) or {}
+    embaixador = bool(data.get("embaixador", True))
+
+    ate = None
+    if embaixador:
+        bruto = (data.get("ate") or "").strip()
+        if not bruto:
+            # Sem data no body: usa o padrão da campanha.
+            try:
+                bruto = str(get_settings().get("embaixador_padrao_ate") or "").strip()
+            except Exception:
+                logger.exception("set_restaurant_embaixador: não li o padrão da campanha")
+                bruto = ""
+        try:
+            ate = _date.fromisoformat(bruto[:10])
+        except Exception:
+            # FALHA FECHADA. Sem data válida NÃO marca: um `embaixador_ate`
+            # nulo ou torto significaria isenção sem prazo, ou seja, a loja
+            # deixaria de pagar pra sempre e ninguém veria isso acontecer.
+            return jsonify({"status": "error",
+                            "message": "Defina até quando vale (ex.: 2026-12-31) "
+                                       "ou configure embaixador_padrao_ate."}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Erro de conexão com o banco de dados"}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(
+                """UPDATE restaurant_profiles
+                      SET embaixador_ate = %s, updated_at = NOW()
+                    WHERE id = %s
+                RETURNING id, restaurant_name, embaixador_ate""",
+                (ate, str(restaurant_id)),
+            )
+            row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return jsonify({"status": "error", "message": "Restaurante não encontrado"}), 404
+        conn.commit()
+        try:
+            log_admin_action_auto(
+                "SetRestaurantEmbaixador",
+                f"{'Marcou' if embaixador else 'Removeu'} o selo de Parceiro Embaixador "
+                f"do restaurante {row['restaurant_name']} ({restaurant_id})"
+                + (f" até {ate.isoformat()}" if ate else ""),
+            )
+        except Exception:
+            pass
+        d = dict(row)
+        if d.get("embaixador_ate"):
+            d["embaixador_ate"] = d["embaixador_ate"].isoformat()
+        return jsonify({"status": "success", "data": d}), 200
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Erro ao atualizar selo de embaixador")
+        return jsonify({"status": "error", "message": "Erro interno ao atualizar embaixador."}), 500
     finally:
         conn.close()
 

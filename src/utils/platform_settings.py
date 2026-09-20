@@ -217,7 +217,35 @@ _TEXT_DEFAULTS: dict[str, str] = {
     # escolheu). Assim o aviso cai uma vez em cada terco da janela dele, em vez
     # de deixar os ultimos 30 s no silencio.
     "push_reforco_oferta_segundos": "20,40",
+
+    # PARCEIRO EMBAIXADOR: até quando a campanha vale, pra quem for marcado sem
+    # data própria. UMA data pra campanha inteira — é o que diferencia o
+    # Embaixador do Fundador (que tem janela de 6 meses por parceiro). Esticar a
+    # campanha é mudar este campo, não passar loja por loja.
+    #
+    # Vazio NÃO libera ninguém: a rota do admin recusa marcar sem data válida.
+    # Falha fechada de propósito — isenção sem prazo é a plataforma trabalhando
+    # de graça sem ninguém perceber.
+    "embaixador_padrao_ate": "2026-12-31",
 }
+
+
+# ⚠️ AS CHAVES QUE O BANCO É CONSULTADO POR. Precisa ser a UNIÃO dos dois
+# dicionários, e essa linha já esteve errada: por meses o SELECT pedia só
+# `_DEFAULTS.keys()`, então NENHUM dos settings de texto chegava aqui. O merge
+# lá embaixo fazia `raw.get(k)` → None e todos caíam no padrão cravado —
+# `push_canal_entregador`, `push_reforco_oferta_segundos` e a janela do indique
+# e ganhe. O campo aparecia no admin, aceitava o valor, salvava no banco e não
+# mudava NADA; o efeito era idêntico ao de um campo inerte.
+#
+# Doeu de verdade porque o plano do canal de push depende disto: a virada pro
+# `inksa_urgente_v2` depois do APK novo é feita EXATAMENTE por este campo, e
+# teria sido um "mudei e não mudou nada" no dia em que entregador sem som é o
+# problema que se está tentando resolver.
+#
+# Deriva das duas fontes pra não poder divergir de novo — chave nova em
+# qualquer um dos dicionários já entra no SELECT sozinha.
+_CHAVES_LIDAS = list(_DEFAULTS.keys()) + list(_TEXT_DEFAULTS.keys())
 
 
 def _to_decimal(raw, default: Decimal) -> Decimal:
@@ -304,22 +332,33 @@ def _normalize(rows: list[tuple[str, str]]) -> dict[str, Decimal]:
     return out
 
 
+def _tudo_no_padrao() -> dict:
+    """Os defaults dos DOIS dicionários — o que vale quando o banco não responde.
+
+    `dict(_DEFAULTS)` sozinho devolvia um dict SEM as chaves de texto, e a
+    diferença entre "a chave vale o padrão" e "a chave não existe" aparece só no
+    pior momento: com o banco fora, `get_settings()["push_canal_entregador"]`
+    levantava KeyError em vez de cair no comportamento de sempre.
+    """
+    return {**_DEFAULTS, **_TEXT_DEFAULTS}
+
+
 def _load_from_db() -> dict[str, Decimal]:
     conn = get_db_connection()
     if not conn:
         logger.warning("platform_settings: DB indisponível, usando defaults")
-        return dict(_DEFAULTS)
+        return _tudo_no_padrao()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT key, value FROM platform_settings WHERE key = ANY(%s)",
-                (list(_DEFAULTS.keys()),),
+                (_CHAVES_LIDAS,),
             )
             rows = cur.fetchall()
         return _normalize(rows)
     except Exception:
         logger.exception("platform_settings: falha ao ler do DB, usando defaults")
-        return dict(_DEFAULTS)
+        return _tudo_no_padrao()
     finally:
         try:
             conn.close()
@@ -481,11 +520,67 @@ def founding_commission_factor(restaurant_id) -> Decimal:
             pass
 
 
-def effective_commission_rate(restaurant_id=None) -> Decimal:
-    """Taxa de comissão que vale pra este parceiro agora (fração 0..1).
+# OS NOMES QUE O PARCEIRO VÊ, TODOS AQUI.
+#
+# O código trabalha com a chave ('embaixador', 'fundador', 'clube'); a tela
+# mostra o rótulo. Separados de propósito: trocar o nome comercial é decisão de
+# marca e acontece — "Especial" virou "Embaixador" quinze minutos depois de
+# nascer. Com o rótulo isolado, a próxima troca é UMA linha, sem migration,
+# sem mexer em dado gravado e sem risco de a cobrança e o aviso divergirem.
+ROTULO_CATEGORIA = {
+    'embaixador': 'Parceiro Embaixador',
+    'fundador':   'Parceiro Fundador',
+    'clube':      None,   # o nome vem do nível do Clube (Bronze, Prata, ...)
+    'padrao':     'Parceiro',
+}
 
-    Existem DOIS descontos e eles NÃO SE SOMAM — vale o melhor dos dois:
 
+def embaixador_ate(restaurant_id):
+    """Até quando este parceiro é EMBAIXADOR (não paga nada). None se não é.
+
+    Fonte única: `restaurant_profiles.embaixador_ate`. Sem booleano paralelo de
+    propósito — ver o comentário da migration `restaurant_parceiro_especial`.
+
+    ⚠️ `supabase_admin`, não `supabase`. O cliente compartilhado é o mesmo em
+    que routes/auth.py chama sign_in_with_password, e essa chamada troca o
+    token dele INTEIRO: depois dela ele vale como `authenticated` e a RLS passa
+    a valer, devolvendo ZERO LINHAS sem erro nenhum. Foi assim que a primeira
+    oferta relâmpago recusou todo mundo em 17/09/2026. Aqui o estrago seria
+    pior: parceiro embaixador voltaria a ser cobrado em silêncio.
+
+    Fail-safe: qualquer tropeço devolve None, ou seja, COBRA a comissão. Errar
+    pro lado de não cobrar seria a plataforma trabalhando de graça sem ninguém
+    perceber; errar pro lado de cobrar aparece na primeira conversa com o
+    parceiro e é corrigível.
+    """
+    if not restaurant_id:
+        return None
+    try:
+        from .helpers import supabase_admin as _sb
+        r = (_sb.table('restaurant_profiles')
+               .select('embaixador_ate')
+               .eq('id', str(restaurant_id)).limit(1).execute())
+        if not r.data:
+            return None
+        bruto = r.data[0].get('embaixador_ate')
+        if not bruto:
+            return None
+        from datetime import date as _date
+        d = _date.fromisoformat(str(bruto)[:10])
+        return d if d >= _date.today() else None
+    except Exception:
+        logger.exception("embaixador_ate falhou — cobrando comissão normal")
+        return None
+
+
+def commission_breakdown(restaurant_id=None) -> dict:
+    """A taxa que vale pra este parceiro agora E DE ONDE ELA VEM.
+
+    Devolve {'rate': Decimal 0..1, 'categoria': str, 'ate': date|None}.
+
+    Existem TRÊS descontos e eles NÃO SE SOMAM — vale o melhor deles:
+
+      • Parceiro Embaixador: ZERO até a data dele (campanha de captação).
       • Parceiro Fundador: fator sobre a taxa cheia (0.5 = metade), com prazo.
       • Clube Inksa: desconto em pontos percentuais conforme o faturamento do mês.
 
@@ -495,13 +590,24 @@ def effective_commission_rate(restaurant_id=None) -> Decimal:
     campanha o fundador fica nos 7,5% (que já ganha de qualquer nível do Clube) e
     quando a campanha vencer ele cai pro nível que conquistou, sem degrau.
 
+    ⚠️ A CATEGORIA SAI DAQUI, DA MESMA CONTA QUE COBRA — e é esse o ponto desta
+    função existir. O parceiro passa a ver na tela "hoje sua categoria é X, seu
+    repasse é Y%"; se a tela decidisse o X por conta própria, um dia diria
+    "Fundador" enquanto a fatura viesse pelo Clube. Aviso que discorda da
+    cobrança é pior que não ter aviso.
+
+    ⚠️ EMPATE VAI PRO PRIMEIRO. `min` devolve o primeiro mínimo, e a ordem aqui
+    é embaixador → fundador → clube. Importa no dia em que um Diamante (10%)
+    virar fundador (7,5%): vence o fundador; quando a janela dele fechar, ele
+    cai pro nível que conquistou, sem degrau e sem surpresa.
+
     Piso em zero: comissão negativa significaria a Inksa pagando pra vender.
     """
     base = get_settings()["commission_rate"]
     if not restaurant_id:
-        return base
+        return {"rate": base, "categoria": "padrao", "ate": None}
 
-    fundador = base * founding_commission_factor(restaurant_id)
+    fator = founding_commission_factor(restaurant_id)
 
     # Import local: club importa helpers, e helpers não importa este módulo —
     # mas o import tardio deixa isso imune a quem mexer nessa ordem depois.
@@ -509,12 +615,43 @@ def effective_commission_rate(restaurant_id=None) -> Decimal:
         from .club import restaurant_commission_discount_pp
         pp = Decimal(str(restaurant_commission_discount_pp(restaurant_id)))
     except Exception:
-        logger.exception("effective_commission_rate: clube indisponível, usando taxa cheia")
+        logger.exception("commission_breakdown: clube indisponível, usando taxa cheia")
         pp = Decimal("0")
-    clube = base - (pp / Decimal("100"))
 
-    rate = min(fundador, clube)
-    return rate if rate > 0 else Decimal("0")
+    ate_emb = embaixador_ate(restaurant_id)
+
+    # ⚠️ SÓ ENTRA NO PÁREO QUEM TEM BENEFÍCIO DE VERDADE. A tentação é listar os
+    # três sempre e deixar o `min` resolver — mas sem nenhum benefício os três
+    # valem a taxa cheia, empatam, e o `min` devolve o PRIMEIRO da lista. O
+    # parceiro comum apareceria na tela como "Parceiro Embaixador" pagando 15%.
+    # Um candidato que não desconta nada não é candidato: é a taxa cheia com
+    # outro nome.
+    candidatos = []
+    if ate_emb:
+        candidatos.append(("embaixador", Decimal("0")))
+    if fator < 1:
+        candidatos.append(("fundador", base * fator))
+    if pp > 0:
+        candidatos.append(("clube", base - (pp / Decimal("100"))))
+
+    if not candidatos:
+        return {"rate": base, "categoria": "padrao", "ate": None}
+
+    categoria, rate = min(candidatos, key=lambda c: c[1])
+    if rate < 0:
+        rate = Decimal("0")
+    return {"rate": rate, "categoria": categoria,
+            "ate": ate_emb if categoria == "embaixador" else None}
+
+
+def effective_commission_rate(restaurant_id=None) -> Decimal:
+    """Taxa de comissão que vale pra este parceiro agora (fração 0..1).
+
+    Fina de propósito: a conta inteira (e o motivo dela) vive em
+    `commission_breakdown`. Duas implementações da mesma taxa é a forma mais
+    rápida de a tela dizer um número e a fatura cobrar outro.
+    """
+    return commission_breakdown(restaurant_id)["rate"]
 
 
 def calculate_platform_commission(subtotal, restaurant_id=None, retirada=False) -> Decimal:
