@@ -190,7 +190,8 @@ CANAL_CAMPANHA = 'inksa_ofertas_som'
 
 
 def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
-                     urgente: bool = False, canal: str = None):
+                     urgente: bool = False, canal: str = None,
+                     fixa: bool = False, tag: str = None):
     """Monta a Message do FCM. Existe pra corrigir o PUSH DUPLICADO.
 
     O bug: a mensagem ia com `notification=` no nível de cima. No WEB, isso faz
@@ -246,6 +247,33 @@ def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
             default_vibrate_timings=True,
         )
         config['priority'] = 'high'
+
+    # FIXA E COM ETIQUETA — o atalho de volta do Waze (20/09/2026).
+    #
+    # `sticky=True`: a notificação NÃO some quando a pessoa toca nela. É o que
+    # transforma um aviso em ATALHO: o entregador volta pro app, aperta Dirigir
+    # de novo, e o caminho de volta continua lá. Sem isso ele precisaria sair e
+    # voltar do Waze só pra fazer a notificação reaparecer.
+    #
+    # `tag`: notificação com a mesma etiqueta SUBSTITUI a anterior em vez de
+    # empilhar. Sem ela, quem apertasse Dirigir três vezes na mesma corrida
+    # ficaria com três avisos iguais na barra, e aí a barra deixa de ajudar.
+    #
+    # ⚠️ Não dá pra APAGAR notificação pelo FCM. Quem limpa é o app, ao
+    # concluir a entrega (removeAllDeliveredNotifications) — senão a corrida
+    # terminada ficaria na barra convidando a abrir um pedido que já acabou.
+    if fixa or tag:
+        campos = {'title': title, 'body': body}
+        # Preserva o que os ramos acima já decidiram (canal, som, vibração).
+        for k in ('channel_id', 'sound', 'default_vibrate_timings'):
+            v = getattr(notif, k, None)
+            if v is not None:
+                campos[k] = v
+        if fixa:
+            campos['sticky'] = True
+        if tag:
+            campos['tag'] = tag
+        notif = messaging.AndroidNotification(**campos)
 
     return messaging.Message(
         data={**corpo_dados, 'urgente': '1' if urgente else '0'},
@@ -304,8 +332,13 @@ def send_campaign(destinos: list, title: str, body: str, data: dict = None,
 
 
 def send_push_notification(token: str, title: str, body: str, data: dict = None,
-                           urgente: bool = False) -> bool:
-    """Envia push notification via FCM usando firebase_admin. Retorna True se sucesso."""
+                           urgente: bool = False, fixa: bool = False,
+                           tag: str = None) -> bool:
+    """Envia push notification via FCM usando firebase_admin. Retorna True se sucesso.
+
+    `fixa` = a notificação não some ao ser tocada (vira atalho, não aviso).
+    `tag`  = notificações com a mesma etiqueta se substituem em vez de empilhar.
+    """
     if not token:
         logger.warning("FCM: token ausente, notificacao ignorada")
         return False
@@ -314,7 +347,8 @@ def send_push_notification(token: str, title: str, body: str, data: dict = None,
         return False
 
     try:
-        response = messaging.send(_montar_mensagem(token, title, body, data, urgente=urgente))
+        response = messaging.send(_montar_mensagem(token, title, body, data,
+                                                   urgente=urgente, fixa=fixa, tag=tag))
         logger.info("FCM: notificacao enviada — message_id=%s token=%s...", response, token[:10])
         return True
     except messaging.UnregisteredError:

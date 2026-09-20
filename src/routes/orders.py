@@ -46,7 +46,7 @@ def _get_fcm_token(cur, table: str, user_id: str):
         return None
 
 
-def _notify(token, title, body, data=None, urgente=False):
+def _notify(token, title, body, data=None, urgente=False, fixa=False, tag=None):
     """Dispara push notification de forma defensiva — nunca propaga exceções.
 
     ⚠️ ENVIO SÍNCRONO, E ISSO É DELIBERADO.
@@ -76,7 +76,8 @@ def _notify(token, title, body, data=None, urgente=False):
     if not _send_push or not token:
         return
     try:
-        _send_push(token, title, body, data or {}, urgente=urgente)
+        _send_push(token, title, body, data or {}, urgente=urgente,
+                   fixa=fixa, tag=tag)
     except Exception as e:
         logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
 
@@ -3372,14 +3373,29 @@ def atalho_de_volta(order_id):
         # saber o que fazer ao chegar, não que existe um app esperando.
         indo_buscar = pedido['status'] in ('ready', 'accepted_by_delivery')
         titulo = f"Pedido #{pedido['numero']} em andamento"
-        corpo = ("Chegou na loja? Toque para ver o código de retirada."
+        # ⚠️ O texto de "indo buscar" mudou em 20/09/2026: o entregador não vê
+        # mais o código — ele DIGITA o que o parceiro mostra no balcão.
+        corpo = ("Chegou na loja? Toque para confirmar a retirada."
                  if indo_buscar else
                  "Chegou no cliente? Toque para confirmar a entrega.")
 
+        # FIXA E COM ETIQUETA — é o que transforma o aviso em ATALHO.
+        #
+        # `fixa`: não some quando ele toca. Ele volta pro app, aperta Dirigir de
+        # novo e o caminho de volta continua na barra. Sem isso, precisaria sair
+        # e voltar do Waze só pra fazer a notificação reaparecer.
+        #
+        # `tag` por PEDIDO: apertar Dirigir três vezes na mesma corrida
+        # substitui o aviso em vez de empilhar três iguais — e barra cheia de
+        # aviso repetido é barra que a pessoa para de ler.
+        #
+        # ⚠️ Quem LIMPA é o app, ao concluir a entrega. O FCM não apaga
+        # notificação; sem essa limpeza, a corrida terminada ficaria na barra
+        # convidando a abrir um pedido que já acabou.
         _notify(token, titulo, corpo,
                 {"order_id": str(order_id), "url": "/delivery/entregas",
                  "type": "volta_rapida"},
-                urgente=False)
+                urgente=False, fixa=True, tag=f"corrida:{order_id}")
         return jsonify({"enviado": True}), 200
 
     except Exception as e:
