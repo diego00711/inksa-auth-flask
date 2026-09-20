@@ -1484,14 +1484,23 @@ def criar_relampago(banner_id):
 # dele. O admin não tinha como anunciar um cupom que já existia, nem escolher
 # pra quem.
 #
-# ⚠️ É A MESMA ENGRENAGEM, NÃO UMA SEGUNDA. A chave de campanha é a mesma do
-# automático (`coupon:<id>`), então as regras que já existiam continuam
-# valendo sem precisar ser repetidas:
-#   • UMA VEZ POR CUPOM POR CLIENTE — quem já recebeu pelo automático não
-#     recebe de novo pelo botão (índice único de push_campaign_log);
-#   • TETO DIÁRIO (push_campaign_daily_cap) — protege o cliente de bombardeio.
-# Um botão que ignorasse isso seria o jeito mais rápido de fazer cliente
-# silenciar o app — e com 36 clientes, cada um que silencia é 3% da base.
+# ⚠️ QUEM RECEBE É QUEM AINDA NÃO USOU (mudou em 18/09/2026).
+#
+# Na primeira versão a trava era "quem já recebeu o aviso deste cupom não
+# recebe de novo, nunca". Parecia proteção e era o contrário: o SEJABEMVINDO
+# foi anunciado pros 9 clientes, NINGUÉM usou, e o botão ficou morto pra sempre
+# — "0 clientes" em todos os públicos. Lembrar quem não usou é justamente o
+# motivo de existir um cupom de boas-vindas.
+#
+# Agora a pergunta é "esta pessoa ainda PODE usar?" (`coupon_redemptions` +
+# `max_uses_per_client`), e o que segura o abuso é:
+#   • TETO DIÁRIO (push_campaign_daily_cap) — no máximo N avisos por cliente
+#     por dia, contando TODAS as campanhas;
+#   • UMA VEZ POR DIA POR CUPOM — o dia entra na chave de campanha
+#     (`_campanha_do_cupom`), então não dá pra mandar o mesmo cupom duas vezes
+#     no mesmo dia nem sem querer.
+# Um botão sem isso seria o jeito mais rápido de fazer cliente silenciar o app
+# — e com 36 clientes, cada um que silencia é 3% da base.
 #
 # O QUE NÃO DÁ PRA ANUNCIAR, E POR QUÊ (`_por_que_nao_anunciar`):
 #   • "só digitado": é cupom de campanha de fora (rádio, panfleto). Cada uso
@@ -1533,13 +1542,52 @@ def _publicos_do_cupom(c):
     return ['todos']
 
 
+def _sem_quem_ja_usou(cur, destinos, c):
+    """Tira da lista quem já ESGOTOU este cupom.
+
+    ⚠️ ESTA É A TRAVA QUE DECIDE QUEM RECEBE, e ela mudou em 18/09/2026.
+
+    Antes era "quem já recebeu o aviso deste cupom não recebe de novo, nunca".
+    Parecia proteção e era o contrário: o SEJABEMVINDO foi anunciado pros 9
+    clientes, NINGUÉM usou, e o botão ficou morto pra sempre — "0 clientes" em
+    todos os públicos. Lembrar quem não usou é justamente o motivo de existir um
+    cupom de boas-vindas.
+
+    Agora a pergunta é "esta pessoa ainda PODE usar?", e a resposta sai de
+    `coupon_redemptions` (a mesma tabela que o fechamento do pedido consulta).
+    Quem já usou some da lista; quem foi avisado e não usou continua nela.
+
+    `max_uses_per_client` vazio = uma vez por pessoa. É o mesmo padrão do
+    `evaluate_coupon`: anunciar de novo pra quem já usou seria prometer um
+    desconto que o carrinho vai recusar.
+    """
+    if not destinos:
+        return destinos
+    try:
+        limite = int(c.get('max_uses_per_client') or 1)
+    except (TypeError, ValueError):
+        limite = 1
+    limite = max(1, limite)
+    cur.execute("""
+        SELECT client_id FROM coupon_redemptions
+         WHERE coupon_id = %s AND client_id = ANY(%s::uuid[])
+         GROUP BY client_id HAVING COUNT(*) >= %s
+    """, (str(c['id']), [str(cid) for cid, _ in destinos], limite))
+    esgotados = {str(r['client_id']) for r in cur.fetchall()}
+    return [(cid, tk) for cid, tk in destinos if str(cid) not in esgotados]
+
+
 def _destinos_do_cupom(cur, c, publico, campanha, email_teste=None):
     """(client_id, fcm_token) de quem recebe. Reaproveita o seletor da relâmpago.
 
     `_publico_do_relampago` já resolve 'todos' / 'ja_pediram' / 'no_raio' /
-    'so_eu' com as travas de token e de "já recebeu esta campanha" — e foi
-    testado com o Diego em 13/09. Duplicar essa lógica aqui criaria duas regras
-    pra mesma pergunta, e aí uma delas fica errada.
+    'so_eu' com a trava de token — e foi testado com o Diego em 13/09.
+    Duplicar essa lógica aqui criaria duas regras pra mesma pergunta, e aí uma
+    delas fica errada.
+
+    A `campanha` que entra aqui já leva o DIA (ver `_campanha_do_cupom`), então
+    o que ela barra é reenviar o mesmo cupom pra mesma pessoa NO MESMO DIA —
+    não pra sempre. Quem não usou volta a ser alcançável amanhã.
 
     `so_app_fechado=False` de propósito: a relâmpago pula quem está com o app
     aberto porque essa pessoa JÁ VÊ o banner na tela. Cupom não tem banner — o
@@ -1553,11 +1601,34 @@ def _destinos_do_cupom(cur, c, publico, campanha, email_teste=None):
                AND NOT EXISTS (SELECT 1 FROM push_campaign_log l
                                 WHERE l.client_id = cp.id AND l.campanha = %s)
         """, (str(c['owner_client_id']), campanha))
-        return [(r['id'], r['fcm_token']) for r in cur.fetchall()]
+        destinos = [(r['id'], r['fcm_token']) for r in cur.fetchall()]
+    else:
+        loja = {'restaurant_id': c['restaurant_id'], 'loja_lat': c['loja_lat'],
+                'loja_lng': c['loja_lng'], 'raio_km': c['raio_km']}
+        destinos = _publico_do_relampago(cur, loja, publico, False, campanha, email_teste)
 
-    loja = {'restaurant_id': c['restaurant_id'], 'loja_lat': c['loja_lat'],
-            'loja_lng': c['loja_lng'], 'raio_km': c['raio_km']}
-    return _publico_do_relampago(cur, loja, publico, False, campanha, email_teste)
+    # No teste a trava não vale: ele existe pra você ver a notificação chegar,
+    # e sua própria conta pode já ter usado o cupom.
+    if publico == 'so_eu':
+        return destinos
+    return _sem_quem_ja_usou(cur, destinos, c)
+
+
+def _campanha_do_cupom(cur, coupon_id):
+    """Chave de campanha do anúncio manual: `coupon:<id>:<dia em Lages>`.
+
+    ⚠️ O DIA NO NOME NÃO É ENFEITE. O índice único de `push_campaign_log` é
+    (client_id, campanha). Com a chave fixa `coupon:<id>`, o segundo envio pra
+    mesma pessoa caía no `ON CONFLICT DO NOTHING` e NÃO era registrado — o que
+    deixaria o teto diário cego justamente nos reenvios. Com o dia dentro da
+    chave, cada envio vira uma linha, o teto conta certo, e reenviar no mesmo
+    dia continua impossível.
+
+    O dia vem do banco, em horário de Lages, pra bater com o teto diário — que
+    também usa o dia de Lages, e não o de UTC.
+    """
+    cur.execute("SELECT (now() AT TIME ZONE 'America/Sao_Paulo')::date AS dia")
+    return "coupon:%s:%s" % (coupon_id, cur.fetchone()['dia'].isoformat())
 
 
 def _teto_diario(cur):
@@ -1648,7 +1719,7 @@ def disparar_cupom(coupon_id):
                 return jsonify({"error": "Cupom não encontrado"}), 404
 
             motivo = _por_que_nao_anunciar(c)
-            campanha = "coupon:%s" % c['id']
+            campanha = _campanha_do_cupom(cur, c['id'])
             permitidos = _publicos_do_cupom(c)
             sem_coord = c['loja_lat'] is None or c['loja_lng'] is None
             teto = _teto_diario(cur)
@@ -1664,16 +1735,25 @@ def disparar_cupom(coupon_id):
                         publicos.append({"id": p, "elegiveis": 0,
                                          "obs": "A loja não tem coordenada — não dá pra calcular raio."})
                         continue
-                    d = _destinos_do_cupom(cur, c, p, campanha)
-                    d = _sem_quem_estourou_o_teto(cur, d, teto) if teto > 0 else []
-                    publicos.append({"id": p, "elegiveis": len(d)})
-                cur.execute("SELECT COUNT(*) AS n FROM push_campaign_log WHERE campanha = %s",
-                            (campanha,))
-                ja = int(cur.fetchone()['n'])
+                    brutos = _destinos_do_cupom(cur, c, p, campanha)
+                    liberados = _sem_quem_estourou_o_teto(cur, brutos, teto) if teto > 0 else []
+                    # `segurados_hoje` é o que responde "por que zero?". Sem ele
+                    # o admin vê 0 e conclui que o botão quebrou — foi o que
+                    # aconteceu em 18/09, quando os 9 já tinham recebido um
+                    # aviso naquele mesmo dia.
+                    publicos.append({"id": p, "elegiveis": len(liberados),
+                                     "segurados_hoje": len(brutos) - len(liberados)})
+                cur.execute("SELECT COUNT(DISTINCT client_id) AS n FROM coupon_redemptions "
+                            " WHERE coupon_id = %s", (str(c['id']),))
+                ja_usaram = int(cur.fetchone()['n'])
+                cur.execute("SELECT COUNT(DISTINCT client_id) AS n FROM push_campaign_log "
+                            " WHERE campanha LIKE %s", ("coupon:%s%%" % c['id'],))
+                ja_avisados = int(cur.fetchone()['n'])
                 return jsonify({"status": "success", "data": {
                     "pode": True,
                     "publicos": publicos,
-                    "ja_receberam": ja,
+                    "ja_usaram": ja_usaram,
+                    "ja_avisados": ja_avisados,
                     "teto_diario": teto,
                     "loja": c['restaurant_name'],
                     "pessoal": bool(c['owner_client_id']),
@@ -1709,7 +1789,7 @@ def disparar_cupom(coupon_id):
                         f"{email_teste or '(vazio)'}. Confira se é a conta do APP DO "
                         f"CLIENTE (não a do admin)."
                         if publico == 'so_eu' else
-                        "Ninguém elegível agora: ou já receberam este cupom, ou já "
+                        "Ninguém pra receber agora: ou já usaram este cupom, ou já "
                         "receberam o limite de avisos de hoje, ou não têm notificação ligada."
                     ),
                 }}), 200
