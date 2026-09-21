@@ -12,6 +12,36 @@ from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase,
 from functools import wraps
 from flask_cors import CORS
 from ..utils.precos import normalizar_promo
+
+
+def _estoque_do_corpo(data):
+    """(a chave veio?, valor) — a leitura do campo `stock` de um item.
+
+    ⚠️ VAZIO É NULO, NUNCA ZERO. Esta é a linha mais perigosa do arquivo.
+
+    `stock = NULL` significa "esta loja não controla estoque", e é o estado de
+    TODO item de restaurante. `stock = 0` significa "acabou" e tira o item da
+    vitrine. Se o campo em branco do formulário virasse 0, salvar qualquer item
+    de qualquer pizzaria ligaria um controle de estoque que ninguém pediu — e o
+    cardápio inteiro dela se desligaria sozinho na primeira venda.
+
+    ⚠️ O PRIMEIRO retorno também importa: só mexe em `stock` quem MANDOU a
+    chave. Chamada antiga que não conhece o campo não pode apagar o estoque do
+    parceiro só por ter salvo um preço.
+
+    Negativo vira zero: estoque negativo não quer dizer nada e vaza pra tela.
+    """
+    if 'stock' not in data and 'estoque' not in data:
+        return False, None
+    bruto = data.get('stock') if 'stock' in data else data.get('estoque')
+    if bruto is None or str(bruto).strip() == '':
+        return True, None
+    try:
+        return True, max(int(float(str(bruto).replace(',', '.'))), 0)
+    except (TypeError, ValueError):
+        # Lixo no campo não é motivo pra desligar o controle de estoque nem
+        # pra zerar: melhor não mexer.
+        return False, None
 from ..utils.catalogo import importar_itens
 
 logging.basicConfig(level=logging.INFO)
@@ -111,7 +141,10 @@ def get_menu_items(conn):
         cur.execute(
             """SELECT mi.id, mi.name, mi.description, mi.price, mi.category,
                       mi.is_available, mi.image_url, mi.promo_price,
-                      mi.age_restricted,
+                      -- `stock` desce porque agora ele MEXE sozinho (a venda
+                      -- dá baixa). Sem mostrar o número, "meu produto sumiu da
+                      -- vitrine" não tem resposta na tela do parceiro.
+                      mi.age_restricted, mi.stock,
                       COALESCE((
                         SELECT array_agg(g.nome ORDER BY g.ordem, g.created_at)
                           FROM menu_item_option_groups g
@@ -159,6 +192,8 @@ def add_menu_item(conn):
                                "se o pedido cabe numa moto ou precisa de carro.",
                 }), 400
 
+            _mexe_est, _est = _estoque_do_corpo(data)
+
             # PROMOÇÃO — validada no servidor, não no navegador. Campo vazio
             # apaga a promoção; valor maior ou igual ao preço normal é recusado
             # com texto pronto pra mostrar. A regra está em utils/precos.py.
@@ -170,10 +205,15 @@ def add_menu_item(conn):
 
             # Inserir o item com o restaurant_id correto
             cur.execute(
-                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg, promo_price, age_restricted) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
-                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'], data.get('is_available', True), data.get('image_url', None), peso, promo,
-                 bool(data.get('age_restricted', False)))
+                "INSERT INTO menu_items (user_id, restaurant_id, name, description, price, category, is_available, image_url, peso_kg, promo_price, age_restricted, stock) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (user_id, restaurant_id, data['name'], data.get('description', ''), float(data['price']), data['category'],
+                 # Estoque zero nasce indisponível: não dá pra vender o que não
+                 # existe, e deixar disponível criaria um item que o cliente
+                 # coloca no carrinho e o checkout recusa.
+                 False if _est == 0 else data.get('is_available', True),
+                 data.get('image_url', None), peso, promo,
+                 bool(data.get('age_restricted', False)), _est)
             )
             new_item = make_serializable(dict(cur.fetchone()))
             conn.commit()
@@ -219,18 +259,28 @@ def update_menu_item(conn, item_id):
             return jsonify({"status": "error", "error": "promo_invalida",
                             "message": str(e)}), 400
 
+        _mexe_est, _est = _estoque_do_corpo(data)
+
         # Atualizar o item
+        #
+        # ⚠️ `stock` só é tocado se a CHAVE veio no corpo (`CASE WHEN %s`).
+        # Sem isso, qualquer chamada antiga que não conheça o campo — e existem
+        # várias — apagaria o estoque do parceiro ao salvar um preço.
         cur.execute(
             """
             UPDATE menu_items
             SET name = %s, description = %s, price = %s, category = %s, is_available = %s, image_url = %s,
-                peso_kg = %s, promo_price = %s, age_restricted = %s
+                peso_kg = %s, promo_price = %s, age_restricted = %s,
+                stock = CASE WHEN %s THEN %s::int ELSE stock END
             WHERE id = %s
             RETURNING *
             """,
             (data['name'], data.get('description'), float(data['price']), data['category'],
-             data.get('is_available', True), data.get('image_url'), peso, promo,
-             bool(data.get('age_restricted', False)), str(item_id))
+             # Zerar o estoque tira da vitrine mesmo com a caixinha marcada:
+             # o cliente não pode pedir o que a loja acabou de dizer que não tem.
+             False if (_mexe_est and _est == 0) else data.get('is_available', True),
+             data.get('image_url'), peso, promo,
+             bool(data.get('age_restricted', False)), _mexe_est, _est, str(item_id))
         )
         updated_item = make_serializable(dict(cur.fetchone()))
         conn.commit()
