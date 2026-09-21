@@ -93,6 +93,7 @@ try:
     from src.routes.club_routes import club_bp
     from src.routes.referrals_routes import referrals_bp
     from src.routes.referrals_admin import referrals_admin_bp
+    from src.routes.campanhas import campanhas_bp, campanhas_admin_bp
     from src.scheduler import start_scheduler
 except ImportError as e:
     logging.error(f"Erro de importação: {e}")
@@ -370,6 +371,10 @@ app.register_blueprint(chat_bp, url_prefix='/api/chat')
 app.register_blueprint(club_bp, url_prefix='/api/club')
 app.register_blueprint(referrals_bp, url_prefix='/api/referrals')
 app.register_blueprint(referrals_admin_bp, url_prefix='/api/admin/referrals')
+# Origem do cliente. O /clique é público (roda antes de existir conta); o
+# /atribuir exige login; o admin vê o funil.
+app.register_blueprint(campanhas_bp, url_prefix='/api/campanha')
+app.register_blueprint(campanhas_admin_bp, url_prefix='/api/admin/campanhas')
 
 # --- Rotas de Admin ---
 app.register_blueprint(admin_bp, url_prefix='/api/admin')

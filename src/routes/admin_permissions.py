@@ -18,6 +18,10 @@ VALID_PAGES = {
     "dashboard", "metricas", "prontidao", "carrinhos",
     "usuarios", "restaurantes", "prospeccao", "avaliacoes", "gamificacao",
     "banners", "cupons", "recompensas", "clube", "social",
+    # `indicacoes` estava faltando desde que a tela nasceu — exatamente o furo
+    # que o comentário acima descreve. Invisível hoje porque só existe
+    # super-admin, e viraria "sumiu do menu" no dia do primeiro admin comum.
+    "indicacoes", "campanhas",
     "logs", "administradores", "relatorios", "financeiro", "payouts", "dividas",
     "ocorrencias", "suporte", "configuracoes", "integracoes",
 }
