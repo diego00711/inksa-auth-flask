@@ -13,6 +13,9 @@ import sentry_sdk
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from src.extensions import limiter
 from ..utils.pedido_itens import eh_linha_de_frete
+# Import na MESMA edição do uso. Baixa na criação (1 dos 3 caminhos que criam
+# pedido) e devolução nos 2 cancelamentos — ver utils/estoque.py.
+from ..utils.estoque import baixar as baixar_estoque, devolver as devolver_estoque
 
 try:
     from .gamification_routes import (
@@ -524,6 +527,11 @@ def handle_orders():
                 new_order = dict(cur.fetchone())
                 conn.commit()
 
+                # BAIXA DE ESTOQUE — caminho 1 de 3 (dinheiro/na entrega).
+                # Depois do commit de propósito: se a escrituração falhar, o
+                # pedido já está gravado e vale. Ver utils/estoque.py, regra 4.
+                baixar_estoque(order_data['items'], new_order.get('id'))
+
                 # nunca devolve os códigos no payload padrão
                 new_order.pop('pickup_code', None)
                 new_order.pop('delivery_code', None)
@@ -631,6 +639,12 @@ def update_order_status(order_id):
             )
             updated_order = dict(cur.fetchone())
             conn.commit()
+
+            # DEVOLUÇÃO AO ESTOQUE — cancelamento 1 de 2 (loja ou admin).
+            # Sem isto cada cancelamento comeria estoque pra sempre, e o item
+            # sumiria da vitrine por uma venda que não aconteceu.
+            if new_status_internal == 'cancelled':
+                devolver_estoque(updated_order.get('items'), str(order_id))
 
             # Cancelamento de pedido já pago (online) precisa estornar o cliente
             # automaticamente -- sem isso o pedido fica "pago mas cancelado" e o
@@ -2886,12 +2900,20 @@ def cancel_order_by_client(order_id):
                        completed_at = COALESCE(completed_at, NOW()),
                        updated_at = NOW()
                  WHERE id = %s AND status IN ('awaiting_payment', 'pending')
-                RETURNING id
+                RETURNING id, items
             """, (str(order_id),))
-            if not cur.fetchone():
+            _cancelado = cur.fetchone()
+            if not _cancelado:
                 conn.rollback()
                 return jsonify({"error": "Pedido não pode mais ser cancelado"}), 409
             conn.commit()
+
+            # DEVOLUÇÃO AO ESTOQUE — cancelamento 2 de 2 (o próprio cliente).
+            # Devolve DEPOIS do commit e só se o UPDATE atômico pegou: o
+            # `RETURNING` é quem prova que este cancelamento é real e único.
+            # Devolver antes, ou sem checar, daria estoque de volta por um
+            # cancelamento que a condição do WHERE recusou.
+            devolver_estoque(_cancelado.get('items'), str(order_id))
 
             # Estorno automatico se ja estava pago online
             if order['status_pagamento'] == 'approved':

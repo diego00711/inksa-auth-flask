@@ -24,6 +24,9 @@ from ..utils.coupons import (evaluate_coupon, consume_coupon, contar_usos_do_cli
                              reserva_do_cliente, precos_para_o_cupom)
 from ..utils import asaas
 from ..utils.gateway import payment_provider
+# Import na MESMA edição do uso. Este arquivo cria pedido em DUAS funções
+# (online e cartão) e a baixa tem que estar nas duas — ver utils/estoque.py.
+from ..utils.estoque import baixar as baixar_estoque
 from src.extensions import limiter
 
 # Criação do Blueprint
@@ -850,6 +853,11 @@ def criar_preferencia_mercado_pago():
             logging.info(f"✅ Pedido {pedido_id} criado com sucesso no banco!")
             logging.info(f"📊 Dados do pedido inserido: {result.data}")
 
+            # BAIXA DE ESTOQUE — caminho 2 de 3 (online / Mercado Pago).
+            # Ver utils/estoque.py: só mexe em item com stock não nulo, então
+            # restaurante não sente nada. Não levanta exceção por desenho.
+            baixar_estoque(order_data.get('items'), pedido_id)
+
         except Exception as e:
             error_message = str(e)
             logging.error(f"❌ Erro ao criar pedido no banco: {error_message}")
@@ -1665,6 +1673,12 @@ def processar_pagamento_cartao():
         _zerar_carrinho(client_profile_id)
         if not ins.data:
             return jsonify({"erro": "Erro ao criar pedido."}), 500
+
+        # BAIXA DE ESTOQUE — caminho 3 de 3 (cartão direto).
+        # Este é o caminho que mais fácil se esquece: nasceu depois dos outros
+        # dois e vive 800 linhas abaixo. Regra que entra em dois dos três vira
+        # buraco silencioso — é a cicatriz de [[inksa-dois-caminhos-pedido]].
+        baixar_estoque(order_data.get('items'), pedido_id)
 
         if coupon_id_card:
             consume_coupon(coupon_id_card, client_profile_id, ins.data[0].get('id'))
