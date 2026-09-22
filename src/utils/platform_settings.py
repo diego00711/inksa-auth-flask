@@ -541,12 +541,21 @@ def embaixador_ate(restaurant_id):
     Fonte única: `restaurant_profiles.embaixador_ate`. Sem booleano paralelo de
     propósito — ver o comentário da migration `restaurant_parceiro_especial`.
 
-    ⚠️ `supabase_admin`, não `supabase`. O cliente compartilhado é o mesmo em
-    que routes/auth.py chama sign_in_with_password, e essa chamada troca o
-    token dele INTEIRO: depois dela ele vale como `authenticated` e a RLS passa
-    a valer, devolvendo ZERO LINHAS sem erro nenhum. Foi assim que a primeira
-    oferta relâmpago recusou todo mundo em 17/09/2026. Aqui o estrago seria
-    pior: parceiro embaixador voltaria a ser cobrado em silêncio.
+    ⚠️ SQL DIRETO, NÃO A API REST DO SUPABASE — e isso foi aprendido caro.
+    A primeira versão lia por `supabase_admin.table(...)`. Em 22/09/2026 o
+    admin mostrava "Embaixador ✓" e o painel do parceiro dizia "Fundador,
+    7,5%": esta função devolvia None em produção. O dado estava no banco, a
+    coluna existia no PostgREST, o `service_role` tinha SELECT nela e ainda
+    tinha BYPASSRLS — tudo verificado um por um, e nada explicava.
+
+    O que explicava era a assimetria: dos três candidatos de
+    `commission_breakdown`, Fundador e Clube leem por psycopg2 e só o
+    Embaixador ia por HTTP. Tirar a camada REST tirou o problema.
+
+    Mantido em SQL por três motivos, e não só pelo bug: é o mesmo caminho do
+    irmão `founding_commission_factor` (uma regra, um jeito de ler); usa a
+    conexão do pool em vez de uma ida HTTP a São Paulo, numa função chamada em
+    TODO cálculo de comissão; e o fuso fica no banco, onde dá pra acertar.
 
     Fail-safe: qualquer tropeço devolve None, ou seja, COBRA a comissão. Errar
     pro lado de não cobrar seria a plataforma trabalhando de graça sem ninguém
@@ -555,22 +564,40 @@ def embaixador_ate(restaurant_id):
     """
     if not restaurant_id:
         return None
-    try:
-        from .helpers import supabase_admin as _sb
-        r = (_sb.table('restaurant_profiles')
-               .select('embaixador_ate')
-               .eq('id', str(restaurant_id)).limit(1).execute())
-        if not r.data:
-            return None
-        bruto = r.data[0].get('embaixador_ate')
-        if not bruto:
-            return None
-        from datetime import date as _date
-        d = _date.fromisoformat(str(bruto)[:10])
-        return d if d >= _date.today() else None
-    except Exception:
-        logger.exception("embaixador_ate falhou — cobrando comissão normal")
+    conn = get_db_connection()
+    if not conn:
+        logger.warning("embaixador_ate: sem banco — cobrando comissão normal")
         return None
+    try:
+        with conn.cursor() as cur:
+            # FUSO NO SQL, não em Python. `date.today()` no servidor é UTC, e
+            # o Render roda em UTC: às 21h de São Paulo já é o dia seguinte lá.
+            # O Embaixador venceria umas 3 horas antes da meia-noite do dia
+            # prometido — o mesmo erro de fuso que já matou cupom antes do
+            # prazo neste sistema.
+            cur.execute(
+                """SELECT embaixador_ate
+                     FROM restaurant_profiles
+                    WHERE id = %s
+                      AND embaixador_ate IS NOT NULL
+                      AND (now() AT TIME ZONE 'America/Sao_Paulo')::date
+                          <= embaixador_ate""",
+                (str(restaurant_id),),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception:
+        # O id vai no log de propósito: sem ele a linha diz que algo falhou e
+        # não diz PARA QUEM, e aí não dá pra saber se o parceiro que reclamou
+        # é o mesmo que errou. Foi o que faltou em 22/09/2026.
+        logger.exception("embaixador_ate falhou para %s — cobrando comissão normal",
+                         restaurant_id)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def commission_breakdown(restaurant_id=None) -> dict:
