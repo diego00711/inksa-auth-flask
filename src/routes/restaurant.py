@@ -9,6 +9,9 @@ from flask import Blueprint
 import psycopg2
 import psycopg2.extras
 from ..utils.helpers import supabase
+# Import na MESMA edição do uso. Sobe arquivo com a chave de serviço
+# explícita, sem depender da sessão do cliente — ver utils/storage.py.
+from ..utils.storage import upload as storage_upload
 from functools import wraps
 import uuid
 from datetime import datetime, date, time
@@ -494,13 +497,11 @@ def upload_logo():
 
         unique_filename = f"{user_id}_{str(uuid.uuid4())}{file_ext}"
         
-        upload_result = supabase_admin.storage.from_("logos").upload(
-            path=unique_filename,
-            file=file.read(),
-            file_options={"content-type": file.mimetype, "upsert": "true"}
-        )
-        
-        public_url = supabase_admin.storage.from_("logos").get_public_url(unique_filename)
+        # ⚠️ utils/storage: a chave de serviço vai em toda chamada. O cliente
+        # Supabase carrega sessão que vira `authenticated` depois de um login
+        # no mesmo worker, e este bucket NÃO tem política de INSERT.
+        public_url = storage_upload("logos", unique_filename, file.read(),
+                                    content_type=file.mimetype)
         
         conn = get_db_connection()
         if not conn:

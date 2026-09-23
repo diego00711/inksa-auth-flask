@@ -20,6 +20,9 @@ from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase,
 from ..utils.audit import log_admin_action, log_admin_action_auto
 from ..utils.email_service import send_email, render_simple
 from ..utils.platform_settings import get_settings
+# Import na MESMA edição do uso. Sobe arquivo com a chave de serviço
+# explícita, sem depender da sessão do cliente — ver utils/storage.py.
+from ..utils.storage import upload as storage_upload
 from src.extensions import limiter
 
 logger = logging.getLogger(__name__)
@@ -3152,12 +3155,11 @@ def admin_upload_logo(restaurant_id):
         # olhando o balde, e o uuid evita que uma troca de capa sobrescreva a
         # anterior enquanto alguém ainda está com a vitrine aberta.
         nome = f"{restaurant_id}_{uuid.uuid4()}{ext}"
-        supabase_admin.storage.from_("logos").upload(
-            path=nome,
-            file=dados,
-            file_options={"content-type": arquivo.mimetype or "image/jpeg", "upsert": "true"},
-        )
-        url = supabase_admin.storage.from_("logos").get_public_url(nome)
+        # ⚠️ utils/storage: a chave de serviço vai em toda chamada. O cliente
+        # Supabase carrega sessão que vira `authenticated` depois de um login
+        # no mesmo worker, e este bucket NÃO tem política de INSERT.
+        url = storage_upload("logos", nome, dados,
+                             content_type=arquivo.mimetype or "image/jpeg")
 
         conn = get_db_connection()
         if not conn:
@@ -3267,11 +3269,9 @@ def admin_migrar_fotos(restaurant_id):
                        "image/webp": ".webp", "image/gif": ".gif"}.get(tipo.split(";")[0], ".jpg")
                 nome = f"{restaurant_id}/{item['id']}{ext}"
 
-                supabase_admin.storage.from_("menu-images").upload(
-                    path=nome, file=r.content,
-                    file_options={"content-type": tipo.split(";")[0], "upsert": "true"},
-                )
-                nova = supabase_admin.storage.from_("menu-images").get_public_url(nome)
+                # utils/storage: chave de serviço explícita — ver menu.py.
+                nova = storage_upload("menu-images", nome, r.content,
+                                      content_type=tipo.split(";")[0])
 
                 with conn.cursor() as cur2:
                     cur2.execute("UPDATE menu_items SET image_url = %s, updated_at = NOW() WHERE id = %s",
@@ -3371,10 +3371,8 @@ def admin_fotos_em_lote(restaurant_id):
                         continue
                     tipo = {".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
                     caminho = f"{restaurant_id}/{item_id}{ext}"
-                    supabase_admin.storage.from_("menu-images").upload(
-                        path=caminho, file=conteudo,
-                        file_options={"content-type": tipo, "upsert": "true"})
-                    url = supabase_admin.storage.from_("menu-images").get_public_url(caminho)
+                    url = storage_upload("menu-images", caminho, conteudo,
+                                         content_type=tipo)
                     with conn.cursor() as c2:
                         c2.execute("UPDATE menu_items SET image_url = %s, updated_at = NOW() WHERE id = %s",
                                    (url, item_id))

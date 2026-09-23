@@ -12,6 +12,9 @@ from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase,
 from functools import wraps
 from flask_cors import CORS
 from ..utils.precos import normalizar_promo
+# Import na MESMA edição do uso. Sobe arquivo sem depender da sessão do
+# cliente Supabase — ver o cabeçalho de utils/storage.py.
+from ..utils.storage import upload as storage_upload
 
 
 def _estoque_do_corpo(data):
@@ -322,9 +325,14 @@ def upload_menu_item_image():
         file_ext = os.path.splitext(file.filename)[1]
         unique_filename = f"{user_id}-{uuid.uuid4()}{file_ext}"
         path_on_storage = f"public/{unique_filename}"
-        supabase_admin.storage.from_("menu-images").upload(path=path_on_storage, file=file.read(), file_options={"content-type": file.mimetype})
-        public_url = supabase_admin.storage.from_("menu-images").get_public_url(path_on_storage)
-        return jsonify({"status": "success", "data": {"image_url": public_url}}), 200
+        # ⚠️ utils/storage, não supabase_admin.storage. O cliente carrega uma
+        # sessão que vira `authenticated` depois que alguém loga no mesmo
+        # worker, e `menu-images` não tem política de INSERT — o upload morria
+        # com "new row violates row-level security", só em alguns workers.
+        # Aqui a chave de serviço vai em toda chamada. Ver utils/storage.py.
+        url_publica = storage_upload("menu-images", path_on_storage,
+                                     file.read(), content_type=file.mimetype)
+        return jsonify({"status": "success", "data": {"image_url": url_publica}}), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "error": str(e)}), 500

@@ -10,6 +10,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 import psycopg2.extras
 
+from ..utils.storage import upload as storage_upload
 from ..utils.helpers import get_user_id_from_token, supabase, supabase_admin
 
 _CORS_ORIGINS = [
@@ -1927,27 +1928,17 @@ def upload_reward_image():
 
     try:
         file_content = file.read()
-        supabase_admin.storage.from_(_REWARD_IMG_BUCKET).upload(
-            path=unique_name,
-            file=file_content,
-            file_options={"content-type": content_type},
-        )
+        # utils/storage: chave de serviço explícita. Este bucket também não
+        # tem política de INSERT — ver o cabeçalho de utils/storage.py.
+        _url_direta = storage_upload(_REWARD_IMG_BUCKET, unique_name,
+                                     file_content, content_type=content_type)
 
-        try:
-            url_resp = supabase_admin.storage.from_(_REWARD_IMG_BUCKET).get_public_url(unique_name)
-            if hasattr(url_resp, "data"):
-                public_url = url_resp.data
-            elif hasattr(url_resp, "publicURL"):
-                public_url = url_resp.publicURL
-            elif isinstance(url_resp, str):
-                public_url = url_resp
-            else:
-                raise ValueError("URL desconhecida")
-        except Exception:
-            supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-            public_url = f"{supabase_url}/storage/v1/object/public/{_REWARD_IMG_BUCKET}/{unique_name}"
-
-        return _ok({"url": public_url, "filename": unique_name})
+        # Os três `hasattr` que existiam aqui adivinhavam o formato que
+        # `get_public_url` devolve em cada versão da biblioteca (objeto com
+        # .data, com .publicURL, ou string), com um quarto caminho montando a
+        # URL na mão. Nada disso é necessário: utils/storage devolve a URL
+        # pronta, e ela é montada exatamente como o fallback fazia.
+        return _ok({"url": _url_direta, "filename": unique_name})
     except Exception as e:
         current_app.logger.exception("gamification.upload_reward_image failed")
         return _err("Erro ao fazer upload da imagem", 500, detail=str(e))

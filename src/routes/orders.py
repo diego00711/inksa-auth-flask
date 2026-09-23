@@ -13,6 +13,9 @@ import sentry_sdk
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from src.extensions import limiter
 from ..utils.pedido_itens import eh_linha_de_frete
+# Import na MESMA edição do uso. Sobe arquivo com a chave de serviço
+# explícita, sem depender da sessão do cliente — ver utils/storage.py.
+from ..utils.storage import upload as storage_upload
 # Import na MESMA edição do uso. Baixa na criação (1 dos 3 caminhos que criam
 # pedido) e devolução nos 2 cancelamentos — ver utils/estoque.py.
 from ..utils.estoque import baixar as baixar_estoque, devolver as devolver_estoque
@@ -1597,12 +1600,11 @@ def upload_incident_photo(order_id):
         import os as _os
         ext = _os.path.splitext(file.filename)[1] or '.jpg'
         unique = f"incident_{order_id}_{uuid.uuid4()}{ext}"
-        supabase_admin.storage.from_("incident-photos").upload(
-            path=unique,
-            file=file.read(),
-            file_options={"content-type": file.mimetype or "image/jpeg", "upsert": "true"},
-        )
-        public_url = supabase_admin.storage.from_("incident-photos").get_public_url(unique)
+        # ⚠️ utils/storage: a chave de serviço vai em toda chamada. O cliente
+        # Supabase carrega sessão que vira `authenticated` depois de um login
+        # no mesmo worker, e este bucket NÃO tem política de INSERT.
+        public_url = storage_upload("incident-photos", unique, file.read(),
+                                    content_type=file.mimetype or "image/jpeg")
         return jsonify({"status": "success", "photo_url": public_url}), 200
     except Exception as e:
         logger.error(f"Erro ao enviar foto da ocorrência {order_id}: {e}", exc_info=True)
