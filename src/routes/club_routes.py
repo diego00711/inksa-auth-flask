@@ -46,7 +46,30 @@ def _render_benefits(benefits):
     if b.get("per_delivery_bonus"):
         out.append(f"Bônus de R$ {float(b['per_delivery_bonus']):.2f} por entrega")
     if b.get("freight_keep_extra_pct"):
-        out.append(f"Fica com {_fmt(b['freight_keep_extra_pct'])}% a mais do frete")
+        # DIZ QUANTO O ENTREGADOR FICA, NÃO QUANTO "A MAIS" ELE GANHA.
+        #
+        # "Fica com 2% a mais do frete" é verdade e não serve pra nada: o
+        # entregador não sabe de quanto ele partia. Por isso alguém escreveu à
+        # mão, no `extra`, "Você fica com 98% do frete" — e criou o problema
+        # clássico deste arquivo: dois textos pro mesmo fato, um deles parado
+        # no tempo. O de Prata dizia 98% quando o valor real já era 100%.
+        #
+        # A conta é a mesma de orders.py: o entregador parte do frete menos a
+        # taxa de administração e soma os pontos do nível, com TETO em 100% —
+        # `min(_fee, ...)` lá garante que ele nunca recebe mais que o frete.
+        #
+        # ⚠️ O teto tem consequência comercial: com a taxa em 1,5%, a base já é
+        # 98,5%, então qualquer nível com +2 ou mais bate em 100% e os níveis
+        # ficam indistinguíveis no frete. Se Ouro tem que ganhar de Prata, a
+        # diferença precisa vir de outro benefício.
+        try:
+            from ..utils.platform_settings import get_settings
+            _taxa = float(get_settings()["financial_delivery_commission"])
+        except Exception:
+            logger.exception("_render_benefits: taxa de administração indisponível")
+            _taxa = 0.0
+        _fica = min(100.0, (1.0 - _taxa) * 100.0 + float(b["freight_keep_extra_pct"]))
+        out.append(f"Você fica com {_fmt(_fica)}% do frete")
     # Sai do PRÓPRIO dado, não de um texto escrito à mão em `extra`. Se a frase
     # fosse fixa, ela continuaria na tela depois de alguém tirar o benefício no
     # admin — prometendo pagamento rápido que não acontece mais. Aqui a frase e
