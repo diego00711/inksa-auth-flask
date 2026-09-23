@@ -377,6 +377,14 @@ def list_restaurants():
                     COALESCE(rp.cuisine_type, rp.category)     AS cuisine_type,
                     rp.category,
                     COALESCE(rp.segment, 'restaurante')        AS segment,
+                    -- CIDADE. Não é dado novo nem sensível: já sai em /cities
+                    -- e está na vitrine do cliente. Desce aqui porque quem
+                    -- consome esta lista SEM mandar coordenada (o site
+                    -- institucional) recebe as lojas de TODAS as cidades, e
+                    -- sem este campo não tem como dizer de onde cada uma é —
+                    -- "lojas de Lages" vira mentira no dia em que entrar a
+                    -- primeira loja de fora.
+                    rp.address_city,
                     rp.is_open,
                     COALESCE((SELECT ROUND(AVG(r.rating)::numeric, 1) FROM restaurant_reviews r WHERE r.restaurant_id = rp.id), 0)                     AS rating,
                     COALESCE(rp.delivery_fee, 0)                AS delivery_fee,
