@@ -17,6 +17,9 @@ from flask_cors import cross_origin
 
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
 from ..utils.geocoding_utils import geocode_address
+# Import na MESMA edição do uso. Sobe arquivo com a chave de serviço
+# explícita, sem depender da sessão do cliente — ver utils/storage.py.
+from ..utils.storage import upload as storage_upload
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -547,48 +550,31 @@ def upload_avatar():
             # Se não conseguir limpar arquivos antigos, continua anyway
             logger.warning(f"Não foi possível limpar arquivos antigos: {cleanup_error}")
 
-        # ✅ CORREÇÃO 3: Upload com retry melhorado
-        max_retries = 3
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                result = supabase_admin.storage.from_(bucket_name).upload(
-                    path=file_path,
-                    file=file_content,
-                    file_options={"content-type": avatar_file.content_type}
-                )
-                logger.info(f"Upload bem-sucedido: {file_path}")
-                break  # Upload bem-sucedido, sair do loop
-                
-            except Exception as upload_error:
-                retry_count += 1
-                error_msg = str(upload_error).lower()
-                
-                if "already exists" in error_msg or "duplicate" in error_msg:
-                    # Se ainda existe, gerar novo nome
-                    timestamp = str(int(time.time()) + retry_count)
-                    file_path = f"public/{profile_id}_{timestamp}.{file_ext}"
-                    logger.warning(f"Arquivo duplicado, tentando novo nome: {file_path}")
-                    
-                    if retry_count >= max_retries:
-                        logger.error(f"Máximo de tentativas atingido para upload")
-                        return jsonify({"error": "Erro ao fazer upload - arquivo duplicado"}), 500
-                else:
-                    # Outro tipo de erro
-                    logger.error(f"Erro no upload (tentativa {retry_count}): {upload_error}")
-                    if retry_count >= max_retries:
-                        return jsonify({"error": "Erro ao fazer upload da imagem"}), 500
-                    
-                time.sleep(1)  # Aguardar 1 segundo antes de tentar novamente
-
-        # ✅ CORREÇÃO 4: Obter URL pública corretamente
+        # ⚠️ utils/storage, não o cliente Supabase.
+        #
+        # Em 24/09/2026 um entregador não conseguia trocar a foto: "Erro ao
+        # fazer upload da imagem", que é a mensagem do fim deste bloco. O
+        # bucket `delivery-avatars` TEM política de INSERT pra `authenticated`,
+        # então não era só RLS — era o estado da sessão do cliente
+        # compartilhado, que muda conforme quem logou naquele worker.
+        #
+        # É a terceira vez que esse mesmo problema aparece em bucket diferente.
+        # A correção de 14/09 (trocar `supabase` por `supabase_admin`) não
+        # segurou aqui nem no cardápio, porque ela dependia de ninguém chamar
+        # um método. utils/storage manda a chave de serviço em toda chamada:
+        # não há sessão pra entrar em estado errado.
+        #
+        # O laço de 3 tentativas que existia aqui sumiu junto. Ele tratava
+        # "arquivo já existe" gerando outro nome — e utils/storage sobe com
+        # `x-upsert`, que substitui em vez de estourar. Retry que só existia
+        # pra um erro que não acontece mais é código que confunde o próximo.
         try:
-            public_url = supabase_admin.storage.from_(bucket_name).get_public_url(file_path)
-            logger.info(f"URL pública gerada: {public_url}")
-        except Exception as url_error:
-            logger.error(f"Erro ao gerar URL pública: {url_error}")
-            return jsonify({"error": "Erro ao gerar URL da imagem"}), 500
+            public_url = storage_upload(bucket_name, file_path, file_content,
+                                        content_type=avatar_file.content_type)
+            logger.info(f"Upload bem-sucedido: {file_path}")
+        except Exception as upload_error:
+            logger.error(f"Erro no upload do avatar do entregador {profile_id}: {upload_error}")
+            return jsonify({"error": "Erro ao fazer upload da imagem"}), 500
 
         # ✅ CORREÇÃO 5: Atualizar banco de dados
         try:

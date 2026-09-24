@@ -1634,15 +1634,11 @@ def upload_admin_avatar():
         import uuid as _uuid
         filename = f"admin_{user_id}_{_uuid.uuid4().hex}.{ext}"
 
-        supabase_admin.storage.from_("banner-images").upload(
-            path=filename,
-            file=file.read(),
-            file_options={"content-type": f"image/{ext}", "upsert": "true"},
-        )
-
-        import os as _os
-        supabase_url = (_os.environ.get("SUPABASE_URL") or "").rstrip("/")
-        avatar_url = f"{supabase_url}/storage/v1/object/public/banner-images/{filename}"
+        # utils/storage: a chave de serviço vai em toda chamada. O cliente
+        # Supabase carrega sessão que muda conforme quem logou no worker —
+        # ver o cabeçalho de utils/storage.py.
+        avatar_url = storage_upload("banner-images", filename, file.read(),
+                                    content_type=f"image/{ext}")
 
         conn = get_db_connection()
         if not conn:

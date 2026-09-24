@@ -4,6 +4,9 @@ import logging
 from flask import Blueprint, jsonify, request
 import psycopg2.extras
 from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin
+# Import na MESMA edição do uso. Sobe arquivo com a chave de serviço
+# explícita, sem depender da sessão do cliente — ver utils/storage.py.
+from ..utils.storage import upload as storage_upload
 from functools import wraps
 import os
 import uuid
@@ -270,14 +273,11 @@ def upload_avatar(conn):
         unique_filename = f"avatar_{user_id}_{uuid.uuid4()}{file_ext}"
         
         # Faz o upload para o bucket 'avatars' no Supabase Storage
-        supabase_admin.storage.from_("avatars").upload(
-            path=unique_filename,
-            file=file.read(),
-            file_options={"content-type": file.mimetype, "upsert": "true"}
-        )
-        
-        # Obtém a URL pública do arquivo que acabamos de enviar
-        public_url = supabase_admin.storage.from_("avatars").get_public_url(unique_filename)
+        # utils/storage: a chave de serviço vai em toda chamada. O cliente
+        # Supabase carrega sessão que muda conforme quem logou no worker —
+        # ver o cabeçalho de utils/storage.py.
+        public_url = storage_upload("avatars", unique_filename, file.read(),
+                                    content_type=file.mimetype)
         
         # Atualiza a coluna 'avatar_url' na tabela 'client_profiles'
         with conn.cursor() as cur:

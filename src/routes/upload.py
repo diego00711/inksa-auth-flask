@@ -6,6 +6,9 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
 from ..utils.helpers import supabase, supabase_admin, get_user_id_from_token
+# Import na MESMA edição do uso. Sobe arquivo com a chave de serviço
+# explícita, sem depender da sessão do cliente — ver utils/storage.py.
+from ..utils.storage import upload as storage_upload
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,41 +72,19 @@ def upload_banner_image():
             logger.info(f"Arquivo lido: {len(file_content)} bytes")
             
             # CORREÇÃO: Upload para o bucket 'banner-images' com a sintaxe correta
-            response = supabase_admin.storage.from_('banner-images').upload(
-                path=unique_filename,
-                file=file_content,
-                file_options={
-                    "content-type": f"image/{file_extension}"
-                }
-            )
-            
-            logger.info(f"Resposta do upload: {response}")
-            
-            # Verificar se houve erro no upload
-            if hasattr(response, 'error') and response.error:
-                logger.error(f"Erro no upload para Supabase: {response.error}")
-                return jsonify({"error": f"Erro ao fazer upload: {response.error}"}), 500
-            
-            # Obter URL pública da imagem
+            # utils/storage: chave de serviço explícita. Os três `hasattr`
+            # que existiam abaixo adivinhavam o formato de get_public_url em
+            # cada versão da biblioteca, com um quarto caminho montando a URL
+            # na mão — o helper já devolve a URL pronta, do mesmo jeito.
             try:
-                public_url_response = supabase_admin.storage.from_('banner-images').get_public_url(unique_filename)
-                
-                if hasattr(public_url_response, 'error') and public_url_response.error:
-                    logger.error(f"Erro ao obter URL pública: {public_url_response.error}")
-                    return jsonify({"error": "Erro ao gerar URL pública da imagem"}), 500
-                
-                # A URL pode estar em diferentes formatos dependendo da versão do Supabase
-                if hasattr(public_url_response, 'data'):
-                    public_url = public_url_response.data
-                elif hasattr(public_url_response, 'publicURL'):
-                    public_url = public_url_response.publicURL
-                elif isinstance(public_url_response, str):
-                    public_url = public_url_response
-                else:
-                    # Construir URL manualmente se necessário
-                    supabase_url = os.environ.get('SUPABASE_URL', '').rstrip('/')
-                    public_url = f"{supabase_url}/storage/v1/object/public/banner-images/{unique_filename}"
-                
+                public_url = storage_upload('banner-images', unique_filename,
+                                            file_content,
+                                            content_type=f"image/{file_extension}")
+            except Exception as e_up:
+                logger.error(f"Erro no upload para Supabase: {e_up}")
+                return jsonify({"error": "Erro ao fazer upload da imagem"}), 500
+
+            try:
                 logger.info(f"Upload realizado com sucesso: {unique_filename}")
                 logger.info(f"URL pública: {public_url}")
                 
