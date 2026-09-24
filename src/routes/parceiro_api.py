@@ -21,15 +21,29 @@
 #
 #   • ler pedidos          • aceitar   • começar preparo   • marcar pronto
 #   • ler e enviar cardápio
+#   • "saiu para entrega" — SÓ para loja com entrega própria (ver abaixo)
 #
 # O que ficou FORA, e por quê:
 #   - Cancelar pedido. Cancelamento de pedido pago dispara estorno ao cliente,
 #     e essa lógica mora na rota do app. Reimplementar aqui criaria dois
 #     caminhos para devolver dinheiro — o tipo de divergência que já custou
 #     caro neste projeto. Cancelar continua pelo app até dar para reusar.
-#   - "Saiu para entrega" e "Entregue". Passam por CÓDIGO (retirada/entrega),
-#     que é o que prova que a entrega aconteceu. Um endpoint de API que pulasse
-#     o código deixaria qualquer integração fechar pedido sem entregar.
+#   - "Entregue". Passa pelo CÓDIGO de 4 dígitos que o cliente mostra, e esse
+#     código é a única prova de que a entrega aconteceu. Um endpoint de API
+#     que pulasse o código deixaria qualquer integração fechar pedido sem
+#     entregar.
+#
+# ⚠️ "SAIU PARA ENTREGA" MUDOU DE LADO EM 24/09/2026, e vale dizer por quê.
+# Este cabeçalho dizia que ele ficava de fora junto com "Entregue", "porque
+# passam por CÓDIGO". Meio certo: passa por código quando quem entrega é o
+# entregador Inksa. Na ENTREGA PRÓPRIA não há entregador Inksa, e a loja já
+# marca esse passo sozinha no app, sem código nenhum — então a regra que
+# justificava a exclusão nunca valeu para esse caso.
+#
+# O que revelou isso foi o primeiro chamado de integração: uma hamburgueria
+# com entrega própria e 35 pedidos/dia. Sem esta rota, o PDV dela receberia o
+# pedido, imprimiria, marcaria pronto — e alguém teria que abrir o app da
+# Inksa para dar o toque seguinte, 35 vezes por dia.
 #
 # ── AUTENTICAÇÃO ───────────────────────────────────────────────────────────
 # Bearer token por loja, guardado como hash. Ver partner_api_tokens.
@@ -61,7 +75,34 @@ _TRANSICOES_PERMITIDAS = {
     'aceitar':  ('pending', 'accepted'),
     'preparar': ('accepted', 'preparing'),
     'pronto':   ('preparing', 'ready'),
+    # ⚠️ SÓ PARA LOJA COM ENTREGA PRÓPRIA — ver _SO_ENTREGA_PROPRIA abaixo.
+    'saiu-para-entrega': ('ready', 'delivering'),
 }
+
+# Ações que exigem `delivery_type = 'own'`.
+#
+# POR QUE ESTA EXISTE. A v1 ia de 'aceitar' até 'pronto' e parava, porque foi
+# desenhada para entrega DA PLATAFORMA: depois do "pronto" quem assume é o
+# entregador Inksa, e o fluxo acaba ali para a loja.
+#
+# Na entrega própria não acaba — sobram dois passos, e os dois são da loja.
+# Sem esta rota, um restaurante que faz a própria entrega recebe o pedido no
+# PDV dele, imprime, marca pronto... e tem que ABRIR O APP DA INKSA pra dar os
+# dois toques finais. A 35 pedidos/dia isso é atrito que mata integração.
+#
+# ⚠️ E "CONFIRMAR ENTREGA" CONTINUA DE FORA, de propósito. A diferença entre
+# os dois passos não é técnica, é de prova:
+#
+#   • "saiu para entrega" a loja de entrega própria JÁ marca sozinha, no app,
+#     sem código nenhum (orders.py trata `delivery_type == 'own'` exatamente
+#     assim). Expor pela API não cria risco novo — é a mesma ação, outro
+#     canal.
+#   • "entregue" passa pelo CÓDIGO do cliente, e o código é a única prova de
+#     que o pedido chegou. O comentário em orders.py conta por quê: antes a
+#     loja fechava sozinha e o motoboy dela dizia "entreguei" sem ninguém
+#     poder conferir. Abrir isso na API para facilitar integração seria trocar
+#     a garantia pela conveniência.
+_SO_ENTREGA_PROPRIA = {'saiu-para-entrega'}
 
 
 def _hash(token: str) -> str:
@@ -357,13 +398,28 @@ def _mudar_status(numero, loja, acao):
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("""SELECT id, status FROM orders
-                            WHERE restaurant_id = %s AND numero = %s
-                            FOR UPDATE""",
+            # `delivery_type` vem JUNTO, no mesmo SELECT que já trava a linha.
+            # Buscar em consulta separada custaria outra ida a São Paulo (~0,2s)
+            # numa rota que o PDV chama a cada pedido, e ainda abriria uma
+            # janela entre ler o tipo de entrega e travar o pedido.
+            cur.execute("""SELECT o.id, o.status,
+                                  COALESCE(rp.delivery_type, 'platform') AS delivery_type
+                             FROM orders o
+                             JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
+                            WHERE o.restaurant_id = %s AND o.numero = %s
+                            FOR UPDATE OF o""",
                         (loja['restaurant_id'], numero))
             pedido = cur.fetchone()
             if not pedido:
                 return _erro('nao_encontrado', f'Pedido #{numero} não existe nesta loja.', 404)
+
+            if acao in _SO_ENTREGA_PROPRIA and pedido['delivery_type'] != 'own':
+                return _erro(
+                    'entrega_da_plataforma',
+                    "Esta loja usa a entrega da Inksa: depois de 'pronto', quem "
+                    "marca a saída é o entregador, pelo aplicativo dele. Este "
+                    "passo existe só para loja que faz a própria entrega.",
+                    409)
 
             atual = (pedido['status'] or '').strip()
 
@@ -396,6 +452,33 @@ def _mudar_status(numero, loja, acao):
             valores.append(pedido['id'])
             cur.execute(f"UPDATE orders SET {campos} WHERE id = %s", valores)
             conn.commit()
+
+            # AVISA O CLIENTE — a API era MUDA, e isso não era decisão, era
+            # buraco.
+            #
+            # Quando a loja aceita pelo aplicativo, o cliente recebe
+            # "Pedido aceito! 🎉". Pela API, não recebia nada: a mesma loja
+            # entregava experiências diferentes conforme o canal que ela usa
+            # por dentro, e o cliente ficava olhando uma tela parada sem saber
+            # se alguém viu o pedido dele.
+            #
+            # Só no 'aceitar', de propósito. 'preparar' o cliente não precisa
+            # saber, e no 'pronto' quem tem que ser avisado é o entregador —
+            # disso cuida o motor de despacho, que roda a cada 10s e pega o
+            # pedido sozinho.
+            if acao == 'aceitar':
+                try:
+                    from .orders import _get_fcm_token, _notify
+                    cur.execute("SELECT client_id FROM orders WHERE id = %s", (pedido['id'],))
+                    _cli = cur.fetchone()
+                    if _cli and _cli['client_id']:
+                        _tk = _get_fcm_token(cur, 'client_profiles', str(_cli['client_id']))
+                        _notify(_tk, "Pedido aceito! 🎉",
+                                "Seu pedido foi confirmado pelo restaurante",
+                                {"order_id": str(pedido['id']), "status": "accepted"})
+                except Exception:
+                    # Push que falha não desfaz um pedido que já foi aceito.
+                    logger.exception('Falha ao avisar o cliente pela API de parceiro')
     except Exception:
         if conn:
             conn.rollback()
@@ -429,6 +512,23 @@ def preparar(numero, loja):
 def pronto(numero, loja):
     """Marca como pronto. É o que libera o pedido para o entregador."""
     return _mudar_status(numero, loja, 'pronto')
+
+
+@parceiro_api_bp.post('/pedidos/<int:numero>/saiu-para-entrega')
+@limiter.limit("120/minute")
+@exige_token
+def saiu_para_entrega(numero, loja):
+    """O entregador DA LOJA saiu com o pedido. Só para entrega própria.
+
+    Recusa com 409 `entrega_da_plataforma` quando a loja usa a entrega da
+    Inksa — ali quem marca a saída é o entregador, pelo app dele.
+
+    ⚠️ O passo SEGUINTE — confirmar a entrega — continua fora da API e é no
+    aplicativo, com o código de 4 dígitos que o cliente mostra. Não é
+    esquecimento: é a única prova de que o pedido chegou. Ver o comentário em
+    _SO_ENTREGA_PROPRIA.
+    """
+    return _mudar_status(numero, loja, 'saiu-para-entrega')
 
 
 # ───────────────────────────────────────────────────────────────────────────
