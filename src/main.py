@@ -28,7 +28,23 @@ import re
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
 
-SENTRY_DSN = os.environ.get("SENTRY_DSN", "https://0ab4c11f20659cb2404109e7e177f018@o4511445143912448.ingest.us.sentry.io/4511445160099840")
+# ⚠️ O DSN VEM SÓ DA VARIÁVEL DE AMBIENTE — ele já esteve CRAVADO aqui como
+# valor padrão, e isso tornava o Sentry impossível de desligar: tirar a
+# variável no Render não fazia efeito nenhum, porque o código caía no valor
+# escrito. O comentário logo abaixo sempre disse "configure em Render", e o
+# fallback contradizia isso em silêncio.
+#
+# Importa porque o Sentry NÃO ESTÁ ENTREGANDO. O log do Render de 24/09/2026
+# mostra a causa: a conexão com o endpoint dele morre no TLS —
+#   SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] ...')):
+#   /api/4511445160099840/envelope/
+# Cada evento vira 3 tentativas perdidas, e o desligamento do worker espera
+# até 2s tentando despachar o que ficou na fila. Num serviço com UM worker,
+# isso é tempo que custa. E o ruído atrapalha o log do Render, que hoje é a
+# ÚNICA fonte de diagnóstico justamente porque o Sentry não funciona.
+#
+# Agora dá pra desligar (apagar a variável) ou religar sem deploy.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "").strip()
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
@@ -37,6 +53,8 @@ if SENTRY_DSN:
         environment=os.environ.get("FLASK_ENV", "production"),
     )
     logging.info("Sentry inicializado com sucesso")
+else:
+    logging.info("Sentry DESLIGADO (sem SENTRY_DSN). Erros ficam só no log do Render.")
 # Variável de ambiente SENTRY_DSN: configure em Render → Environment Variables
 
 # --- Configuração de Path e Logging ---
