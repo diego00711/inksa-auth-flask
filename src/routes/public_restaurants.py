@@ -683,7 +683,12 @@ def get_restaurant(restaurant_id):
                     rp.phone,
                     rp.category,
                     rp.delivery_type,
-                    COALESCE(rp.accepts_cash, TRUE) AS accepts_cash,
+                    -- FALSE, não TRUE: dinheiro nasce desligado desde
+                    -- 24/09/2026 (ver a migration dinheiro_so_na_entrega_propria).
+                    -- Um padrão aqui discordando do padrão da coluna faria
+                    -- a vitrine oferecer dinheiro numa loja que o banco diz
+                    -- que não aceita.
+                    COALESCE(rp.accepts_cash, FALSE) AS accepts_cash,
                     -- Sem isto o carrinho não teria como oferecer a retirada.
                     COALESCE(rp.accepts_pickup, false) AS accepts_pickup,
                     rp.latitude,
