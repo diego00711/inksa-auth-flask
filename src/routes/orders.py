@@ -2010,6 +2010,16 @@ def _avisar_dono_da_oferta(cur, order_id, courier_user_id, segundos):
         token = row['fcm_token'] if row else None
         if not token:
             return
+        # ⚠️ MIGALHA ANTES DO PUSH — e ela tem que ser ANTES (26/09/2026).
+        #
+        # `_notify` é síncrono e vai à rede. Numa rodada que TRAVA, nada que
+        # venha depois chega ao log, e o cronômetro do tick também não fecha:
+        # ambos só escrevem no fim. Esta linha é a única coisa que sobrevive a
+        # um congelamento — se ela for a última do log antes do WORKER TIMEOUT,
+        # o culpado é o FCM, e aí não é mais palpite.
+        #
+        # Não é barulhenta: só sai quando uma oferta NASCE, não a cada tick.
+        logger.info("[DESPACHO] enviando push da oferta (pedido %s)", order_id)
         _notify(token, "Corrida pra você! 🛵",
                 f"Você tem {int(segundos)}s para aceitar. Toque para ver.",
                 {"order_id": str(order_id), "status": "ready",

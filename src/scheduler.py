@@ -549,7 +549,24 @@ def start_scheduler(app=None) -> None:
 # Mesma lógica do `commit` e do `fcm` que já estão no health: sem expor, a
 # resposta depende de esperar o caso ruim acontecer.
 _DISPATCH_SAUDE: dict = {"ultima_rodada": None, "rodadas": 0, "ultimo_erro": None,
-                         "intervalo_s": None}
+                         "intervalo_s": None,
+                         # ── CRONÔMETRO (26/09/2026) ────────────────────────
+                         # O apagão de 26/09 foi o motor travando: às 21:42 o
+                         # agendador começou a pular rodadas e às 21:47 o
+                         # gunicorn matou o worker. O log dizia QUE travou e
+                         # nunca ONDE. Estes campos respondem o "onde".
+                         "fase": None,          # em que etapa a rodada está
+                         "fase_desde": None,    # desde quando (epoch)
+                         "ms_ultima": None,     # duração da última rodada
+                         "ms_pior": None,       # pior rodada desde o boot
+                         "fase_pior": None,     # etapa que causou a pior
+                         "lentas": 0}           # rodadas acima do limite
+
+# Acima disto a rodada vira linha de WARNING no log. 3 s é escolha consciente:
+# o tick roda a cada 10 s, então uma rodada de 3 s já comeu quase um terço da
+# janela e é sinal de que algo vai mal muito antes de virar apagão. Ajustável
+# por variável de ambiente sem deploy, caso apareça ruído.
+_DISPATCH_LENTO_MS = int(os.environ.get("DISPATCH_TICK_WARN_MS", "3000"))
 
 
 def dispatch_status() -> dict:
@@ -582,6 +599,7 @@ def _dispatch_tick_job() -> None:
     ⚠️ `get_settings()` tem cache de 60 s, então checar a flag a cada 10 s custa
     uma ida ao banco por minuto, não seis por minuto.
     """
+    import time as _time
     from datetime import datetime, timezone
     from .utils.platform_settings import get_settings
     from .utils.helpers import get_db_connection
@@ -592,50 +610,102 @@ def _dispatch_tick_job() -> None:
     _DISPATCH_SAUDE["ultima_rodada"] = datetime.now(timezone.utc).isoformat(timespec='seconds')
     _DISPATCH_SAUDE["rodadas"] += 1
 
-    try:
-        settings = get_settings()
-        # Flag desligada = modo broadcast, em que o motor não tem papel. Sai
-        # sem nem abrir conexão.
-        if int(settings.get('dispatch_assign_enabled') or 0) != 1:
-            _DISPATCH_SAUDE["ultimo_erro"] = None
-            return
-    except (TypeError, ValueError):
-        return
-    except Exception:
-        logger.exception("[DESPACHO] settings indisponivel; tick pulado")
-        _DISPATCH_SAUDE["ultimo_erro"] = "settings indisponivel"
-        return
+    # ── CRONÔMETRO POR ETAPA (26/09/2026) ──────────────────────────────────
+    # Em 26/09 este tick travou e levou a plataforma junto (um worker só). O
+    # log provava QUE tinha travado — "skipped: maximum number of running
+    # instances reached" — e não dizia ONDE. Sem isso, a investigação vira
+    # palpite; com isso, a próxima vez se explica sozinha.
+    #
+    # `fase` fica no termômetro do /api/health de propósito: numa rodada que
+    # NÃO termina, nada é logado (o log só sai no fim), e o único jeito de
+    # saber onde ela parou é perguntar de fora enquanto ela ainda está presa.
+    _t0 = _time.monotonic()
+    _marcos: list = []
 
-    conn = None
+    def _fase(nome):
+        agora = _time.monotonic()
+        anterior = _DISPATCH_SAUDE.get("fase")
+        desde = _DISPATCH_SAUDE.get("fase_desde")
+        if anterior and desde:
+            _marcos.append((anterior, int((agora - desde) * 1000)))
+        _DISPATCH_SAUDE["fase"] = nome
+        _DISPATCH_SAUDE["fase_desde"] = agora if nome else None
+
+    def _fechar():
+        _fase(None)
+        total = int((_time.monotonic() - _t0) * 1000)
+        _DISPATCH_SAUDE["ms_ultima"] = total
+        if total > (_DISPATCH_SAUDE.get("ms_pior") or -1):
+            _DISPATCH_SAUDE["ms_pior"] = total
+            _DISPATCH_SAUDE["fase_pior"] = max(_marcos, key=lambda m: m[1])[0] if _marcos else None
+        # ⚠️ Só fala quando passa do limite. Este job roda 8.640 vezes por dia
+        # e o log do Render é a única fonte de diagnóstico que sobrou — um job
+        # falante aqui enterra todo o resto (inclusive o WORKER TIMEOUT).
+        if total >= _DISPATCH_LENTO_MS:
+            _DISPATCH_SAUDE["lentas"] += 1
+            logger.warning(
+                "[DESPACHO] rodada LENTA: %d ms (limite %d) — etapas: %s",
+                total, _DISPATCH_LENTO_MS,
+                ", ".join(f"{n}={ms}ms" for n, ms in _marcos) or "nenhuma",
+            )
+
+    # ⚠️ O `finally` de fora é o que garante o cronômetro. Este corpo tem cinco
+    # saídas (flag desligada, settings ruim, sem conexão, erro, caminho feliz);
+    # fechar o relógio em cada uma seria esquecer em uma.
     try:
-        conn = get_db_connection()
-        if not conn:
-            logger.error("[DESPACHO] sem conexao com o banco; tick pulado")
+        try:
+            _fase("settings")
+            settings = get_settings()
+            # Flag desligada = modo broadcast, em que o motor não tem papel. Sai
+            # sem nem abrir conexão.
+            if int(settings.get('dispatch_assign_enabled') or 0) != 1:
+                _DISPATCH_SAUDE["ultimo_erro"] = None
+                return
+        except (TypeError, ValueError):
             return
-        import psycopg2.extras
-        # Import adiado de propósito: em tempo de módulo isto seria import
-        # circular com as rotas.
-        from .routes.orders import _run_dispatch_tick
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            _run_dispatch_tick(cur, settings)
-        conn.commit()
-        _DISPATCH_SAUDE["ultimo_erro"] = None
-    except Exception as _e:
-        if conn:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        logger.exception("[DESPACHO] tick automatico falhou")
-        # Guardado pro health: erro que se repete a cada 10s vira enxurrada no
-        # log e o motivo se perde no meio. Aqui ele fica parado, legivel.
-        _DISPATCH_SAUDE["ultimo_erro"] = f"{type(_e).__name__}: {_e}"[:200]
+        except Exception:
+            logger.exception("[DESPACHO] settings indisponivel; tick pulado")
+            _DISPATCH_SAUDE["ultimo_erro"] = "settings indisponivel"
+            return
+
+        conn = None
+        try:
+            _fase("conexao")
+            conn = get_db_connection()
+            if not conn:
+                logger.error("[DESPACHO] sem conexao com o banco; tick pulado")
+                return
+            import psycopg2.extras
+            # Import adiado de propósito: em tempo de módulo isto seria import
+            # circular com as rotas.
+            from .routes.orders import _run_dispatch_tick
+            # Esta é a etapa que inclui o PUSH: `_run_dispatch_tick` chama
+            # `_avisar_dono_da_oferta` dentro do laço, ou seja, faz chamada de
+            # rede com a transação aberta. Era o suspeito de 26/09.
+            _fase("despacho")
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                _run_dispatch_tick(cur, settings)
+            _fase("commit")
+            conn.commit()
+            _DISPATCH_SAUDE["ultimo_erro"] = None
+        except Exception as _e:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            logger.exception("[DESPACHO] tick automatico falhou")
+            # Guardado pro health: erro que se repete a cada 10s vira enxurrada no
+            # log e o motivo se perde no meio. Aqui ele fica parado, legivel.
+            _DISPATCH_SAUDE["ultimo_erro"] = f"{type(_e).__name__}: {_e}"[:200]
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        _fechar()
 
 
 def get_scheduler() -> BackgroundScheduler | None:

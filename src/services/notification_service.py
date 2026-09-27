@@ -37,9 +37,24 @@ def _init_firebase() -> bool:
 
     try:
         cred = credentials.Certificate(cred_path)
-        firebase_admin.initialize_app(cred)
+        # ⚠️ `httpTimeout` NÃO É DETALHE — ELE DERRUBOU A PLATAFORMA EM 26/09/2026.
+        #
+        # O padrão do firebase-admin 6.x é 120 s. O gunicorn roda com
+        # `--timeout 120` e `-w 1`: UM worker pra plataforma inteira. Logo, UMA
+        # chamada de push pendurada consome a janela exata do worker, o gunicorn
+        # o mata, e cliente, parceiro, entregador e admin saem do ar juntos.
+        #
+        # Em 26/09 foi isso que aconteceu: o motor de despacho (que roda de 10
+        # em 10 s e manda push dentro do laço) travou às 21:42 e às 21:47 veio
+        # `[CRITICAL] WORKER TIMEOUT`. ~20 min fora.
+        #
+        # 20 s é folga enorme pro FCM, que normalmente responde em menos de 1 s,
+        # e fica MUITO abaixo dos 120 s do gunicorn. Perder um push por lentidão
+        # é incômodo; derrubar a plataforma por causa dele não é aceitável — e
+        # quem chama já trata falha de push como coisa inofensiva.
+        firebase_admin.initialize_app(cred, options={'httpTimeout': 20})
         _firebase_initialized = True
-        logger.info("FCM: firebase_admin inicializado com '%s'", cred_path)
+        logger.info("FCM: firebase_admin inicializado com '%s' (httpTimeout=20s)", cred_path)
         return True
     except Exception as e:
         logger.error("FCM: falha ao inicializar firebase_admin: %s", e)
