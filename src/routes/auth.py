@@ -6,7 +6,7 @@ import re
 import secrets
 import requests
 from flask import Blueprint, request, jsonify
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, gotrue_admin
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, gotrue_admin, gotrue_logout
 from src.extensions import limiter
 
 auth_bp = Blueprint('auth_bp', __name__)
@@ -419,10 +419,24 @@ def logout():
             logger.warning(f"⚠️ Não foi possível buscar dados do usuário no logout: {e}")
             # Continua com o logout mesmo se não conseguir buscar dados
         
-        # Invalida o token no Supabase
+        # Invalida a sessão DESTE token no Supabase.
+        #
+        # ⚠️ AQUI HAVIA `supabase.auth.sign_out()`, E ELE DESLOGAVA OUTRA PESSOA
+        # (corrigido em 28/09/2026). Sem argumento, ele encerra a sessão que o
+        # cliente COMPARTILHADO tem em memória — que é a de quem logou por
+        # último na plataforma, não a de quem está saindo. Com gunicorn em um
+        # worker só, isso é um cliente para todo mundo: qualquer entregador
+        # apertando "Sair" derrubava um terceiro, em todos os aparelhos dele.
+        #
+        # A vítima não percebia na hora (o access_token dela continua válido até
+        # vencer), só na renovação seguinte — por isso as sessões morriam perto
+        # de múltiplos exatos de hora e parecia expiração normal.
         try:
-            supabase.auth.sign_out()
-            logger.info("✅ Token invalidado com sucesso")
+            resp = gotrue_logout(token)
+            if resp is not None and resp.status_code >= 400:
+                logger.warning("logout: GoTrue devolveu %s", resp.status_code)
+            else:
+                logger.info("✅ Sessão do próprio token invalidada")
         except Exception as e:
             logger.warning(f"⚠️ Erro ao invalidar token: {e}")
         

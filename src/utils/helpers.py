@@ -747,3 +747,56 @@ def gotrue_admin(metodo, caminho, payload=None, timeout=10):
         json=payload,
         timeout=timeout,
     )
+
+
+# ⚠️ ESTA FUNÇÃO EXISTE PORQUE `supabase.auth.sign_out()` DESLOGAVA O USUÁRIO
+# ERRADO (descoberto em 28/09/2026).
+#
+# O `supabase` é um cliente ÚNICO, de módulo, compartilhado por todo mundo — e
+# `sign_in_with_password` grava a sessão do usuário DENTRO dele. Como o gunicorn
+# roda com UM worker só, esse cliente carrega sempre a sessão de quem logou por
+# último na plataforma inteira.
+#
+# Resultado: `supabase.auth.sign_out()` (sem argumento) não desloga quem pediu
+# para sair — desloga quem logou por último. Qualquer pessoa apertando "Sair"
+# derrubava um terceiro, e o GoTrue faz isso com escopo GLOBAL, ou seja, em
+# todos os aparelhos daquela pessoa.
+#
+# O sintoma enganava: a vítima só percebia na renovação seguinte, então as
+# sessões morriam sempre perto de um múltiplo exato de hora, o que parecia
+# "timer de expiração" e não sabotagem vinda de outra requisição.
+#
+# É a mesma armadilha que o `refresh()` já documentava ("o cliente reaproveita a
+# sessão interna e acaba mandando o token do último usuário logado") e que o
+# `gotrue_admin()` acima resolve para as rotas admin. Faltava o logout.
+#
+# Regra: nada que dependa de IDENTIDADE pode sair pelo cliente compartilhado.
+# Mande o token explicitamente, como aqui.
+def gotrue_logout(access_token, scope="global", timeout=10):
+    """Desloga a sessão DONA do access_token informado, via GoTrue direto.
+
+    scope='global' revoga todos os refresh tokens do usuário (todos os
+    aparelhos); 'local' revoga só a sessão deste token.
+
+    Devolve o Response do requests, ou None se faltar configuração — logout é
+    best-effort e não pode derrubar a rota que o chamou.
+    """
+    import requests
+
+    anon_key = (os.environ.get("SUPABASE_ANON_KEY")
+                or os.environ.get("SUPABASE_KEY")
+                or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+                or os.environ.get("SUPABASE_SERVICE_KEY"))
+    base_url = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+    if not anon_key or not base_url or not access_token:
+        return None
+
+    return requests.post(
+        f"{base_url}/auth/v1/logout?scope={scope}",
+        headers={
+            "apikey": anon_key,
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        timeout=timeout,
+    )

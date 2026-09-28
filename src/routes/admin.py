@@ -16,7 +16,7 @@ import psycopg2.extras
 
 from gotrue.errors import AuthApiError
 
-from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, _extract_bearer_token, gotrue_admin
+from ..utils.helpers import get_db_connection, get_user_id_from_token, supabase, supabase_admin, _extract_bearer_token, gotrue_admin, gotrue_logout
 from ..utils.audit import log_admin_action, log_admin_action_auto
 from ..utils.email_service import send_email, render_simple
 from ..utils.platform_settings import get_settings
@@ -443,7 +443,14 @@ def admin_login():
             db_user = cur.fetchone()
 
         if not db_user or db_user["user_type"] != "admin":
-            supabase.auth.sign_out()
+            # ⚠️ Era `supabase.auth.sign_out()`, que desloga a sessão do cliente
+            # COMPARTILHADO — ou seja, de quem logou por último, não de quem
+            # acabou de tentar entrar aqui (ver gotrue_logout em helpers.py).
+            # Este ponto era o pior dos três: bastava alguém que não é admin
+            # tentar o painel para derrubar outra pessoa. Escopo 'local': tira
+            # só a sessão recém-criada por esta tentativa, sem mexer nos outros
+            # aparelhos de quem tentou.
+            gotrue_logout(response.session.access_token, scope="local")
             return jsonify({"status": "error", "message": "Acesso permitido apenas a administradores."}), 403
 
         log_admin_action(user.email, "Login", "Admin login successful", request)
@@ -474,7 +481,12 @@ def admin_logout():
     try:
         from ..utils.audit import log_admin_action_auto
         log_admin_action_auto("Logout", "Admin logout")
-        supabase.auth.sign_out()
+        # ⚠️ Era `supabase.auth.sign_out()`, que derrubava quem logou por último
+        # na plataforma em vez do admin que está saindo (ver gotrue_logout em
+        # helpers.py). Agora desloga o dono DESTE token.
+        auth_header = request.headers.get("Authorization") or ""
+        if auth_header.startswith("Bearer "):
+            gotrue_logout(auth_header.split("Bearer ")[1])
         return jsonify({"status": "success", "message": "Logout realizado com sucesso"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": f"Erro durante logout: {str(e)}"}), 500
