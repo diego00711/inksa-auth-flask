@@ -2201,6 +2201,8 @@ def readiness():
                    (dp.latitude IS NOT NULL AND dp.longitude IS NOT NULL) AS tem_coordenada,
                    NULLIF(TRIM(dp.phone), '') AS telefone,
                    NULLIF(TRIM(dp.cpf), '')   AS cpf,
+                   dp.app_canal_v2,
+                   dp.app_checado_em,
                    (SELECT MAX(c.created_at) FROM cadastro_cobrancas c
                      WHERE c.tipo = 'entregador' AND c.alvo_id = dp.id) AS cobrado_em
               FROM delivery_profiles dp
@@ -2211,6 +2213,29 @@ def readiness():
             e["faltas"] = _faltas_do_entregador(e)
             e["pode_receber"] = not e["faltas"]
             e["cobrado_em"] = e["cobrado_em"].isoformat() if e["cobrado_em"] else None
+            e["app_checado_em"] = e["app_checado_em"].isoformat() if e["app_checado_em"] else None
+
+        # ── Quem já está no APK novo ────────────────────────────────────────
+        # ⚠️ ISTO DECIDE QUANDO O SOM ALTO PODE SER LIGADO.
+        #
+        # A chave `push_canal_entregador` só pode apontar para
+        # `inksa_urgente_v2` quando NINGUÉM mais estiver no APK velho: canal
+        # que não existe no aparelho não deixa a notificação muda — o Android
+        # DESCARTA a notificação inteira, em silêncio. O prejuízo aparece como
+        # corrida perdida, não como erro no log.
+        #
+        # Conta só quem está aprovado e ativo: entregador desativado nunca vai
+        # abrir o app pra reportar, e ficaria travando o contador pra sempre.
+        aptos = [e for e in entregadores if e["aprovado"]]
+        app_versao = {
+            "prontos":      sum(1 for e in aptos if e["app_canal_v2"] is True),
+            "atrasados":    sum(1 for e in aptos if e["app_canal_v2"] is False),
+            "sem_resposta": sum(1 for e in aptos if e["app_canal_v2"] is None),
+        }
+        # Só é seguro virar quando ninguém aparece como atrasado E pelo menos
+        # alguém já respondeu (senão "0 atrasados" é só ausência de dado).
+        app_versao["pode_ligar_som"] = (app_versao["atrasados"] == 0
+                                        and app_versao["prontos"] > 0)
 
         # Itens sem peso nos segmentos onde ele decide frete e veículo. Sem
         # isso, um pedido de 60 kg calcula 0 kg: sai com frete de moto e a
@@ -2266,6 +2291,7 @@ def readiness():
             "clientes": {k: int(v or 0) for k, v in clientes.items()},
             "pedidos": {k: (int(v or 0) if k != "ultimo" else v) for k, v in pedidos.items()},
             "pracas": [{"praca": k, "lojas_vendaveis": v} for k, v in sorted(pracas.items())],
+            "app_versao": app_versao,
             "resumo": {
                 "lojas_cadastradas": len(lojas),
                 "lojas_vendaveis": sum(1 for l in lojas if l["vendavel"]),

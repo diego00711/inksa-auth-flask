@@ -183,14 +183,23 @@ _TEXT_DEFAULTS: dict[str, str] = {
     "referral_starts_at": "",
     "referral_ends_at": "",
 
-    # Canal de push do ENTREGADOR. Vazio = `inksa_urgente` (o antigo), que e o
-    # comportamento de sempre. Por `inksa_urgente_v2` so DEPOIS que o APK novo
-    # estiver na rua: o v2 nasce no nativo (MainActivity.java) junto com
-    # res/raw/inksa_alerta.mp3, e quem estiver no APK velho nao tem esse canal
-    # — push pra canal inexistente cai no canal padrao, que e SILENCIOSO.
+    # Canal de push do ENTREGADOR. Vazio = `inksa_urgente` (o antigo).
     #
-    # ⚠️ Virar isto cedo demais deixa entregador sem aviso sonoro e ninguem
-    # descobre por erro: descobre por corrida perdida.
+    # Degraus: `inksa_urgente_v3` e criado pelo JAVASCRIPT, entao existe em TODO
+    # aparelho e pode ser ligado a qualquer momento (e o que esta ligado desde
+    # 28/09). O `inksa_urgente_v2` nasce no NATIVO (MainActivity.java, APK de
+    # 16/09 em diante) junto com res/raw/inksa_alerta.mp3 -- esse so DEPOIS que
+    # o APK novo estiver em todo mundo.
+    #
+    # ⚠️ CORRIGIDO EM 28/09: este comentario dizia que push pra canal inexistente
+    # "cai no canal padrao, que e SILENCIOSO". ESTA ERRADO, e o erro subestima o
+    # risco. Nao ha `default_notification_channel_id` no AndroidManifest, entao
+    # nao existe canal padrao pra cair. Do Android 8 em diante o sistema
+    # DESCARTA a notificacao inteira -- o entregador nao fica sem som, fica sem
+    # OFERTA, e nada aparece em log nenhum.
+    #
+    # ⚠️ Virar isto cedo demais nao se descobre por erro: descobre por corrida
+    # perdida. O semaforo esta no admin, em Prontidao -> "App do entregador".
     "push_canal_entregador": "",
 
     # REFORCO DA OFERTA DE ENTREGA. Segundos, separados por virgula, contados a
