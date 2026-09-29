@@ -2232,9 +2232,23 @@ def readiness():
             "atrasados":    sum(1 for e in aptos if e["app_canal_v2"] is False),
             "sem_resposta": sum(1 for e in aptos if e["app_canal_v2"] is None),
         }
-        # Só é seguro virar quando ninguém aparece como atrasado E pelo menos
-        # alguém já respondeu (senão "0 atrasados" é só ausência de dado).
+        # ⚠️ EXIGE `sem_resposta == 0`, E ISSO NÃO É RIGOR EXCESSIVO.
+        #
+        # A primeira versão pedia só `atrasados == 0 and prontos > 0`, e no
+        # mesmo dia ela já daria sinal verde com 2 respondidos e 17 calados —
+        # sendo que esses 17 podem estar todos no APK velho, só ainda não
+        # abriram o app. Quem não respondeu não é "provavelmente ok": é
+        # desconhecido, e desconhecido aqui custa oferta que não chega.
+        #
+        # O custo de errar é assimétrico: esperar demais só adia o som melhor;
+        # virar cedo tira o entregador da fila sem ninguém perceber. Então o
+        # sinal verde erra para o lado de não virar.
+        #
+        # Quem nunca vai responder (aparelho Android 6, que não consegue
+        # atualizar) trava o contador de propósito — aí é caso de olhar a lista
+        # e decidir na mão, não de afrouxar a regra.
         app_versao["pode_ligar_som"] = (app_versao["atrasados"] == 0
+                                        and app_versao["sem_resposta"] == 0
                                         and app_versao["prontos"] > 0)
 
         # Itens sem peso nos segmentos onde ele decide frete e veículo. Sem
