@@ -677,3 +677,60 @@ def delete_avatar():
     finally:
         if conn: 
             conn.close()
+
+
+@delivery_auth_profile_bp.route('/app-status', methods=['POST', 'OPTIONS'])
+@delivery_token_required
+def registrar_status_do_app():
+    """O app conta se este aparelho já tem o canal `inksa_urgente_v2`.
+
+    ⚠️ ISTO EXISTE PARA QUE A VIRADA DO SOM DEIXE DE SER PALPITE.
+
+    A chave `push_canal_entregador` só pode apontar para `inksa_urgente_v2`
+    quando NINGUÉM mais estiver no APK velho: canal que não existe no aparelho
+    não deixa a notificação sem som — o Android DESCARTA a notificação inteira,
+    em silêncio. O prejuízo aparece como corrida perdida, não como erro.
+
+    O app não consegue ler a própria versão (`@capacitor/app` não está
+    instalado, e instalá-lo exigiria justamente a build que o público antigo não
+    tem). O que dá para perguntar ao aparelho é a lista de canais — e o `_v2`
+    só passou a ser criado no APK de 16/09/2026.
+
+    Para saber quando virar:
+        select count(*) filter (where app_canal_v2) as prontos,
+               count(*) filter (where app_canal_v2 is false) as atrasados,
+               count(*) filter (where app_canal_v2 is null)  as sem_resposta
+        from delivery_profiles where approved and is_active;
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 204
+
+    data = request.get_json(silent=True) or {}
+    canal_v2 = data.get('canal_v2')
+    if not isinstance(canal_v2, bool):
+        return jsonify({"error": "canal_v2 deve ser true ou false"}), 400
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Falha na conexão com a base de dados"}), 500
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE delivery_profiles
+                      SET app_canal_v2 = %s, app_checado_em = NOW()
+                    WHERE user_id = %s""",
+                (canal_v2, g.user_auth_id)
+            )
+        conn.commit()
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logger.error(f"Erro ao registrar status do app: {e}", exc_info=True)
+        if conn:
+            try: conn.rollback()
+            except Exception: pass
+        return jsonify({"error": "Erro interno do servidor"}), 500
+    finally:
+        if conn:
+            try: conn.close()
+            except Exception: pass
