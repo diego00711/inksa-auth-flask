@@ -79,7 +79,22 @@ logger = logging.getLogger(__name__)
 
 # Teto de sanidade. Nao e configuracao: e anteparo pra um dedo errado no admin
 # transformar o aviso de corrida em perseguicao.
-_MAX_REFORCOS = 4
+#
+# ⚠️ ELE CORTA A LISTA EM SILENCIO, e isso ja me fez afirmar numero errado.
+# Em 29/09/2026 configurei `10,20,30,40,50` e anunciei "6 alarmes em 60s" --
+# o teto de 4 descartou o `50` e foram 5. Se a conta que voce quer depende de
+# quantos toques saem, confira ESTE numero, nao so a lista do admin.
+#
+# 4 -> 12 em 30/09/2026, decisao do Diego: com a oferta durando 60s
+# (dispatch_offer_seconds) e o alerta tendo 3,2s de bipes, um toque a cada 5s
+# e som praticamente continuo enquanto a oferta esta na mao do entregador --
+# que foi o pedido dele, textual: "ele teria que ficar tocando durante o tempo
+# todo que a oferta esta com o entregador". Dentro do capacete, andando, e a
+# diferenca entre ouvir e perder a corrida.
+#
+# O anteparo continua existindo: 12 toques e o teto, e `_MAX_SEGUNDOS` segue
+# limitando cada atraso.
+_MAX_REFORCOS = 12
 _MAX_SEGUNDOS = 300
 
 
