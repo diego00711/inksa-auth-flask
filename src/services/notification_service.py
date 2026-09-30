@@ -168,14 +168,34 @@ CANAL_URGENTE_V2 = 'inksa_urgente_v2'
 CANAL_URGENTE_V3 = 'inksa_urgente_v3'
 
 
-def _canal_do_entregador():
-    """Canal que o push urgente deve usar AGORA.
+def _canal_urgente(destino: str = None):
+    """Canal do push urgente, POR APP DE DESTINO.
 
-    Le `platform_settings.push_canal_entregador`. Vazio ou desconhecido -> o
-    canal antigo, que e o comportamento de hoje. Fail-safe de proposito: errar
-    aqui e deixar entregador sem aviso sonoro, e aviso que nao toca custa
-    corrida perdida.
+    ⚠️ ISTO NAO PODE SER UMA ESCOLHA GLOBAL, E JA FOI (quebrado em 29/09/2026,
+    consertado em 30/09).
+
+    Cada app cria os SEUS canais, e so o do entregador tem o `_v2`:
+
+        entregador : inksa_urgente_v2 (nativo, MainActivity) + res/raw/inksa_alerta.mp3
+        parceiro   : inksa_urgente    (JS)
+        cliente    : inksa_urgente    (JS) + inksa_ofertas_som
+
+    Quando `push_canal_entregador` virou `inksa_urgente_v2` para ligar o som
+    alto do entregador, TODO push urgente passou a sair nesse canal -- e o
+    Android DESCARTA em silencio a notificacao cujo canal nao existe no app.
+    Resultado: o parceiro parou de receber "Novo pedido recebido!" no APK, que e
+    justamente o aviso que nao pode falhar. Nao chegava mudo: nao chegava.
+
+    O nome da chave (`push_canal_entregador`) sempre disse que ela era do
+    ENTREGADOR. Quem generalizou foi o codigo.
+
+    ⚠️ O PADRAO E O CANAL SEGURO, de proposito. Ponto de chamada novo que
+    esqueca o `destino` cai em `inksa_urgente`, que existe nos tres apps: perde
+    o som alto, mas a notificacao APARECE. O erro inverso (cair no `_v2` por
+    padrao) apaga o aviso.
     """
+    if destino != 'entregador':
+        return CANAL_URGENTE, 'default'
     try:
         from ..utils.platform_settings import get_settings
         escolhido = str(get_settings().get('push_canal_entregador') or '').strip()
@@ -206,7 +226,7 @@ CANAL_CAMPANHA = 'inksa_ofertas_som'
 
 def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
                      urgente: bool = False, canal: str = None,
-                     fixa: bool = False, tag: str = None):
+                     fixa: bool = False, tag: str = None, destino: str = None):
     """Monta a Message do FCM. Existe pra corrigir o PUSH DUPLICADO.
 
     O bug: a mensagem ia com `notification=` no nível de cima. No WEB, isso faz
@@ -236,7 +256,9 @@ def _montar_mensagem(token: str, title: str, body: str, data: dict = None,
         # priority='high' acorda o aparelho em Doze; sem isso o push pode
         # esperar a próxima janela de sincronismo e chegar minutos depois —
         # inútil pra um pedido esperando aceite.
-        _canal, _som = _canal_do_entregador()
+        # `destino` decide o canal: so o app do entregador tem o `_v2`.
+        # Ver _canal_urgente() — errar aqui APAGA a notificacao.
+        _canal, _som = _canal_urgente(destino)
         notif = messaging.AndroidNotification(
             title=title, body=body,
             channel_id=_canal,
@@ -348,11 +370,16 @@ def send_campaign(destinos: list, title: str, body: str, data: dict = None,
 
 def send_push_notification(token: str, title: str, body: str, data: dict = None,
                            urgente: bool = False, fixa: bool = False,
-                           tag: str = None) -> bool:
+                           tag: str = None, destino: str = None) -> bool:
     """Envia push notification via FCM usando firebase_admin. Retorna True se sucesso.
 
     `fixa` = a notificação não some ao ser tocada (vira atalho, não aviso).
     `tag`  = notificações com a mesma etiqueta se substituem em vez de empilhar.
+
+    `destino` = qual APP recebe: 'entregador', 'parceiro' ou 'cliente'. Só vale
+    para push urgente, e decide o canal do Android. **Mandar para um canal que o
+    app de destino não criou faz o Android descartar a notificação em silêncio**
+    — ver _canal_urgente(). Omitir cai no canal seguro (existe nos três apps).
     """
     if not token:
         logger.warning("FCM: token ausente, notificacao ignorada")
@@ -363,7 +390,8 @@ def send_push_notification(token: str, title: str, body: str, data: dict = None,
 
     try:
         response = messaging.send(_montar_mensagem(token, title, body, data,
-                                                   urgente=urgente, fixa=fixa, tag=tag))
+                                                   urgente=urgente, fixa=fixa, tag=tag,
+                                                   destino=destino))
         logger.info("FCM: notificacao enviada — message_id=%s token=%s...", response, token[:10])
         return True
     except messaging.UnregisteredError:

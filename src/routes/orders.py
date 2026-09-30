@@ -52,7 +52,8 @@ def _get_fcm_token(cur, table: str, user_id: str):
         return None
 
 
-def _notify(token, title, body, data=None, urgente=False, fixa=False, tag=None):
+def _notify(token, title, body, data=None, urgente=False, fixa=False, tag=None,
+            destino=None):
     """Dispara push notification de forma defensiva — nunca propaga exceções.
 
     ⚠️ ENVIO SÍNCRONO, E ISSO É DELIBERADO.
@@ -78,12 +79,18 @@ def _notify(token, title, body, data=None, urgente=False, fixa=False, tag=None):
     disponível" pro entregador. São os únicos em que alguém está parado
     esperando o aviso pra agir. Se tudo virar urgente, nada é — e a primeira
     coisa que a pessoa faz é desligar a notificação do app inteiro.
+
+    ⚠️ `destino` ('entregador' | 'parceiro' | 'cliente') NÃO é rótulo: ele
+    escolhe o canal do Android, e canal que não existe no app de destino faz a
+    notificação ser DESCARTADA em silêncio. Só o app do entregador tem o canal
+    de som alto. Omitir cai no canal seguro. Ver _canal_urgente() em
+    services/notification_service.py.
     """
     if not _send_push or not token:
         return
     try:
         _send_push(token, title, body, data or {}, urgente=urgente,
-                   fixa=fixa, tag=tag)
+                   fixa=fixa, tag=tag, destino=destino)
     except Exception as e:
         logging.getLogger(__name__).warning(f"FCM notificacao silenciada: {e}")
 
@@ -552,7 +559,10 @@ def handle_orders():
                             # notificação do pedido novo se apagava sozinha,
                             # justamente a que precisa insistir.
                             {"order_id": new_order['id'], "type": "new_order"},
-                            urgente=True)
+                            # ⚠️ 'parceiro', NUNCA o canal do entregador: o APK
+                            # do Parceiro não cria o inksa_urgente_v2, e o
+                            # Android descarta notificação de canal inexistente.
+                            urgente=True, destino='parceiro')
                 except Exception as _e:
                     logger.warning(f"FCM pedido criado: {_e}")
 
@@ -709,7 +719,7 @@ def update_order_status(order_id):
                                     {"order_id": str(order_id), "status": "cancelled",
                                      "type": "order_cancelled",
                                      "url": "/delivery/entregas"},
-                                    urgente=True)
+                                    urgente=True, destino='entregador')
                     elif new_status_internal == 'accepted':
                         # Notifica cliente
                         cli_token = _get_fcm_token(_ncur, 'client_profiles', str(updated_order['client_id']))
@@ -810,7 +820,7 @@ def update_order_status(order_id):
                                                  # idem: o worker do entregador
                                                  # espera 'new_delivery'.
                                                  "type": "new_delivery"},
-                                                urgente=True)
+                                                urgente=True, destino='entregador')
 
                                 # UM TOQUE SO NAO BASTA DENTRO DE UM CAPACETE.
                                 #
@@ -2025,7 +2035,7 @@ def _avisar_dono_da_oferta(cur, order_id, courier_user_id, segundos):
                 {"order_id": str(order_id), "status": "ready",
                  # o worker do entregador espera exatamente esta chave
                  "type": "new_delivery"},
-                urgente=True)
+                urgente=True, destino='entregador')
     except Exception:
         logger.warning("Aviso da oferta falhou (pedido %s)", order_id, exc_info=True)
 

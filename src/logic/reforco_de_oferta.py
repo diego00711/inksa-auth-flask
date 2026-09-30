@@ -271,7 +271,7 @@ def _disparar(order_id: str, toque: int, total: int) -> None:
                                        {"order_id": str(order_id), "status": "ready",
                                         # o worker do entregador espera exatamente esta chave
                                         "type": "new_delivery"},
-                                       urgente=True)
+                                       urgente=True, destino='entregador')
                 enviados += 1
             except Exception:
                 logger.warning("[REFORCO] push falhou num token do pedido %s", order_id, exc_info=True)

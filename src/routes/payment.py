@@ -1824,6 +1824,11 @@ def _avisar_loja_pedido_pago(pedido_id, restaurant_id):
             "Você tem um novo pedido para confirmar",
             {"order_id": str(pedido_id), "type": "new_order"},
             urgente=True,
+            # ⚠️ 'parceiro', NUNCA o canal do entregador: o APK do Parceiro não
+            # cria o inksa_urgente_v2, e o Android descarta em silêncio a
+            # notificação cujo canal não existe. Era o que impedia a loja de
+            # ouvir pedido novo com o app fechado (29-30/09/2026).
+            destino='parceiro',
         )
         logging.info("🔔 Loja %s avisada do pedido %s", restaurant_id, pedido_id)
     except Exception as e:
