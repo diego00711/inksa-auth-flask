@@ -431,8 +431,16 @@ def logout():
         # A vítima não percebia na hora (o access_token dela continua válido até
         # vencer), só na renovação seguinte — por isso as sessões morriam perto
         # de múltiplos exatos de hora e parecia expiração normal.
+        #
+        # ⚠️ E O CONSERTO ACIMA TROUXE UM SEGUNDO PROBLEMA (30/09/2026): passou a
+        # acertar a pessoa certa, mas em TODOS os aparelhos dela, porque o
+        # gotrue_logout nascia com scope='global'. O entregador saía no
+        # navegador e o app do celular caía junto — e uma aba esquecida batendo
+        # o timer de inatividade derrubava quem estava em serviço. Hoje o padrão
+        # é 'local': encerra ESTA sessão, não a vida do usuário na plataforma.
+        # Ver gotrue_logout em helpers.py.
         try:
-            resp = gotrue_logout(token)
+            resp = gotrue_logout(token)  # scope='local' por padrão
             if resp is not None and resp.status_code >= 400:
                 logger.warning("logout: GoTrue devolveu %s", resp.status_code)
             else:

@@ -483,7 +483,9 @@ def admin_logout():
         log_admin_action_auto("Logout", "Admin logout")
         # ⚠️ Era `supabase.auth.sign_out()`, que derrubava quem logou por último
         # na plataforma em vez do admin que está saindo (ver gotrue_logout em
-        # helpers.py). Agora desloga o dono DESTE token.
+        # helpers.py). Agora desloga o dono DESTE token — e SÓ esta sessão dele,
+        # não as outras abas/aparelhos (o padrão do gotrue_logout virou 'local'
+        # em 30/09/2026, porque 'global' derrubava o celular do entregador).
         auth_header = request.headers.get("Authorization") or ""
         if auth_header.startswith("Bearer "):
             gotrue_logout(auth_header.split("Bearer ")[1])

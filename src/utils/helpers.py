@@ -772,11 +772,28 @@ def gotrue_admin(metodo, caminho, payload=None, timeout=10):
 #
 # Regra: nada que dependa de IDENTIDADE pode sair pelo cliente compartilhado.
 # Mande o token explicitamente, como aqui.
-def gotrue_logout(access_token, scope="global", timeout=10):
+def gotrue_logout(access_token, scope="local", timeout=10):
     """Desloga a sessão DONA do access_token informado, via GoTrue direto.
 
-    scope='global' revoga todos os refresh tokens do usuário (todos os
-    aparelhos); 'local' revoga só a sessão deste token.
+    scope='local' (PADRÃO) revoga só a sessão deste token.
+    scope='global' revoga TODAS as sessões do usuário, em todos os aparelhos.
+
+    ⚠️ O PADRÃO ERA 'global', E ISSO DERRUBAVA O CELULAR DO ENTREGADOR
+    (corrigido em 30/09/2026). Cada aparelho e cada navegador é uma sessão
+    separada, e elas acumulam: quando isto foi medido, o Diego tinha 18 sessões
+    vivas, o Gabriel 10, e todo entregador ativo tinha de 2 a 4. Com 'global',
+    UM logout em qualquer lugar matava todas — inclusive o app que estava no
+    bolso, em serviço.
+
+    Pior, ninguém precisava apertar "Sair": basta uma aba velha do navegador
+    atingir o timer de inatividade (idle_logout_minutes) e ela desloga o
+    aparelho que está trabalhando.
+
+    Isso não aparecia na contagem de logouts do audit log — ela seguiu em 1 a 2
+    por dia. O que cresceu foi o ESTRAGO por logout, não o número deles.
+
+    Só use 'global' onde a intenção é mesmo "sair de todos os aparelhos": senha
+    trocada, conta comprometida, ou um botão que diga isso ao usuário.
 
     Devolve o Response do requests, ou None se faltar configuração — logout é
     best-effort e não pode derrubar a rota que o chamou.
