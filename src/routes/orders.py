@@ -2035,7 +2035,11 @@ def _avisar_dono_da_oferta(cur, order_id, courier_user_id, segundos):
                 {"order_id": str(order_id), "status": "ready",
                  # o worker do entregador espera exatamente esta chave
                  "type": "new_delivery"},
-                urgente=True, destino='entregador')
+                # MESMA `tag` dos reforços (ver reforco_de_oferta.py): o aviso
+                # inicial e os 12 toques da série são UMA notificação que se
+                # atualiza, não 13 empilhadas.
+                urgente=True, destino='entregador',
+                tag=f"oferta_{order_id}")
     except Exception:
         logger.warning("Aviso da oferta falhou (pedido %s)", order_id, exc_info=True)
 

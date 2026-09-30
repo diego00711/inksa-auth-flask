@@ -282,11 +282,22 @@ def _disparar(order_id: str, toque: int, total: int) -> None:
         enviados = 0
         for tk in tokens:
             try:
+                # `tag` por PEDIDO: os 12 toques da serie viram UMA notificacao
+                # que se atualiza, em vez de 12 empilhadas na barra. Sem isso a
+                # barra deixa de ajudar -- uma corrida enche a tela de avisos
+                # iguais, e o entregador aprende a desligar a notificacao do app.
+                #
+                # ⚠️ NAO E "notificacao silenciosa". O que silencia repeticao no
+                # Android e `setOnlyAlertOnce(true)`, que o FCM nao manda e nos
+                # nao pedimos: notificacao substituida volta a tocar o som do
+                # canal. Se algum dia parar de tocar ao repetir, e AQUI que se
+                # olha primeiro -- tirar o tag devolve o comportamento antigo.
                 send_push_notification(tk, titulo, corpo,
                                        {"order_id": str(order_id), "status": "ready",
                                         # o worker do entregador espera exatamente esta chave
                                         "type": "new_delivery"},
-                                       urgente=True, destino='entregador')
+                                       urgente=True, destino='entregador',
+                                       tag=f"oferta_{order_id}")
                 enviados += 1
             except Exception:
                 logger.warning("[REFORCO] push falhou num token do pedido %s", order_id, exc_info=True)
