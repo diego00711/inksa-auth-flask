@@ -194,16 +194,22 @@ def handle_profile():
                 'bank_account_number', 'bank_account_type', 'pix_key', 'pix_key_type',
                 'mp_account_id', 'delivery_type', 'own_delivery_radius_km',
                 'max_order_items',
-                # ⚠️ 'accepts_cash' SAIU DAQUI EM 06/09/2026, de propósito.
-                # O parceiro ligava "aceito dinheiro" entendendo que o
-                # entregador traria o dinheiro dele. Na mecânica da Inksa o
-                # entregador FICA com o dinheiro e passa a dever à plataforma;
-                # a loja recebe pelo repasse, não no balcão. Essa distância
-                # entre o que ele entende e o que acontece gera briga sobre
-                # dinheiro, que é a pior briga que existe.
-                # Agora quem liga é o admin (admin.py, PUT /admin/restaurants).
-                # Tirar da lista é o que REALMENTE bloqueia: sem isso, bastaria
-                # uma requisição montada à mão pra gravar o campo.
+                # 'accepts_cash' VOLTOU EM 30/09/2026, mas SÓ PARA ENTREGA
+                # PRÓPRIA — a trava agora é a regra logo abaixo, não a ausência
+                # do campo nesta lista.
+                #
+                # Histórico, que é o que explica a regra: saiu daqui em
+                # 06/09/2026 porque o parceiro ligava "aceito dinheiro"
+                # entendendo que o entregador traria o dinheiro dele. Na entrega
+                # PELA PLATAFORMA o entregador FICA com o dinheiro e passa a
+                # dever à Inksa; a loja recebe pelo repasse, não no balcão. Essa
+                # distância entre o que ele entende e o que acontece gera briga
+                # sobre dinheiro, que é a pior que existe.
+                #
+                # Na entrega PRÓPRIA esse mal-entendido não existe: não há
+                # entregador no meio, a loja recebe no balcão e passa a dever a
+                # comissão. Aí a escolha é dela mesma (decisão do Diego, 30/09).
+                'accepts_cash',
                 # Retirada no local. Entra aqui NO MESMO COMMIT em que o app
                 # ganha o botão — é literalmente a armadilha descrita acima, e
                 # ela já mordeu o accepts_cash.
@@ -232,6 +238,41 @@ def handle_profile():
                         int(_m) if _m not in (None, '', 0, '0') and int(_m) > 0 else None)
                 except (TypeError, ValueError):
                     updates['max_order_items'] = None
+            # DINHEIRO SÓ NA ENTREGA PRÓPRIA — e a regra olha o tipo EFETIVO.
+            #
+            # Não basta conferir o que está no banco: a loja pode mandar
+            # `accepts_cash` e `delivery_type` na MESMA requisição. Sem olhar o
+            # valor que vai valer depois da edição, ela ligaria dinheiro e
+            # trocaria pra plataforma num movimento, e o entregador viraria
+            # carregador de troco sem ninguém ter decidido isso.
+            #
+            # E o caminho inverso também precisa: quem tem dinheiro ligado e
+            # MUDA pra entrega pela plataforma perde o dinheiro junto. Deixar a
+            # flag ligada ali seria o mesmo buraco, chegando pela outra porta.
+            if 'accepts_cash' in updates or 'delivery_type' in updates:
+                _tipo_atual = None
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _tc:
+                    _tc.execute(
+                        "SELECT delivery_type FROM restaurant_profiles WHERE user_id = %s",
+                        (user_id,))
+                    _row = _tc.fetchone()
+                    if _row:
+                        _tipo_atual = _row['delivery_type']
+                _tipo_efetivo = updates.get('delivery_type', _tipo_atual) or 'platform'
+
+                if _tipo_efetivo != 'own':
+                    if updates.get('accepts_cash'):
+                        # Recusa EXPLÍCITA, não silenciosa: campo que salva e não
+                        # muda nada é a armadilha que já custou tempo aqui.
+                        return jsonify({
+                            "status": "error",
+                            "error": ("Pagamento em dinheiro só pode ser aceito por loja com "
+                                      "entrega própria. Na entrega pela Inksa quem recebe o "
+                                      "dinheiro é o entregador, e o seu valor vem pelo repasse.")
+                        }), 400
+                    # Saindo da entrega própria: dinheiro desce junto.
+                    updates['accepts_cash'] = False
+
             if not updates:
                 return jsonify({"status": "error", "error": "No valid fields to update"}), 400
 
