@@ -2300,10 +2300,54 @@ def readiness():
             chave = f'{l["cidade"] or "sem cidade"}{" - " + l["uf"] if l["uf"] else ""}'
             pracas[chave] = pracas.get(chave, 0) + 1
 
+        # CORRIDAS ESPERANDO ENTREGADOR.
+        #
+        # Pedido pronto, sem ninguém pra buscar. Acontece quando o motor não
+        # achou candidato livre (o único entregador online está em outra
+        # entrega) ou quando a oferta foi repassada — e o repasse não manda
+        # push, buraco registrado em reforco_de_oferta.py.
+        #
+        # `aptos` é quantos RECEBERIAM o aviso, não quantos estão online: é o
+        # mesmo filtro do motor. Mostrar isso antes do clique evita apertar um
+        # botão que não vai alcançar ninguém.
+        corridas = _fetchall(conn, """
+            SELECT o.id, o.items, o.created_at, o.delivery_distance_km,
+                   rp.restaurant_name AS loja, rp.latitude, rp.longitude
+              FROM orders o
+              JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
+             WHERE o.status = 'ready'
+               AND o.delivery_id IS NULL
+               AND COALESCE(rp.delivery_type, 'platform') <> 'own'
+               AND o.archived_at IS NULL
+             ORDER BY o.created_at
+        """)
+        if corridas:
+            from ..utils.carga import peso_do_pedido, tokens_para_avisar
+            _st = get_settings()
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _ccur:
+                for c in corridas:
+                    c["id"] = str(c["id"])
+                    c["loja"] = c["loja"] or "—"
+                    c["desde"] = c["created_at"].isoformat() if c["created_at"] else None
+                    try:
+                        c["peso_kg"] = float(peso_do_pedido(_ccur, c["items"]) or 0)
+                    except Exception:
+                        c["peso_kg"] = 0.0
+                    try:
+                        c["aptos"] = len(tokens_para_avisar(
+                            c["peso_kg"], c["latitude"], c["longitude"], _st,
+                            distancia_km=c["delivery_distance_km"]))
+                    except Exception:
+                        c["aptos"] = 0
+                    for k in ("items", "created_at", "latitude", "longitude",
+                              "delivery_distance_km"):
+                        c.pop(k, None)
+
         return jsonify({"status": "success", "data": {
             "lojas": lojas,
             "itens_sem_peso": itens_sem_peso,
             "entregadores": entregadores,
+            "corridas_paradas": corridas,
             "clientes": {k: int(v or 0) for k, v in clientes.items()},
             "pedidos": {k: (int(v or 0) if k != "ultimo" else v) for k, v in pedidos.items()},
             "pracas": [{"praca": k, "lojas_vendaveis": v} for k, v in sorted(pracas.items())],
@@ -2315,6 +2359,111 @@ def readiness():
                 "entregadores_prontos": sum(1 for e in entregadores if e["pode_receber"]),
             },
         }}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AVISAR ENTREGADORES À MÃO (01/10/2026)
+#
+# Existe porque o motor tem um buraco que o próprio reforco_de_oferta.py
+# registra: `_run_dispatch_tick` NÃO manda push quando REPASSA a oferta. Quem
+# recebe a oferta depois do primeiro só descobre se abrir o app por acaso.
+# Some a isso o caso de ontem — entregador ocupado com uma entrega, pedido
+# seguinte fica `ready` sem oferta atribuída, e não toca nada pra ninguém.
+#
+# ⚠️ NÃO É UM "ACORDAR TODO MUNDO". Ele usa `tokens_para_avisar`, o MESMO filtro
+# do motor (capacidade do veículo, raio, aprovado, sinal de vida em 3h), por uma
+# regra que o orders.py já tinha aprendido: *push que leva a uma tela vazia é
+# pior que push nenhum*. Acordar a bicicleta pra uma carga de 40 kg só ensina o
+# entregador a desligar a notificação — e aí perdemos o canal inteiro.
+#
+# Por isso o botão é POR CORRIDA, e não um megafone geral: sem o pedido não dá
+# pra saber peso nem distância, que é o que decide quem consegue pegar.
+_AVISO_CORRIDA_ESPERA_S = 60
+_ultimo_aviso_corrida = {}
+
+
+@admin_bp.route("/prontidao/avisar-entregadores", methods=["POST"])
+@admin_required
+def avisar_entregadores():
+    """Acorda à mão quem PODE pegar esta corrida. Body: {"order_id": uuid}."""
+    data = request.get_json(silent=True) or {}
+    order_id = str(data.get("order_id") or "").strip()
+    if not order_id:
+        return jsonify({"status": "error", "message": "Informe o pedido."}), 400
+
+    # Anti-insistência. Em memória de propósito: o estrago de um envio repetido
+    # é um push a mais, não vale uma tabela. Morre no restart do worker, e está
+    # dito aqui pra ninguém contar com ele como garantia.
+    import time as _t
+    agora = _t.time()
+    faltam = _AVISO_CORRIDA_ESPERA_S - (agora - _ultimo_aviso_corrida.get(order_id, 0))
+    if faltam > 0:
+        return jsonify({"status": "error",
+                        "message": f"Avisado agora há pouco. Espere {int(faltam)}s."}), 429
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("""
+                SELECT o.id, o.status, o.items, o.delivery_id, o.delivery_distance_km,
+                       rp.latitude, rp.longitude, rp.restaurant_name
+                  FROM orders o
+                  JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
+                 WHERE o.id = %s
+            """, (order_id,))
+            pedido = cur.fetchone()
+            if not pedido:
+                return jsonify({"status": "error", "message": "Pedido não encontrado."}), 404
+            if pedido["delivery_id"]:
+                return jsonify({"status": "error",
+                                "message": "Este pedido já tem entregador."}), 409
+            if pedido["status"] != "ready":
+                return jsonify({"status": "error",
+                                "message": "Só dá pra avisar sobre pedido pronto para coleta."}), 409
+
+            from ..utils.carga import peso_do_pedido, tokens_para_avisar
+            try:
+                peso = float(peso_do_pedido(cur, pedido["items"]) or 0)
+            except Exception:
+                peso = 0.0
+
+            tokens = tokens_para_avisar(
+                peso, pedido["latitude"], pedido["longitude"], get_settings(),
+                distancia_km=pedido["delivery_distance_km"])
+
+        if not tokens:
+            return jsonify({"status": "success", "data": {"avisados": 0}, "message":
+                            "Nenhum entregador apto a esta corrida agora — ninguém "
+                            "com veículo, raio e sinal de vida compatíveis."}), 200
+
+        from ..services.notification_service import send_push_notification
+        enviados = 0
+        for tk in tokens:
+            try:
+                send_push_notification(
+                    tk, "Entrega disponivel! 🛵", "Um pedido esta pronto para coleta",
+                    {"order_id": order_id, "status": "ready", "type": "new_delivery"},
+                    # Mesmo canal alto e mesma `tag` do aviso automático: se o
+                    # entregador já tem o aviso da oferta na barra, este
+                    # SUBSTITUI em vez de empilhar.
+                    urgente=True, destino='entregador', tag=f"oferta_{order_id}")
+                enviados += 1
+            except Exception:
+                logger.warning("Aviso manual falhou num token do pedido %s", order_id,
+                               exc_info=True)
+
+        _ultimo_aviso_corrida[order_id] = agora
+        log_admin_action_auto(
+            "Avisou entregadores",
+            f"Push manual da corrida {order_id} ({pedido['restaurant_name']}): "
+            f"{enviados} de {len(tokens)} aptos")
+        return jsonify({"status": "success", "data": {"avisados": enviados,
+                                                      "aptos": len(tokens)}}), 200
     finally:
         try: conn.close()
         except Exception: pass
