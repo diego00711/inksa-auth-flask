@@ -138,6 +138,29 @@ def _mesmo_dono(cur, order_id):
         return False
 
 
+def esta_excluido(cur, tipo, perfil_id):
+    """True quando este perfil não concorre (conta de teste, sócio, etc.).
+
+    ⚠️ O REGULAMENTO PUBLICADO EXCLUI gente, e até 04/10/2026 o código não
+    excluía ninguém. Regulamento dizendo uma coisa e sistema fazendo outra é
+    exatamente o que invalida um sorteio depois — e seria descoberto no pior
+    momento, com o prêmio na mesa.
+
+    A lista mora em `rifa_exclusoes`, com MOTIVO, porque no dia da apuração
+    pode ser preciso mostrar por que fulano não estava concorrendo.
+    """
+    try:
+        cur.execute("""
+            SELECT 1 FROM rifa_exclusoes WHERE tipo = %s AND perfil_id = %s
+        """, (tipo, str(perfil_id)))
+        return cur.fetchone() is not None
+    except Exception:
+        # Na dúvida NÃO exclui: tirar quem tem direito é pior que deixar um a
+        # mais, e o admin ainda consegue conferir a lista antes do sorteio.
+        logger.warning("[RIFA] checagem de exclusao falhou: %s %s", tipo, perfil_id, exc_info=True)
+        return False
+
+
 def _ja_concedidos(cur, campanha, tipo, perfil_id):
     cur.execute("""
         SELECT COUNT(*) AS n FROM rifa_numeros
@@ -212,6 +235,8 @@ def sincronizar(cur, tipo, perfil_id):
     camp = _campanha(cur)
     if not camp or tipo not in _ORIGEM_POR_TIPO:
         return 0
+    if esta_excluido(cur, tipo, perfil_id):
+        return 0
     try:
         base = _base_valida(cur, tipo, perfil_id)
         por = float(camp['reais_por_numero'] or 50)
@@ -267,6 +292,8 @@ def conceder_cadastro(cur, tipo, perfil_id):
     """
     camp = _campanha(cur)
     if not camp or not camp['numero_no_cadastro'] or tipo not in _ORIGEM_POR_TIPO:
+        return 0
+    if esta_excluido(cur, tipo, perfil_id):
         return 0
     try:
         cur.execute("""
@@ -329,8 +356,13 @@ def distribuir_cadastros(cur):
                     SELECT 1 FROM rifa_numeros r
                      WHERE r.campanha = %s AND r.tipo = %s
                        AND r.perfil_id = p.id AND r.origem = 'cadastro')
+                   -- Quem o regulamento exclui (conta de teste, sócio) não
+                   -- entra nem no número de boas-vindas.
+                   AND NOT EXISTS (
+                    SELECT 1 FROM rifa_exclusoes e
+                     WHERE e.tipo = %s AND e.perfil_id = p.id)
                  ORDER BY p.created_at NULLS LAST, p.id
-            """, (camp['campanha'], tipo))
+            """, (camp['campanha'], tipo, tipo))
             faltantes = [r['id'] for r in cur.fetchall()]
             if not faltantes:
                 continue
