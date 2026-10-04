@@ -653,6 +653,28 @@ def update_order_status(order_id):
             updated_order = dict(cur.fetchone())
             conn.commit()
 
+            # NÚMEROS DA CAMPANHA — este é um dos caminhos que fecham pedido
+            # (entrega própria concluindo, e cancelamento pela loja/admin).
+            #
+            # A função RECONCILIA em vez de incrementar: ela pergunta quantos
+            # números a pessoa deveria ter e acerta a diferença. Por isso serve
+            # tanto pro pedido que foi entregue quanto pro que foi cancelado —
+            # no segundo caso a base cai e ela CANCELA o excedente, sem caminho
+            # separado de estorno.
+            #
+            # Inerte enquanto a campanha estiver desligada (que é o estado até
+            # a autorização sair). Nunca levanta: número de sorteio não pode
+            # derrubar pedido que já aconteceu.
+            if new_status_internal in ('delivered', 'cancelled'):
+                try:
+                    from ..logic.rifa import sincronizar_do_pedido
+                    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _rcur:
+                        sincronizar_do_pedido(_rcur, order_id)
+                    conn.commit()
+                except Exception:
+                    logger.warning("[RIFA] falhou no status %s do pedido %s",
+                                   new_status_internal, order_id, exc_info=True)
+
             # DEVOLUÇÃO AO ESTOQUE — cancelamento 1 de 2 (loja ou admin).
             # Sem isto cada cancelamento comeria estoque pra sempre, e o item
             # sumiria da vitrine por uma venda que não aconteceu.
@@ -1116,6 +1138,18 @@ def complete_order(order_id):
             # cima, e o UPDATE acima não toca em nenhuma das três. Reler a linha
             # só pra buscá-las era uma travessia de continente a troco de nada.
             completed_order = order
+
+            # NÚMEROS DA CAMPANHA — o OUTRO caminho que entrega um pedido
+            # (entrega pela plataforma, fechada com código). O mesmo
+            # `sincronizar_do_pedido` do update_order_status: é de propósito
+            # que os dois chamem a MESMA linha, porque regra que entra num
+            # caminho só vira buraco nesta base. Inerte com a campanha
+            # desligada, e nunca levanta.
+            try:
+                from ..logic.rifa import sincronizar_do_pedido
+                sincronizar_do_pedido(cur, order_id)
+            except Exception:
+                logger.warning("[RIFA] falhou ao concluir o pedido %s", order_id, exc_info=True)
 
             # Clube Inksa (entregador): aplica o benefício do nível do entregador
             # ao repasse DESTE pedido (bônus por entrega + % a mais do frete). Só

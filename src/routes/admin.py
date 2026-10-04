@@ -2365,6 +2365,173 @@ def readiness():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CAMPANHA DE NÚMEROS (sorteio) — acompanhamento e apuração
+#
+# ⚠️ A campanha nasce DESLIGADA e só gera número quando `ligada = true`.
+# Sorteio de prêmio exige autorização prévia (Lei 5.768/1971). A chave existe
+# pra que o sistema fique pronto sem a campanha começar por acidente.
+#
+# A busca por número é a tela do DIA DA APURAÇÃO: sorteia-se um número e
+# precisa-se saber, na hora e sem dúvida, de quem é.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@admin_bp.route("/rifa", methods=["GET"])
+@admin_required
+def rifa_painel():
+    """Estado da campanha, totais por público e quem tem mais números."""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        camp = _fetchall(conn, """
+            SELECT campanha, nome, premio, valor_premio, ligada, inicio, fim,
+                   reais_por_numero, numero_no_cadastro, teto_numeros_mes,
+                   proximo_numero - 1 AS numeros_emitidos
+              FROM rifa_campanhas ORDER BY criada_em DESC LIMIT 1
+        """)
+        if not camp:
+            return jsonify({"status": "success", "data": {"campanha": None}}), 200
+        c = camp[0]
+        c["valor_premio"] = float(c["valor_premio"] or 0)
+        c["reais_por_numero"] = float(c["reais_por_numero"] or 0)
+        for k in ("inicio", "fim"):
+            c[k] = c[k].isoformat() if c[k] else None
+
+        # Totais por público e por origem — mostra se a campanha está premiando
+        # CADASTRO ou MOVIMENTO, que é a pergunta de desenho mais importante.
+        por_tipo = _fetchall(conn, """
+            SELECT tipo, origem, COUNT(*) FILTER (WHERE cancelado_em IS NULL) AS validos,
+                   COUNT(*) FILTER (WHERE cancelado_em IS NOT NULL) AS cancelados
+              FROM rifa_numeros WHERE campanha = %s
+             GROUP BY tipo, origem ORDER BY tipo, origem
+        """, (c["campanha"],))
+
+        # Quem tem mais números. É aqui que a arbitragem aparece: se alguém
+        # dispara na frente, é sinal de pedido girado na própria loja.
+        ranking = _fetchall(conn, """
+            SELECT r.tipo, r.perfil_id, COUNT(*) AS numeros,
+                   COALESCE(
+                     (SELECT TRIM(CONCAT_WS(' ', cp.first_name, cp.last_name))
+                        FROM client_profiles cp WHERE cp.id = r.perfil_id),
+                     (SELECT rp.restaurant_name FROM restaurant_profiles rp WHERE rp.id = r.perfil_id),
+                     (SELECT TRIM(CONCAT_WS(' ', dp.first_name, dp.last_name))
+                        FROM delivery_profiles dp WHERE dp.id = r.perfil_id),
+                     '—') AS nome
+              FROM rifa_numeros r
+             WHERE r.campanha = %s AND r.cancelado_em IS NULL
+             GROUP BY r.tipo, r.perfil_id ORDER BY numeros DESC LIMIT 20
+        """, (c["campanha"],))
+        for x in ranking:
+            x["perfil_id"] = str(x["perfil_id"])
+
+        return jsonify({"status": "success", "data": {
+            "campanha": c, "por_tipo": por_tipo, "ranking": ranking,
+        }}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@admin_bp.route("/rifa/buscar", methods=["GET"])
+@admin_required
+def rifa_buscar():
+    """De quem é o número sorteado. A tela do dia da apuração.
+
+    Aceita `numero` (o sorteado) ou `nome` (conferir alguém antes). Devolve
+    também se o número foi CANCELADO — número estornado não ganha, e isso
+    precisa aparecer na hora, não depois.
+    """
+    numero = (request.args.get("numero") or "").strip()
+    nome = (request.args.get("nome") or "").strip()
+    if not numero and not nome:
+        return jsonify({"status": "error", "message": "Informe o número ou o nome."}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        nome_sql = """
+            COALESCE(
+              (SELECT TRIM(CONCAT_WS(' ', cp.first_name, cp.last_name))
+                 FROM client_profiles cp WHERE cp.id = r.perfil_id),
+              (SELECT rp.restaurant_name FROM restaurant_profiles rp WHERE rp.id = r.perfil_id),
+              (SELECT TRIM(CONCAT_WS(' ', dp.first_name, dp.last_name))
+                 FROM delivery_profiles dp WHERE dp.id = r.perfil_id),
+              '—')
+        """
+        if numero:
+            try:
+                n = int(numero)
+            except ValueError:
+                return jsonify({"status": "error", "message": "Número inválido."}), 400
+            linhas = _fetchall(conn, f"""
+                SELECT r.numero, r.tipo, r.perfil_id, r.origem, r.created_at,
+                       r.cancelado_em, r.motivo_cancel, {nome_sql} AS nome
+                  FROM rifa_numeros r WHERE r.numero = %s
+            """, (n,))
+        else:
+            linhas = _fetchall(conn, f"""
+                SELECT r.numero, r.tipo, r.perfil_id, r.origem, r.created_at,
+                       r.cancelado_em, r.motivo_cancel, {nome_sql} AS nome
+                  FROM rifa_numeros r
+                 WHERE {nome_sql} ILIKE %s AND r.cancelado_em IS NULL
+                 ORDER BY r.numero LIMIT 200
+            """, (f"%{nome}%",))
+
+        for l in linhas:
+            l["perfil_id"] = str(l["perfil_id"])
+            for k in ("created_at", "cancelado_em"):
+                l[k] = l[k].isoformat() if l[k] else None
+        return jsonify({"status": "success", "data": linhas}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@admin_bp.route("/rifa/campanha", methods=["PUT"])
+@admin_required
+def rifa_configurar():
+    """Liga/desliga e ajusta as regras sem deploy.
+
+    ⚠️ LIGAR É O ATO QUE INICIA A CAMPANHA. Só depois da autorização.
+    """
+    data = request.get_json(silent=True) or {}
+    campos, valores = [], []
+    for chave, coluna in (("ligada", "ligada"), ("inicio", "inicio"), ("fim", "fim"),
+                          ("reais_por_numero", "reais_por_numero"),
+                          ("numero_no_cadastro", "numero_no_cadastro"),
+                          ("teto_numeros_mes", "teto_numeros_mes"),
+                          ("nome", "nome"), ("premio", "premio"),
+                          ("valor_premio", "valor_premio")):
+        if chave in data:
+            campos.append(f"{coluna} = %s")
+            valores.append(data[chave])
+    if not campos:
+        return jsonify({"status": "error", "message": "Nada para alterar."}), 400
+
+    campanha = str(data.get("campanha") or "scooter2026")
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(f"UPDATE rifa_campanhas SET {', '.join(campos)} WHERE campanha = %s "
+                        f"RETURNING campanha, nome, ligada", valores + [campanha])
+            row = cur.fetchone()
+            conn.commit()
+        if not row:
+            return jsonify({"status": "error", "message": "Campanha não encontrada."}), 404
+        log_admin_action_auto(
+            "Configurou a campanha de números",
+            f"{row['nome']} ({campanha}) — ligada={row['ligada']}; mudou: {', '.join(data.keys())}")
+        return jsonify({"status": "success", "data": dict(row)}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # AVISAR ENTREGADORES À MÃO (01/10/2026)
 #
 # Existe porque o motor tem um buraco que o próprio reforco_de_oferta.py
