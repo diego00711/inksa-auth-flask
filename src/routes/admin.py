@@ -2522,10 +2522,33 @@ def rifa_configurar():
             conn.commit()
         if not row:
             return jsonify({"status": "error", "message": "Campanha não encontrada."}), 404
+
+        # LIGOU? Distribui o número de cadastro a quem já estava aqui.
+        #
+        # ⚠️ Sem isto, ligar a campanha deixaria as telas VAZIAS para todo
+        # mundo: `conceder_cadastro` só pega quem se cadastra DEPOIS, e no dia
+        # em que a campanha liga já existem dezenas de cadastrados que nunca
+        # passariam por lá. O dono veria tela vazia e concluiria que quebrou.
+        #
+        # Idempotente (índice único parcial): ligar e desligar várias vezes não
+        # duplica número de ninguém.
+        distribuidos = 0
+        if data.get("ligada") is True:
+            try:
+                from ..logic.rifa import distribuir_cadastros
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur2:
+                    distribuidos = distribuir_cadastros(cur2)
+                conn.commit()
+            except Exception:
+                logger.warning("[RIFA] distribuicao de cadastros falhou", exc_info=True)
+
         log_admin_action_auto(
             "Configurou a campanha de números",
-            f"{row['nome']} ({campanha}) — ligada={row['ligada']}; mudou: {', '.join(data.keys())}")
-        return jsonify({"status": "success", "data": dict(row)}), 200
+            f"{row['nome']} ({campanha}) — ligada={row['ligada']}; mudou: {', '.join(data.keys())}"
+            + (f"; {distribuidos} numeros de cadastro distribuidos" if distribuidos else ""))
+        resposta = dict(row)
+        resposta["cadastros_distribuidos"] = distribuidos
+        return jsonify({"status": "success", "data": resposta}), 200
     finally:
         try: conn.close()
         except Exception: pass

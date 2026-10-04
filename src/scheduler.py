@@ -238,6 +238,38 @@ def _apply_opening_hours_job() -> None:
                 pass
 
 
+def _rifa_cadastros_job() -> None:
+    """Dá o número de boas-vindas a quem se cadastrou depois da campanha ligar.
+
+    Existe para NÃO precisar de um gancho em três telas de cadastro diferentes
+    (cliente, parceiro, entregador) — regra que entra em duas das três vira
+    buraco, e esta base já teve esse problema mais de uma vez.
+
+    Inerte com a campanha desligada: a primeira coisa que `distribuir_cadastros`
+    faz é perguntar se existe campanha no ar. Barato mesmo ligada — é uma
+    consulta por tipo, e só insere o que falta.
+    """
+    from .utils.helpers import get_db_connection
+    import psycopg2.extras
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        from .logic.rifa import distribuir_cadastros
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            n = distribuir_cadastros(cur)
+        conn.commit()
+        if n:
+            logger.info("[SCHEDULER] Rifa: %d numeros de cadastro distribuidos", n)
+    except Exception:
+        logger.warning("[SCHEDULER] Rifa: distribuicao de cadastros falhou", exc_info=True)
+    finally:
+        if conn:
+            try: conn.close()
+            except Exception: pass
+
+
 def _close_stale_restaurants_job() -> None:
     """Fecha restaurantes 'abertos' cujo painel parou de dar sinal de vida.
 
@@ -467,6 +499,16 @@ def start_scheduler(app=None) -> None:
         misfire_grace_time=120,
     )
     logger.info("[SCHEDULER] Fechamento por inatividade: a cada 10 minutos")
+    _scheduler.add_job(
+        func=_rifa_cadastros_job,
+        trigger="interval",
+        minutes=15,
+        id="rifa_cadastros",
+        name="Numero de boas-vindas da campanha para cadastros novos",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    logger.info("[SCHEDULER] Rifa (numero de cadastro): a cada 15 minutos")
     _scheduler.add_job(
         func=_offline_stale_couriers_job,
         trigger="interval",

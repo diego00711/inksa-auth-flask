@@ -289,6 +289,68 @@ def conceder_cadastro(cur, tipo, perfil_id):
         return 0
 
 
+def distribuir_cadastros(cur):
+    """Dá o número de boas-vindas a TODO cadastro que ainda não tem.
+
+    ⚠️ EXISTE PORQUE `conceder_cadastro` SOZINHO NÃO RESOLVE, e eu só percebi
+    isso depois de escrever a função (04/10/2026). Ela serve para quem se
+    cadastra COM a campanha no ar — mas, no dia em que a campanha liga, já
+    existem dezenas de cadastrados, e eles nunca passariam por lá. O resultado
+    seria ligar a campanha e as telas aparecerem vazias para todo mundo.
+
+    Esta função é a passagem em massa, e é idempotente: o índice único parcial
+    (`origem = 'cadastro'`) recusa a segunda tentativa, então rodar de novo não
+    duplica nada e não precisa saber quem já recebeu.
+
+    Roda quando a campanha é LIGADA e, depois disso, periodicamente — assim
+    quem se cadastrar amanhã também recebe sem depender de um gancho em três
+    telas de cadastro diferentes.
+
+    Devolve quantos números concedeu.
+    """
+    camp = _campanha(cur)
+    if not camp or not camp['numero_no_cadastro']:
+        return 0
+
+    tabelas = {
+        'cliente': 'client_profiles',
+        'parceiro': 'restaurant_profiles',
+        'entregador': 'delivery_profiles',
+    }
+    total = 0
+    for tipo, tabela in tabelas.items():
+        try:
+            # Quem AINDA não tem o número de cadastro, em ordem estável —
+            # a ordem decide quais números cada um leva, e ordem instável faria
+            # a mesma lista sair diferente a cada execução.
+            cur.execute(f"""
+                SELECT p.id FROM {tabela} p
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM rifa_numeros r
+                     WHERE r.campanha = %s AND r.tipo = %s
+                       AND r.perfil_id = p.id AND r.origem = 'cadastro')
+                 ORDER BY p.created_at NULLS LAST, p.id
+            """, (camp['campanha'], tipo))
+            faltantes = [r['id'] for r in cur.fetchall()]
+            if not faltantes:
+                continue
+
+            inicio = _alocar(cur, camp['campanha'], len(faltantes))
+            if inicio is None:
+                continue
+            cur.executemany("""
+                INSERT INTO rifa_numeros (campanha, numero, tipo, perfil_id, origem)
+                VALUES (%s, %s, %s, %s, 'cadastro')
+                ON CONFLICT DO NOTHING
+            """, [(camp['campanha'], inicio + i, tipo, str(pid))
+                  for i, pid in enumerate(faltantes)])
+            total += len(faltantes)
+            logger.info("[RIFA] %d numeros de cadastro para %s", len(faltantes), tipo)
+        except Exception:
+            logger.warning("[RIFA] distribuir_cadastros falhou em %s", tipo, exc_info=True)
+    return total
+
+
 def sincronizar_do_pedido(cur, order_id):
     """UM ponto de entrada para o pedido inteiro — as tres pontas de uma vez.
 
