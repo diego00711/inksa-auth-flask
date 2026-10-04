@@ -694,3 +694,25 @@ def get_my_payouts():
     finally:
         if conn:
             conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NÚMEROS DA CAMPANHA (sorteio) — mesma rota do app do Cliente, outro público.
+# Com a campanha desligada devolve `ligada: false`, e a tela não aparece.
+# ─────────────────────────────────────────────────────────────────────────────
+@restaurant_bp.route('/rifa', methods=['GET'])
+def restaurant_rifa():
+    user_id, _tipo, erro = get_user_id_from_token(request.headers.get('Authorization'))
+    if erro:
+        return jsonify({"status": "error", "error": "Não autorizado"}), 401
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "error": "Banco indisponível"}), 500
+    try:
+        from ..logic.rifa import meus_numeros_por_user
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            return jsonify({"status": "success",
+                            "data": meus_numeros_por_user(cur, 'parceiro', user_id)}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass

@@ -566,3 +566,29 @@ def listar_sugestoes_publicas():
             conn.close()
         except Exception:
             pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NÚMEROS DA CAMPANHA (sorteio)
+#
+# Devolve `{"ligada": false, ...}` quando a campanha está desligada — e é assim
+# que a tela sabe que não deve aparecer. O app não decide se a campanha existe:
+# quem decide é o servidor, senão cada app teria a sua própria opinião e um
+# deles mostraria promoção encerrada.
+# ─────────────────────────────────────────────────────────────────────────────
+@client_bp.route('/rifa', methods=['GET'])
+def client_rifa():
+    user_id, _tipo, erro = get_user_id_from_token(request.headers.get('Authorization'))
+    if erro:
+        return jsonify({"status": "error", "error": "Não autorizado"}), 401
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "error": "Banco indisponível"}), 500
+    try:
+        from ..logic.rifa import meus_numeros_por_user
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            return jsonify({"status": "success",
+                            "data": meus_numeros_por_user(cur, 'cliente', user_id)}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass

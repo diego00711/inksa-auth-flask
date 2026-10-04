@@ -734,3 +734,26 @@ def registrar_status_do_app():
         if conn:
             try: conn.close()
             except Exception: pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NÚMEROS DA CAMPANHA (sorteio) — o público do entregador.
+#
+# ⚠️ Entrega PRÓPRIA da loja não gera número aqui, de propósito: nela não houve
+# entregador Inksa. A regra mora em logic/rifa.py, não nesta rota — senão cada
+# app teria a sua versão dela.
+# ─────────────────────────────────────────────────────────────────────────────
+@delivery_auth_profile_bp.route('/rifa', methods=['GET'])
+@delivery_token_required
+def delivery_rifa():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "error": "Banco indisponível"}), 500
+    try:
+        from ..logic.rifa import meus_numeros_por_user
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            return jsonify({"status": "success",
+                            "data": meus_numeros_por_user(cur, 'entregador', g.user_auth_id)}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass

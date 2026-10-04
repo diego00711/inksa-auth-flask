@@ -319,6 +319,34 @@ def sincronizar_do_pedido(cur, order_id):
         return {}
 
 
+_TABELA_DO_TIPO = {
+    'cliente': 'client_profiles',
+    'parceiro': 'restaurant_profiles',
+    'entregador': 'delivery_profiles',
+}
+
+
+def meus_numeros_por_user(cur, tipo, user_id):
+    """Igual a `meus_numeros`, resolvendo o perfil a partir do user_id do token.
+
+    Existe pra que as três rotas (um app cada) fiquem em poucas linhas e
+    idênticas entre si — a diferença entre elas é só de qual tabela sai o
+    perfil, e isso mora AQUI em vez de repetido três vezes.
+    """
+    tabela = _TABELA_DO_TIPO.get(tipo)
+    if not tabela:
+        return {"ligada": False, "numeros": [], "total": 0}
+    try:
+        cur.execute(f"SELECT id FROM {tabela} WHERE user_id = %s LIMIT 1", (str(user_id),))
+        row = cur.fetchone()
+        if not row:
+            return {"ligada": False, "numeros": [], "total": 0}
+        return meus_numeros(cur, tipo, row['id'])
+    except Exception:
+        logger.warning("[RIFA] meus_numeros_por_user falhou: %s %s", tipo, user_id, exc_info=True)
+        return {"ligada": False, "numeros": [], "total": 0}
+
+
 def meus_numeros(cur, tipo, perfil_id):
     """O que a tela do app mostra: os numeros validos e de onde vieram."""
     camp = _campanha(cur)
