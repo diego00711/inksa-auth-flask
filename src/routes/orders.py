@@ -762,9 +762,20 @@ def update_order_status(order_id):
                         # ainda pode ser recusado, e aí teria acordado gente
                         # para uma corrida que não existiria.
                         #
-                        # Só dispara com ZERO online. Com alguém online o
-                        # caminho normal resolve, e um push a mais aqui seria
-                        # ruído em todo pedido.
+                        # QUEM RECEBE depende de quem está de pé:
+                        #   alguém online  -> a lista normal (quem deu sinal de
+                        #                     vida em 3h), que é quem de fato
+                        #                     pegaria a corrida;
+                        #   ninguém online -> a lista de resgate, inclusive quem
+                        #                     está fora há dias — é ele que
+                        #                     precisa ser chamado.
+                        #
+                        # `push_aviso_no_aceite` decide se isto sai sempre, só
+                        # quando não há ninguém online, ou nunca. Nasce em
+                        # `sempre` porque hoje é ~1 pedido por dia. Em volume
+                        # vira push constante, e entregador que desliga a
+                        # notificação não religa — aí `sem_online` é o degrau
+                        # seguinte, sem deploy.
                         try:
                             _ncur.execute("""
                                 SELECT rp.latitude, rp.longitude,
@@ -772,34 +783,51 @@ def update_order_status(order_id):
                                   FROM restaurant_profiles rp WHERE rp.id = %s
                             """, (str(updated_order['restaurant_id']),))
                             _lj = _ncur.fetchone()
-                            if _lj and _lj['tipo'] != 'own':
+                            # ⚠️ Import PRÓPRIO, e não o `_gs` do ramo de baixo.
+                            # `from X import Y as _gs` faz de `_gs` um nome LOCAL
+                            # da função inteira, mas só o LIGA quando aquela linha
+                            # roda — e ela está no `elif ready`, que nunca roda
+                            # junto com este ramo. Usar o de lá daria
+                            # UnboundLocalError em todo pedido aceito.
+                            from ..utils.platform_settings import get_settings as _gs_aviso
+                            _modo = str((_gs_aviso() or {}).get('push_aviso_no_aceite')
+                                        or 'sempre').strip().lower()
+                            if _lj and _lj['tipo'] != 'own' and _modo != 'off':
                                 from ..utils.carga import (contar_capazes, peso_do_pedido,
-                                                           tokens_de_resgate)
-                                # ⚠️ Import PRÓPRIO, e não o `_gs` do ramo de
-                                # baixo. `from X import Y as _gs` faz de `_gs`
-                                # um nome LOCAL da função inteira, mas só o liga
-                                # quando aquela linha roda — e ela está no
-                                # `elif ready`, que nunca roda junto com este
-                                # ramo. Usar o de lá daria UnboundLocalError em
-                                # todo pedido aceito.
-                                from ..utils.platform_settings import get_settings as _gs_aceite
-                                _st = _gs_aceite()
+                                                           tokens_de_resgate, tokens_para_avisar)
+                                _st = _gs_aviso()
                                 _pe = float(peso_do_pedido(_ncur, updated_order.get('items')) or 0)
+                                _dk = updated_order.get('delivery_distance_km')
                                 _cap, _onl = contar_capazes(
-                                    _pe, _lj['latitude'], _lj['longitude'], _st,
-                                    distancia_km=updated_order.get('delivery_distance_km'))
-                                if _cap and _onl == 0:
-                                    _tk = tokens_de_resgate(
-                                        _pe, _lj['latitude'], _lj['longitude'], _st,
-                                        distancia_km=updated_order.get('delivery_distance_km'))
-                                    logger.info("Chamada antecipada (ninguem online): %d entregador(es), pedido %s",
-                                                len(_tk), order_id)
+                                    _pe, _lj['latitude'], _lj['longitude'], _st, distancia_km=_dk)
+
+                                # `_cap` zero é estrutural: ninguém cadastrado
+                                # comporta esta carga aqui. Avisar não resolve.
+                                _vale = bool(_cap) and (_modo == 'sempre' or _onl == 0)
+                                if _vale:
+                                    if _onl == 0:
+                                        _tk = tokens_de_resgate(_pe, _lj['latitude'],
+                                                                _lj['longitude'], _st,
+                                                                distancia_km=_dk)
+                                        _corpo = ("Uma loja esta preparando um pedido e nao ha "
+                                                  "entregador online. Entre no app.")
+                                    else:
+                                        _tk = tokens_para_avisar(_pe, _lj['latitude'],
+                                                                 _lj['longitude'], _st,
+                                                                 distancia_km=_dk)
+                                        _corpo = ("Uma loja esta preparando um pedido. Abra o app "
+                                                  "pra concorrer a esta corrida.")
+                                    logger.info("Chamada antecipada (%s, %d online): %d entregador(es), pedido %s",
+                                                _modo, _onl or 0, len(_tk), order_id)
                                     for _t in _tk:
-                                        _notify(_t, "Tem corrida chegando! 🛵",
-                                                "Uma loja esta preparando um pedido e nao ha entregador online. Entre no app.",
+                                        _notify(_t, "Tem corrida chegando! 🛵", _corpo,
                                                 {"order_id": str(order_id), "status": "accepted",
                                                  "type": "new_delivery"},
-                                                urgente=True, destino='entregador')
+                                                # MESMA tag da oferta: quando a
+                                                # oferta sair, ela SUBSTITUI este
+                                                # aviso na barra em vez de somar.
+                                                urgente=True, destino='entregador',
+                                                tag=f"oferta_{order_id}")
                         except Exception:
                             logger.warning("Chamada antecipada falhou (pedido %s)", order_id, exc_info=True)
                     elif new_status_internal == 'ready':

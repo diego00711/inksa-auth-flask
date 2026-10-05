@@ -226,6 +226,17 @@ _TEXT_DEFAULTS: dict[str, str] = {
     # escolheu). Assim o aviso cai uma vez em cada terco da janela dele, em vez
     # de deixar os ultimos 30 s no silencio.
     "push_reforco_oferta_segundos": "20,40",
+    # Quando avisar o entregador de que ENTROU pedido (no aceite da loja), pra
+    # ele ter o tempo do preparo pra abrir o app e esperar a oferta.
+    #   sempre     — todo pedido aceito que não seja de entrega própria
+    #   sem_online — só quando não há nenhum entregador online (mais discreto)
+    #   off        — nada no aceite; o aviso sai só quando o pedido fica pronto
+    #
+    # Nasce em `sempre` porque hoje é ~1 pedido por dia: um push por pedido não
+    # incomoda ninguém. ⚠️ Em volume isso vira push constante, e entregador que
+    # desliga a notificação do app não religa — quando o movimento crescer,
+    # `sem_online` é o degrau seguinte, e ele muda sem deploy.
+    "push_aviso_no_aceite": "sempre",
 
     # PARCEIRO EMBAIXADOR: até quando a campanha vale, pra quem for marcado sem
     # data própria. UMA data pra campanha inteira — é o que diferencia o
