@@ -531,3 +531,27 @@ def tokens_para_avisar(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=
     """
     return [a['fcm_token'] for a in _aptos(peso_kg, rest_lat, rest_lng, settings, distancia_km)
             if a['fcm_token'] and esta_trabalhando(a)]
+
+
+def tokens_de_resgate(peso_kg, rest_lat, rest_lng, settings=None, distancia_km=None):
+    """Tokens de TODO apto a este pedido — inclusive quem está offline há dias.
+
+    ⚠️ É O ÚLTIMO RECURSO, E TEM NOME PRÓPRIO PRA NINGUÉM PEGAR POR ENGANO.
+
+    `tokens_para_avisar` só alcança quem deu sinal de vida nas últimas 3h, e
+    isso está certo no caso normal. Mas quando NINGUÉM deu — o entregador
+    largou o app de manhã e o pedido chegou às 20h — aquela lista volta VAZIA,
+    e o aviso automático termina em silêncio total. Era o que acontecia: o
+    cliente podia pedir sem entregador online (o carrinho avisa e deixa), a
+    loja preparava, e a corrida ficava parada sem ninguém ser chamado.
+
+    Esta lista existe só pra esse momento. Quem usar isto no lugar de
+    `tokens_para_avisar` vai acordar gente que não está trabalhando a cada
+    pedido, e aí o entregador desliga a notificação do app — que é a coisa
+    mais cara de perder aqui, porque não volta.
+
+    ⚠️ NUNCA no reforço da oferta: lá o disparo se repete a cada poucos
+    segundos, e repetir isto seria perseguição.
+    """
+    return [a['fcm_token'] for a in _aptos(peso_kg, rest_lat, rest_lng, settings, distancia_km)
+            if a['fcm_token']]

@@ -747,6 +747,61 @@ def update_order_status(order_id):
                         cli_token = _get_fcm_token(_ncur, 'client_profiles', str(updated_order['client_id']))
                         _notify(cli_token, "Pedido aceito! 🎉", "Seu pedido foi confirmado pelo restaurante",
                                 {"order_id": str(order_id), "status": "accepted"})
+
+                        # CHAMADA ANTECIPADA, SÓ QUANDO NÃO HÁ NINGUÉM ONLINE.
+                        #
+                        # O aviso de "entrega disponível" sai quando o pedido
+                        # fica PRONTO. Se nesse instante não houver entregador
+                        # online, a comida esfria no balcão enquanto alguém é
+                        # procurado. Avisando no ACEITE, o entregador ganha o
+                        # tempo do preparo pra chegar — que é o único momento
+                        # em que esse tempo existe.
+                        #
+                        # No aceite, e não na criação, porque aqui o pedido é
+                        # certo: a loja confirmou e vai preparar. Na criação
+                        # ainda pode ser recusado, e aí teria acordado gente
+                        # para uma corrida que não existiria.
+                        #
+                        # Só dispara com ZERO online. Com alguém online o
+                        # caminho normal resolve, e um push a mais aqui seria
+                        # ruído em todo pedido.
+                        try:
+                            _ncur.execute("""
+                                SELECT rp.latitude, rp.longitude,
+                                       COALESCE(rp.delivery_type,'platform') AS tipo
+                                  FROM restaurant_profiles rp WHERE rp.id = %s
+                            """, (str(updated_order['restaurant_id']),))
+                            _lj = _ncur.fetchone()
+                            if _lj and _lj['tipo'] != 'own':
+                                from ..utils.carga import (contar_capazes, peso_do_pedido,
+                                                           tokens_de_resgate)
+                                # ⚠️ Import PRÓPRIO, e não o `_gs` do ramo de
+                                # baixo. `from X import Y as _gs` faz de `_gs`
+                                # um nome LOCAL da função inteira, mas só o liga
+                                # quando aquela linha roda — e ela está no
+                                # `elif ready`, que nunca roda junto com este
+                                # ramo. Usar o de lá daria UnboundLocalError em
+                                # todo pedido aceito.
+                                from ..utils.platform_settings import get_settings as _gs_aceite
+                                _st = _gs_aceite()
+                                _pe = float(peso_do_pedido(_ncur, updated_order.get('items')) or 0)
+                                _cap, _onl = contar_capazes(
+                                    _pe, _lj['latitude'], _lj['longitude'], _st,
+                                    distancia_km=updated_order.get('delivery_distance_km'))
+                                if _cap and _onl == 0:
+                                    _tk = tokens_de_resgate(
+                                        _pe, _lj['latitude'], _lj['longitude'], _st,
+                                        distancia_km=updated_order.get('delivery_distance_km'))
+                                    logger.info("Chamada antecipada (ninguem online): %d entregador(es), pedido %s",
+                                                len(_tk), order_id)
+                                    for _t in _tk:
+                                        _notify(_t, "Tem corrida chegando! 🛵",
+                                                "Uma loja esta preparando um pedido e nao ha entregador online. Entre no app.",
+                                                {"order_id": str(order_id), "status": "accepted",
+                                                 "type": "new_delivery"},
+                                                urgente=True, destino='entregador')
+                        except Exception:
+                            logger.warning("Chamada antecipada falhou (pedido %s)", order_id, exc_info=True)
                     elif new_status_internal == 'ready':
                         # Avisa SÓ quem pode pegar este pedido.
                         #
@@ -833,8 +888,30 @@ def update_order_status(order_id):
                                     _tokens = tokens_para_avisar(
                                         _peso, _o['latitude'], _o['longitude'], _settings_push,
                                         distancia_km=_o.get('delivery_distance_km'))
-                                    logger.info("Push 'entrega disponível' (plano B): %d entregador(es) aptos (peso %.0f kg)",
-                                                len(_tokens), _peso)
+
+                                    # RESGATE: a lista acima só alcança quem deu
+                                    # sinal de vida nas últimas 3h. Quando NINGUÉM
+                                    # deu, ela volta vazia e o aviso terminava em
+                                    # SILÊNCIO TOTAL — justo no caso em que mais
+                                    # importa, porque o cliente pode pedir sem
+                                    # entregador online (o carrinho avisa e deixa
+                                    # passar) e a corrida fica parada.
+                                    #
+                                    # Só nesse caso, chama todo mundo que PODE
+                                    # pegar, mesmo offline há dias. Não é o padrão
+                                    # e não entra no reforço: acordar quem não está
+                                    # trabalhando a cada pedido ensina o entregador
+                                    # a desligar a notificação.
+                                    _resgate = False
+                                    if not _tokens:
+                                        from ..utils.carga import tokens_de_resgate
+                                        _tokens = tokens_de_resgate(
+                                            _peso, _o['latitude'], _o['longitude'], _settings_push,
+                                            distancia_km=_o.get('delivery_distance_km'))
+                                        _resgate = True
+
+                                    logger.info("Push 'entrega disponível' (plano B%s): %d entregador(es) (peso %.0f kg)",
+                                                ", RESGATE" if _resgate else "", len(_tokens), _peso)
                                     for _tk in _tokens:
                                         _notify(_tk, "Entrega disponivel! 🛵",
                                                 "Um pedido esta pronto para coleta",
