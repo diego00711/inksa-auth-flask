@@ -230,6 +230,22 @@ def list_payouts():
         valid_statuses = ("pending", "pending_transfer", "processing", "paid", "cancelled")
         where, params = [], []
 
+        # ARQUIVADOS SOMEM DA LISTA, mas continuam no banco.
+        #
+        # ⚠️ Não existe apagar payout, e não é descuido: `orders.*_payout_id`
+        # aponta pra cá com ON DELETE SET NULL, e o dedup do gerador de repasse
+        # é exatamente `{payout_col} IS NULL`. Apagar zeraria a coluna nos
+        # pedidos, eles voltariam a ser elegíveis, e o ciclo seguinte PAGARIA O
+        # PARCEIRO DE NOVO. Fora que o dinheiro saiu de verdade — o registro é
+        # a prova disso.
+        #
+        # `?arquivados=1` mostra só os escondidos, pra nada ficar inalcançável.
+        arquivados = (request.args.get("arquivados") or "").strip()
+        if arquivados in ("1", "true", "sim"):
+            where.append("p.archived_at IS NOT NULL")
+        else:
+            where.append("p.archived_at IS NULL")
+
         if partner_type in ("restaurant", "delivery"):
             where.append("p.partner_type = %s")
             params.append(partner_type)
@@ -896,6 +912,86 @@ def settle_cash_debt(delivery_id):
         if conn:
             conn.rollback()
         return jsonify({"error": "Erro interno ao registrar acerto"}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/payouts/<id>/arquivar   { "arquivar": true|false }
+#
+# "Excluir da tela" — e SO da tela.
+#
+# ⚠️ NAO EXISTE APAGAR PAYOUT, DE PROPOSITO. `orders.restaurant_payout_id` e
+# `orders.delivery_payout_id` apontam pra ca com ON DELETE SET NULL, e o dedup
+# do gerador de repasse e exatamente `{payout_col} IS NULL`
+# (payout_processor.py). Apagar o payout zeraria a coluna nos pedidos, eles
+# voltariam a ser elegiveis, e o ciclo seguinte PAGARIA O PARCEIRO DE NOVO.
+#
+# E ha o lado contabil: nos pagos o dinheiro saiu de verdade pelo Asaas. O
+# registro e a prova da transferencia; apagar faria o painel discordar do
+# extrato, e a diferenca so apareceria numa conferencia futura, sem rastro do
+# que foi removido.
+#
+# Arquivar some da lista (o GET filtra `archived_at IS NULL`), preserva a linha
+# e o vinculo com os pedidos, e da pra desfazer. `?arquivados=1` lista os
+# escondidos.
+# ---------------------------------------------------------------------------
+
+@payouts_bp.route("/<uuid:payout_id>/arquivar", methods=["POST", "OPTIONS"])
+def arquivar_payout(payout_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 204
+    conn = None
+    try:
+        user_id, user_type, error = get_user_id_from_token(request.headers.get("Authorization"))
+        if error:
+            return error
+        if not _is_admin(user_type):
+            return jsonify({"error": "Acesso negado"}), 403
+
+        data = request.get_json(silent=True) or {}
+        arquivar = data.get("arquivar", True) is not False
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Erro de conexão com banco de dados"}), 500
+
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE payouts
+                   SET archived_at = CASE WHEN %s THEN NOW() ELSE NULL END,
+                       updated_at  = NOW()
+                 WHERE id = %s
+                RETURNING id, partner_type, partner_id, status, total_net, archived_at
+                """,
+                (arquivar, str(payout_id)),
+            )
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Repasse não encontrado"}), 404
+            conn.commit()
+
+        admin = _get_admin_identifier(user_id, conn)
+        log_admin_action(
+            admin,
+            "ArquivarPayout" if arquivar else "DesarquivarPayout",
+            (
+                f"payout={payout_id} {'escondido da' if arquivar else 'devolvido a'} lista "
+                f"— status={row['status']} partner={row['partner_type']}:{row['partner_id']} "
+                f"net={row['total_net']}"
+            ),
+            request,
+        )
+
+        return jsonify({"status": "success", "arquivado": bool(row["archived_at"])}), 200
+
+    except Exception:
+        logger.exception("Erro ao arquivar payout")
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "Erro interno ao arquivar o repasse"}), 500
     finally:
         if conn:
             conn.close()
