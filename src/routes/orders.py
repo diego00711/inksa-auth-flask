@@ -1838,6 +1838,11 @@ def get_order(order_id):
                    rp.phone     AS restaurant_phone,
                    rp.latitude  AS restaurant_latitude,
                    rp.longitude AS restaurant_longitude,
+                   -- A tela de acompanhamento precisa disto pra não prometer
+                   -- entregador onde não existe: na entrega própria quem leva
+                   -- é a loja, e "aguardando um entregador retirar" é o
+                   -- oposto do que acontece.
+                   COALESCE(rp.delivery_type, 'platform') AS delivery_type,
                    NULLIF(TRIM(CONCAT_WS(', ',
                      NULLIF(CONCAT_WS(' ', rp.address_street, rp.address_number), ''),
                      rp.address_neighborhood,
