@@ -850,13 +850,31 @@ def update_order_status(order_id):
 
                             _ncur.execute("""
                                 SELECT o.items, o.delivery_distance_km,
-                                       rp.latitude, rp.longitude
+                                       rp.latitude, rp.longitude,
+                                       -- ⚠️ ESTE CAMPO FALTAVA, e o push ia pra
+                                       -- loja de entrega própria também.
+                                       COALESCE(rp.delivery_type,'platform') AS tipo_entrega
                                   FROM orders o
                                   JOIN restaurant_profiles rp ON rp.id = o.restaurant_id
                                  WHERE o.id = %s
                             """, (order_id,))
                             _o = _ncur.fetchone()
-                            if _o:
+
+                            # ENTREGA PRÓPRIA NÃO ACORDA ENTREGADOR (07/10/2026).
+                            #
+                            # A loja leva com a equipe dela: nenhum entregador da
+                            # Inksa pode aceitar esse pedido, e o motor de
+                            # despacho já sabe disso (filtra `delivery_type <>
+                            # 'own'` nas duas consultas dele). ESTE push era o
+                            # único ponto sem o filtro, então tocava o alarme
+                            # alto pra uma corrida que não existia.
+                            #
+                            # O Fernando recebeu um desses e a reação foi a que o
+                            # comentário acima já previa: achou estranho, viu que
+                            # estava online sem saber, e SE DESLIGOU. Push gasto
+                            # com quem não pode aceitar não é só ruído — ele tira
+                            # entregador da fila.
+                            if _o and _o['tipo_entrega'] != 'own':
                                 _settings_push = _gs()
 
                                 # ATRIBUIÇÃO: ACORDAR UM, NÃO SETE.
