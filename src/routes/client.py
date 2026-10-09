@@ -575,20 +575,26 @@ def listar_sugestoes_publicas():
 # que a tela sabe que não deve aparecer. O app não decide se a campanha existe:
 # quem decide é o servidor, senão cada app teria a sua própria opinião e um
 # deles mostraria promoção encerrada.
+#
+# ⚠️ ESTA ROTA ATENDE VISITANTE DE PROPÓSITO (09/10/2026).
+# Antes ela exigia token e devolvia 401 pra quem não tinha conta. O app
+# tratava o 401 como "campanha desligada" e escondia a rifa — ou seja, a
+# promoção feita para TRAZER cadastro só aparecia para quem já era cadastrado.
+# Sem token devolve só o estado público (prêmio e regra, nada de ninguém);
+# com token devolve os números da pessoa. Não volte a exigir token aqui.
 # ─────────────────────────────────────────────────────────────────────────────
 @client_bp.route('/rifa', methods=['GET'])
 def client_rifa():
     user_id, _tipo, erro = get_user_id_from_token(request.headers.get('Authorization'))
-    if erro:
-        return jsonify({"status": "error", "error": "Não autorizado"}), 401
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "error": "Banco indisponível"}), 500
     try:
-        from ..logic.rifa import meus_numeros_por_user
+        from ..logic.rifa import estado_publico, meus_numeros_por_user
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            return jsonify({"status": "success",
-                            "data": meus_numeros_por_user(cur, 'cliente', user_id)}), 200
+            dados = (estado_publico(cur) if erro
+                     else meus_numeros_por_user(cur, 'cliente', user_id))
+            return jsonify({"status": "success", "data": dados}), 200
     finally:
         try: conn.close()
         except Exception: pass

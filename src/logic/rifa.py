@@ -79,7 +79,8 @@ def _campanha(cur):
     """
     try:
         cur.execute("""
-            SELECT campanha, reais_por_numero, numero_no_cadastro, teto_numeros_mes
+            SELECT campanha, reais_por_numero, numero_no_cadastro, teto_numeros_mes,
+                   nome, premio
               FROM rifa_campanhas
              WHERE ligada = TRUE
                AND (inicio IS NULL OR inicio <= CURRENT_DATE)
@@ -418,6 +419,36 @@ _TABELA_DO_TIPO = {
     'parceiro': 'restaurant_profiles',
     'entregador': 'delivery_profiles',
 }
+
+
+def estado_publico(cur):
+    """O que da pra contar a QUEM AINDA NAO TEM CONTA.
+
+    POR QUE ISSO EXISTE (09/10/2026): a rota /api/client/rifa exigia token.
+    Visitante tomava 401, o app engolia o erro em silencio e tratava como
+    "campanha desligada", entao o link sumia. Resultado: a rifa — que existe
+    pra FAZER a pessoa se cadastrar — so era visivel DEPOIS do cadastro.
+    Nos 4 primeiros dias no ar ela trouxe 1 pessoa, e os 83 numeros emitidos
+    eram todos retroativos pra quem ja estava cadastrado. Nenhum novo.
+
+    Nao devolve dado de ninguem: so o que ja esta no regulamento publico.
+    Numero de ninguem sai daqui — isso continua exigindo token.
+    """
+    camp = _campanha(cur)
+    if not camp:
+        return {"ligada": False, "numeros": [], "total": 0}
+    return {
+        "ligada": True,
+        "visitante": True,          # a tela usa isso pra chamar pro cadastro
+        "campanha": camp["campanha"],
+        "nome": camp.get("nome"),
+        "premio": camp.get("premio"),
+        "reais_por_numero": float(camp["reais_por_numero"])
+                            if camp["reais_por_numero"] is not None else None,
+        "numero_no_cadastro": bool(camp["numero_no_cadastro"]),
+        "numeros": [],
+        "total": 0,
+    }
 
 
 def meus_numeros_por_user(cur, tipo, user_id):
