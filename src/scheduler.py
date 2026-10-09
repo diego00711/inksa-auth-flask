@@ -155,8 +155,16 @@ def _is_within_hours(opening_hours, now) -> bool:
     """True se `now` (datetime local) cai dentro do horario configurado para o dia.
 
     Formato esperado de opening_hours:
-      { "mon": {"enabled": true, "open": "18:00", "close": "23:00"}, ... }
+      { "mon": {"enabled": true, "open": "18:00", "close": "23:00",
+                "open2": "11:00", "close2": "13:30"}, ... }
     Suporta intervalos que cruzam a meia-noite (close < open).
+
+    TURNO PARTIDO (open2/close2), 09/10/2026: so havia UMA janela por dia, e
+    almoco + jantar e o padrao da maioria dos restaurantes daqui. O Burguer
+    Recanto anuncia 11:00-13:30 e 18:00-23:00 no proprio Instagram, mas no
+    cadastro so cabia uma — entao a loja com o maior cardapio da plataforma
+    ficava invisivel no almoco inteiro. Os dois campos novos sao OPCIONAIS:
+    cadastro sem eles se comporta exatamente como antes.
     """
     if not isinstance(opening_hours, dict):
         return False
@@ -173,20 +181,33 @@ def _is_within_hours(opening_hours, now) -> bool:
         except Exception:
             return None
 
-    def _check(slot, allow_overnight_tail=False):
-        if not isinstance(slot, dict) or not slot.get("enabled"):
-            return False
-        o = _parse(slot.get("open"))
-        c = _parse(slot.get("close"))
+    def _janela(o, c, so_madrugada):
+        """`so_madrugada` = estamos olhando a configuracao de ONTEM.
+
+        Nesse caso so vale a sobra depois da meia-noite. Janela que abre e
+        fecha no mesmo dia (c > o) ja terminou ontem e NAO pode casar hoje —
+        senao o horario de ontem reaparece hoje no mesmo horario de relogio.
+        Era por isso que uma loja com sabado desabilitado aparecia aberta no
+        sabado a noite: a janela de sexta casava pelo caminho do dia anterior.
+        """
         if o is None or c is None:
             return False
-        if c > o:  # mesmo dia
-            return o <= cur_min < c
+        if c > o:
+            return False if so_madrugada else (o <= cur_min < c)
         # cruza a meia-noite
-        if allow_overnight_tail:
-            return cur_min < c  # madrugada do dia seguinte
-        return cur_min >= o
-    return _check(today) or _check(prev, allow_overnight_tail=True)
+        return cur_min < c if so_madrugada else cur_min >= o
+
+    def _check(slot, so_madrugada=False):
+        if not isinstance(slot, dict) or not slot.get("enabled"):
+            return False
+        if _janela(_parse(slot.get("open")), _parse(slot.get("close")),
+                   so_madrugada):
+            return True
+        # Segunda janela do dia (almoco). Ausente na maioria dos cadastros, e
+        # quando ausente nao muda nada.
+        return _janela(_parse(slot.get("open2")), _parse(slot.get("close2")),
+                       so_madrugada)
+    return _check(today) or _check(prev, so_madrugada=True)
 
 
 def _apply_opening_hours_job() -> None:
