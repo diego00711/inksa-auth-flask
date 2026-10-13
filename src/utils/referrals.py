@@ -70,6 +70,24 @@ def _cfg():
         "teto": int(float(s["referral_monthly_cap"])),
     }
 
+
+def esta_ligado():
+    """Só o sim/não do programa — interruptor E janela de datas.
+
+    Existe para quem precisa decidir se MOSTRA a promessa de frete grátis sem
+    estar logado. `resumo()` já devolve `ligado`, mas exige cliente autenticado,
+    e quem vê a faixa de convite é justamente o visitante.
+
+    Fail-safe ao contrário do resto deste arquivo: aqui erra para DESLIGADO.
+    `aplicar_codigo` recusa o código com o programa parado, então anunciar sem
+    ter certeza faz a pessoa criar conta atrás de um frete grátis que o sistema
+    vai negar — pior que não anunciar.
+    """
+    try:
+        return bool(_cfg()["ligado"])
+    except Exception:
+        return False
+
 # Sem I, O, 0 e 1: este código é DITADO em grupo de WhatsApp e lido em print.
 # "INK-I0O1" gera erro de digitação que o usuário culpa o app, não a fonte.
 _ALFABETO = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"

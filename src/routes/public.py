@@ -55,13 +55,27 @@ def public_support_info():
 def public_app_config():
     """Config de comportamento dos apps (sem autenticacao).
 
-    Hoje expoe apenas `idle_logout_minutes` (logoff automatico por inatividade
-    nos apps Parceiro/Entregador). 0 = recurso desligado. Editavel no admin em
-    Configuracoes. Extensivel para outras flags de UX no futuro."""
+    Expoe:
+      - `idle_logout_minutes`: logoff automatico por inatividade nos apps
+        Parceiro/Entregador. 0 = recurso desligado.
+      - `indicacao_ligada`: se o programa indique-e-ganhe aceita codigo AGORA.
+        O app do Cliente usa isto para decidir se mostra a faixa "convite
+        ativo: primeiro pedido sem frete". Sem esta flag a faixa aparecia com
+        o programa desligado e a pessoa criava conta atras de um frete gratis
+        que `aplicar_codigo` recusa ("programa de indicacao esta pausado").
+
+    Editavel no admin em Configuracoes. Extensivel para outras flags de UX."""
+    from ..utils.referrals import esta_ligado
+
     default_idle = 60
+    # Fora do try do banco abaixo: get_settings() tem cache e conexao proprios,
+    # e a flag precisa sair mesmo quando a leitura do idle falhar.
+    indicacao_ligada = esta_ligado()
+
     conn = get_db_connection()
     if not conn:
-        return jsonify({"idle_logout_minutes": default_idle}), 200
+        return jsonify({"idle_logout_minutes": default_idle,
+                        "indicacao_ligada": indicacao_ligada}), 200
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(
@@ -76,10 +90,12 @@ def public_app_config():
         # Sanidade: 0 = desligado; senao entre 5 min e 24h.
         if val != 0:
             val = max(5, min(val, 1440))
-        return jsonify({"idle_logout_minutes": val}), 200
+        return jsonify({"idle_logout_minutes": val,
+                        "indicacao_ligada": indicacao_ligada}), 200
     except Exception:
         logger.exception("Erro em public_app_config")
-        return jsonify({"idle_logout_minutes": default_idle}), 200
+        return jsonify({"idle_logout_minutes": default_idle,
+                        "indicacao_ligada": indicacao_ligada}), 200
     finally:
         conn.close()
 
