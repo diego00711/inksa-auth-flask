@@ -251,22 +251,34 @@ def list_restaurants():
             # visível: aprovada, ativa, dono ativo, com coordenada e com
             # cardápio. Contar loja escondida faria a trava disparar por causa
             # de quem ninguém vê.
+            # 🔴 CORRIGIDO EM 21/10/2026 — A TRAVA ACIMA CUSTAVA 100% DOS
+            # VISITANTES NOVOS.
+            #
+            # Até aqui, este ponto devolvia `data: []` e o app trocava a lista
+            # inteira por "De qual cidade você é?". O raciocínio estava certo no
+            # papel e errado na prática: o teste do funil de 21/10 mostrou que
+            # quem chega pelo link do Instagram NÃO VÊ UMA ÚNICA LOJA — tela
+            # vazia, pedindo cidade, com cinco lojas abertas e 165 itens atrás
+            # dela. Bate com os números: 53 cadastros, 1 cliente de fora que já
+            # pediu, e `cart_items_count = 0` em TODOS os perfis.
+            #
+            # O risco que a trava evitava (alguém de Lages escolher loja de
+            # Fraiburgo e descobrir no fim do carrinho) é real, mas é
+            # hipotético e recuperável. A tela vazia é certa e definitiva: a
+            # pessoa fecha o app e não volta.
+            #
+            # Agora a lista VAI, e a flag continua indo junto — virou AVISO, não
+            # porta. O app mostra uma faixa convidando a filtrar por cidade, com
+            # as lojas visíveis embaixo. Quem quiser filtrar, filtra; quem só
+            # quer ver comida, vê comida.
+            _precisa_cidade = False
+            _n_cidades = 0
             if not has_coords and not city and not state:
                 _n_cidades = _contar_cidades(cur)
                 if _n_cidades > 1:
-                    logger.info("Listagem sem localização com %s cidades — pedindo a cidade ao app.",
-                                _n_cidades)
-                    return jsonify({
-                        "status": "success",
-                        "data": [],
-                        "has_more": False,
-                        "limit": limit,
-                        "offset": offset,
-                        # O app usa isto pra abrir o seletor de cidade em vez de
-                        # mostrar "nenhuma loja encontrada", que seria mentira.
-                        "precisa_escolher_cidade": True,
-                        "cidades_disponiveis": _n_cidades,
-                    }), 200
+                    _precisa_cidade = True
+                    logger.info("Listagem sem localização com %s cidades — "
+                                "entregando a lista e avisando o app.", _n_cidades)
             dist_expr = (
                 "ROUND((earth_distance(ll_to_earth(rp.latitude, rp.longitude),"
                 " ll_to_earth(%s, %s)) / 1000)::numeric, 2)"
@@ -432,6 +444,11 @@ def list_restaurants():
             "has_more": has_more,
             "limit": limit,
             "offset": offset,
+            # Aviso, não porta: a lista acima vai cheia. O app usa isto pra
+            # mostrar uma faixa sugerindo o filtro por cidade. Ver o comentário
+            # longo lá em cima.
+            "precisa_escolher_cidade": _precisa_cidade,
+            "cidades_disponiveis": _n_cidades,
         }), 200
 
     except Exception as e:
