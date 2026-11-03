@@ -590,10 +590,23 @@ def client_rifa():
     if not conn:
         return jsonify({"status": "error", "error": "Banco indisponível"}), 500
     try:
-        from ..logic.rifa import estado_publico, meus_numeros_por_user
+        from ..logic.rifa import (estado_publico, meus_numeros_por_user,
+                                  garantir_cadastro_por_user)
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            dados = (estado_publico(cur) if erro
-                     else meus_numeros_por_user(cur, 'cliente', user_id))
+            if erro:
+                dados = estado_publico(cur)
+            else:
+                # Concede o número de boas-vindas ANTES de ler, pra quem acabou
+                # de se cadastrar não abrir esta tela e ver zero. Sem isto, o
+                # número só saía no scheduler (15 min) — medido em 03/11: conta
+                # 08:51:07, número 08:57:30.
+                #
+                # ⚠️ O commit é obrigatório e só acontece quando houve concessão:
+                # o pool faz rollback ao receber conexão sem autocommit, e um
+                # commit em TODA leitura seria uma ida a São Paulo (~174ms) à toa.
+                if garantir_cadastro_por_user(cur, 'cliente', user_id) > 0:
+                    conn.commit()
+                dados = meus_numeros_por_user(cur, 'cliente', user_id)
             return jsonify({"status": "success", "data": dados}), 200
     finally:
         try: conn.close()

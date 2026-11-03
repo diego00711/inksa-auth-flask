@@ -451,6 +451,44 @@ def estado_publico(cur):
     }
 
 
+def garantir_cadastro_por_user(cur, tipo, user_id):
+    """Concede o número de boas-vindas AGORA, se ainda faltar. Devolve quantos.
+
+    POR QUE EXISTE: o número de cadastro saía só pelo scheduler, que roda a
+    cada 15 minutos. Medido em 03/11/2026 com uma conta criada pelo login do
+    Google: conta às 08:51:07, número às 08:57:30 — **seis minutos** de espera.
+
+    A peça do anúncio promete "crie sua conta e JÁ ganhe seu primeiro número".
+    Quem se cadastra empolgado com o prêmio e abre "Meus números" dentro dessa
+    janela vê zero, e zero parece promessa quebrada.
+
+    ⚠️ ESTÁ AQUI, E NÃO NO CADASTRO. Cinco lugares criam `client_profiles`
+    (auth.py x3, client.py x2) — pôr a chamada em todos é garantir que o sexto
+    nasça sem ela, que é o buraco de [[inksa-dois-caminhos-pedido]] repetido.
+    Conceder no momento em que a pessoa OLHA resolve num lugar só, e se cura
+    sozinho para quem já se cadastrou antes.
+
+    ⚠️ Quem chama precisa dar COMMIT quando isto devolver > 0: o pool faz
+    `rollback()` ao receber de volta uma conexão sem autocommit, e o número
+    sumiria sem erro nenhum.
+
+    O scheduler continua existindo: ele cobre quem nunca abre a tela.
+    """
+    tabela = _TABELA_DO_TIPO.get(tipo)
+    if not tabela:
+        return 0
+    try:
+        cur.execute(f"SELECT id FROM {tabela} WHERE user_id = %s LIMIT 1", (str(user_id),))
+        row = cur.fetchone()
+        if not row:
+            return 0
+        return conceder_cadastro(cur, tipo, row['id'])
+    except Exception:
+        # Nunca derruba a tela por causa da rifa: sem número é ruim, erro é pior.
+        logger.warning("[RIFA] garantir_cadastro falhou: %s %s", tipo, user_id, exc_info=True)
+        return 0
+
+
 def meus_numeros_por_user(cur, tipo, user_id):
     """Igual a `meus_numeros`, resolvendo o perfil a partir do user_id do token.
 

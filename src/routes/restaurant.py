@@ -800,8 +800,13 @@ def restaurant_rifa():
     if not conn:
         return jsonify({"status": "error", "error": "Banco indisponível"}), 500
     try:
-        from ..logic.rifa import meus_numeros_por_user
+        from ..logic.rifa import meus_numeros_por_user, garantir_cadastro_por_user
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Mesmo tratamento do app do Cliente: o número de boas-vindas sai
+            # aqui em vez de esperar os 15 min do scheduler. Commit só quando
+            # houve concessão — ver garantir_cadastro_por_user.
+            if garantir_cadastro_por_user(cur, 'parceiro', user_id) > 0:
+                conn.commit()
             return jsonify({"status": "success",
                             "data": meus_numeros_por_user(cur, 'parceiro', user_id)}), 200
     finally:
