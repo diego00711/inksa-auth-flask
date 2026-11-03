@@ -19,31 +19,101 @@ from datetime import datetime, date, time
 restaurant_bp = Blueprint('restaurant_bp', __name__)
 
 
-def _geocode_address(street, number, neighborhood, city, state):
-    """Geocodifica o endereço via Nominatim (best-effort, timeout curto).
+# Caixa que contém o Brasil inteiro, com folga. Serve pra um teste só:
+# "esta coordenada pode ser de uma loja nossa?".
+_BR_LAT = (-34.0, 6.0)
+_BR_LNG = (-74.5, -33.5)
 
-    Fallback server-side para quando o geocode do frontend falha — sem coordenadas
-    o restaurante não consegue abrir (gate) nem ter frete calculado.
+
+def coord_valida(lat, lng):
+    """True só para uma coordenada utilizável.
+
+    ⚠️ ISTO EXISTE POR CAUSA DO 0,0. A Oishii de Fraiburgo ficou gravada com
+    latitude 0 e longitude 0 — um ponto no Golfo da Guiné — e ficou INVISÍVEL
+    pra todo mundo, inclusive dentro de Fraiburgo, porque o raio da plataforma
+    é de 15 km e ela estava a 11 mil.
+
+    O que deixou isso passar foi testar `is not None` em vez de testar se o
+    valor serve: zero não é nulo, então o 0,0 passava no portão de abrir, na
+    listagem (`latitude IS NOT NULL`) e no cálculo de frete, sem erro em lugar
+    nenhum. Nada apareceu quebrado — a loja simplesmente nunca apareceu.
     """
     try:
+        lat, lng = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return False
+    if lat == 0 and lng == 0:
+        return False
+    return _BR_LAT[0] <= lat <= _BR_LAT[1] and _BR_LNG[0] <= lng <= _BR_LNG[1]
+
+
+def _nominatim(params):
+    try:
         import requests as _rq
-        q = ", ".join([p for p in [
-            f"{street}, {number}" if street and number else street,
-            neighborhood, city, state, "Brasil",
-        ] if p])
         resp = _rq.get(
             "https://nominatim.openstreetmap.org/search",
-            params={"q": q, "format": "json", "limit": 1, "countrycodes": "br"},
+            params=dict(params, format="json", limit=1, countrycodes="br"),
             headers={"User-Agent": "InksaDelivery/1.0 (suporte@inksadelivery.com.br)"},
-            timeout=4,
+            timeout=5,
         )
         arr = resp.json()
         if isinstance(arr, list) and arr:
-            lat, lon = float(arr[0]["lat"]), float(arr[0]["lon"])
-            return lat, lon
+            lat, lng = float(arr[0]["lat"]), float(arr[0]["lon"])
+            if coord_valida(lat, lng):
+                return lat, lng
     except Exception:
-        pass
+        logging.warning("Nominatim falhou", exc_info=True)
     return None, None
+
+
+def _geocode_address(street, number, neighborhood, city, state, cep=None):
+    """Geocodifica o endereço, descendo de precisão até achar alguma coisa.
+
+    ⚠️ A VERSÃO ANTERIOR MANDAVA UMA CONSULTA SÓ, COM O NÚMERO DA CASA, e
+    desistia. Fora das capitais o OpenStreetMap quase nunca tem número, então
+    ela falhava justamente nas cidades pequenas — que é o estado inteiro fora
+    de Florianópolis. Medido em 02/11/2026 com o endereço da Oishii:
+
+        "Rua João Marques Vieira, 463, Centro, Fraiburgo, SC, Brasil" -> []
+        "Rua João Marques Vieira, Fraiburgo, SC, Brasil"  -> -27,0214 / -50,9293
+
+    A mesma rua, achada na hora, só tirando o número. Por isso aqui é uma
+    ESCADA: cada degrau perde precisão e ganha chance de acertar. Entre a
+    coordenada da rua e nenhuma coordenada, a da rua é melhor — o frete sai do
+    endereço de qualquer jeito ([[inksa-endereco-e-navegacao]]), e sem
+    coordenada a loja não existe pra ninguém.
+
+    Devolve (lat, lng, precisao) — a precisão vale pro log e pro admin saber
+    quais lojas merecem conferência no mapa.
+    """
+    degraus = []
+    if street and number:
+        degraus.append(("numero", {"q": ", ".join(
+            [p for p in [f"{street}, {number}", neighborhood, city, state, "Brasil"] if p])}))
+    if street:
+        degraus.append(("rua+bairro", {"q": ", ".join(
+            [p for p in [street, neighborhood, city, state, "Brasil"] if p])}))
+        degraus.append(("rua", {"q": ", ".join(
+            [p for p in [street, city, state, "Brasil"] if p])}))
+    if cep:
+        so_digitos = "".join(ch for ch in str(cep) if ch.isdigit())
+        if len(so_digitos) == 8:
+            degraus.append(("cep", {"postalcode": so_digitos, "country": "Brasil"}))
+    if neighborhood and city:
+        degraus.append(("bairro", {"q": ", ".join(
+            [p for p in [neighborhood, city, state, "Brasil"] if p])}))
+    if city:
+        degraus.append(("cidade", {"q": ", ".join(
+            [p for p in [city, state, "Brasil"] if p])}))
+
+    for precisao, params in degraus:
+        lat, lng = _nominatim(params)
+        if lat is not None:
+            logging.info("Geocode resolvido no nível '%s' para %s/%s",
+                         precisao, city, state)
+            return lat, lng, precisao
+    logging.warning("Geocode NÃO resolveu: %s, %s, %s/%s", street, neighborhood, city, state)
+    return None, None, None
 
 def make_serializable(data):
     """Converte dados para JSON serializável"""
@@ -291,10 +361,20 @@ def handle_profile():
             # preenche é condicional, esta linha não pode ser.
             _avisos_endereco = []
 
+            # ⚠️ NUNCA DEIXAR 0,0 (ou qualquer lixo) ENTRAR. Era por aqui que a
+            # coordenada quebrada passava: o front mandava 0,0 quando o geocode
+            # dele falhava, e como `0` não é `None` o valor seguia até o banco.
+            # Tirar da atualização é melhor que gravar: sem a coluna, o que já
+            # estava gravado continua valendo, e o portão de abrir barra.
+            if 'latitude' in updates or 'longitude' in updates:
+                if not coord_valida(updates.get('latitude'), updates.get('longitude')):
+                    updates.pop('latitude', None)
+                    updates.pop('longitude', None)
+
             # Geocode server-side: se o endereço está sendo salvo sem coordenadas,
             # resolve lat/lng aqui (fallback para quando o front não conseguiu).
             if ('address_street' in updates or 'address_city' in updates) and \
-               not (updates.get('latitude') and updates.get('longitude')):
+               not coord_valida(updates.get('latitude'), updates.get('longitude')):
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _c:
                     _c.execute(
                         "SELECT address_street, address_number, address_neighborhood, address_city, address_state, address_zipcode, latitude, longitude FROM restaurant_profiles WHERE user_id = %s",
@@ -306,11 +386,18 @@ def handle_profile():
                 _neigh = updates.get('address_neighborhood', _cur_prof.get('address_neighborhood'))
                 _city = updates.get('address_city', _cur_prof.get('address_city'))
                 _state = updates.get('address_state', _cur_prof.get('address_state'))
-                if _street and _city:
-                    _lat, _lng = _geocode_address(_street, _number, _neigh, _city, _state)
+                _cep_geo = updates.get('address_zipcode', _cur_prof.get('address_zipcode'))
+                if _street or _city:
+                    _lat, _lng, _prec = _geocode_address(
+                        _street, _number, _neigh, _city, _state, _cep_geo)
                     if _lat is not None:
                         updates['latitude'] = _lat
                         updates['longitude'] = _lng
+                        if _prec in ("bairro", "cidade"):
+                            _avisos_endereco.append(
+                                "Não achamos o número exato no mapa: a localização ficou no "
+                                "centro do %s. Confira no mapa antes de abrir, senão o frete "
+                                "sai errado." % ("bairro" if _prec == "bairro" else "município"))
 
                 # CONFERE O ENDEREÇO CONTRA OS CORREIOS.
                 #
@@ -327,7 +414,9 @@ def handle_profile():
                 if _cep:
                     try:
                         from ..utils.cep_correios import confere_endereco
-                        _avisos_endereco = confere_endereco(_cep, _number, _neigh)
+                        # extend, não `=`: o aviso de precisão do geocode acima
+                        # é da mesma natureza e não pode ser sobrescrito aqui.
+                        _avisos_endereco.extend(confere_endereco(_cep, _number, _neigh) or [])
                     except Exception:
                         logging.warning("Conferência de CEP falhou", exc_info=True)
 
@@ -338,15 +427,17 @@ def handle_profile():
                 # GATE server-side: não deixa ABRIR sem coordenadas. Sem elas o
                 # frete quebra e o pedido pode vazar pra entregadores de qualquer
                 # cidade (o app já bloqueia; isto é a defesa no backend).
-                _has_new_coords = (updates.get('latitude') is not None
-                                   and updates.get('longitude') is not None)
+                # ⚠️ coord_valida, não `is not None`: 0,0 não é nulo e passava
+                # direto por aqui. A Oishii abriu com 0,0 e nunca apareceu.
+                _has_new_coords = coord_valida(updates.get('latitude'),
+                                               updates.get('longitude'))
                 if not _has_new_coords:
                     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as _cc:
                         _cc.execute(
                             "SELECT latitude, longitude FROM restaurant_profiles WHERE user_id = %s",
                             (user_id,))
                         _row = _cc.fetchone()
-                    if not _row or _row['latitude'] is None or _row['longitude'] is None:
+                    if not _row or not coord_valida(_row['latitude'], _row['longitude']):
                         return jsonify({
                             "status": "error",
                             "error": "Complete o endereço (com localização no mapa) antes de abrir."
