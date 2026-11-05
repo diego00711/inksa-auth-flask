@@ -22,7 +22,9 @@ Quem paga publi olha o degrau 3. Os outros dois existem pra dizer ONDE o funil
 vaza: muita chegada e pouco cadastro é problema da nossa tela; muito cadastro
 e pouco pedido é problema de oferta.
 """
+import hashlib
 import logging
+import os
 import re
 
 from flask import Blueprint, jsonify, request
@@ -51,6 +53,65 @@ def normalizar(bruto):
     return c
 
 
+# ---------------------------------------------------------------------------
+# QUEM CHEGOU: separar PESSOA de ACESSO.
+#
+# Até 05/11/2026 esta tabela só tinha código e horário, e por isso contava
+# acesso. Olhando os 123 registros da campanha da scooter um a um apareceram
+# rajadas impossíveis pra gente — 6 em 2 segundos, 9 em 39 segundos — e não
+# havia como distinguir "uma pessoa contada seis vezes" de "seis robôs".
+# As duas explicações levam a decisões OPOSTAS sobre voltar a gastar verba,
+# então a diferença não é detalhe.
+# ---------------------------------------------------------------------------
+
+# Fragmentos de User-Agent que denunciam robô. Minúsculas; a comparação também.
+#
+# `facebookexternalhit` e `meta-externalagent` são os que mais importam aqui:
+# são o próprio Facebook buscando a prévia do link toda vez que ele aparece
+# num post, num story ou numa mensagem. Eles chegam pelo MESMO link do anúncio
+# e por isso sempre estiveram misturados com as pessoas.
+_ROBOS = (
+    'bot', 'crawler', 'spider', 'scraper', 'headless', 'preview',
+    'facebookexternalhit', 'meta-externalagent', 'whatsapp',
+    'telegram', 'slack', 'discord', 'twitter',
+    'python-requests', 'curl/', 'wget', 'go-http-client', 'okhttp',
+    'uptime', 'pingdom', 'monitor', 'lighthouse', 'pagespeed',
+)
+
+
+def _e_robo(user_agent):
+    """True quando o User-Agent se identifica como robô.
+
+    Conservador de propósito: só marca o que se declara. Robô que se disfarça
+    de navegador continua passando — pra esse, o que pega é a deduplicação por
+    origem, não esta lista.
+    """
+    ua = (user_agent or '').lower()
+    if not ua:
+        return True       # sem User-Agent nenhum não é navegador de ninguém
+    return any(p in ua for p in _ROBOS)
+
+
+def _origem(req):
+    """Hash da origem de quem chamou — nunca o IP em si.
+
+    Guardar o IP cru não acrescenta nada ao que precisamos (saber se dois
+    acessos vieram da mesma origem) e acrescenta um dado pessoal à tabela.
+    O hash resolve a deduplicação e não guarda o endereço.
+
+    ⚠️ Atrás do proxy do Render, `remote_addr` é o do PROXY e seria igual pra
+    todo mundo — a dedup juntaria a cidade inteira numa visita só. O endereço
+    real é o primeiro item do X-Forwarded-For.
+    """
+    bruto = (req.headers.get('X-Forwarded-For') or '').split(',')[0].strip()
+    if not bruto:
+        bruto = req.remote_addr or ''
+    if not bruto:
+        return None
+    sal = os.environ.get('CAMPANHA_IP_SALT') or 'inksa-campanha-v1'
+    return hashlib.sha256(f'{sal}:{bruto}'.encode('utf-8')).hexdigest()[:16]
+
+
 @campanhas_bp.post('/clique')
 @limiter.limit("30 per minute")
 def registrar_clique():
@@ -68,13 +129,19 @@ def registrar_clique():
         if not codigo:
             return '', 204
 
+        user_agent = (request.headers.get('User-Agent') or '')[:400]
+        robo = _e_robo(user_agent)
+        ip_hash = _origem(request)
+
         conn = get_db_connection()
         if not conn:
             return '', 204
         try:
             with conn, conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO campanha_cliques (codigo) VALUES (%s)", (codigo,)
+                    "INSERT INTO campanha_cliques (codigo, ip_hash, user_agent, robo)"
+                    " VALUES (%s, %s, %s, %s)",
+                    (codigo, ip_hash, user_agent or None, robo),
                 )
         finally:
             conn.close()
@@ -149,11 +216,42 @@ def atribuir():
 #
 # A linha "sem campanha" vem à parte porque ela não é uma campanha: é a régua
 # contra a qual todas as outras são lidas.
+#
+# TRÊS NÚMEROS NO TOPO DO FUNIL, E O QUE VALE É O DO MEIO:
+#
+#   cliques — tudo que bateu na rota. É o número antigo, mantido para o
+#             histórico continuar comparável. Conta acesso, não pessoa.
+#   visitas — acessos agrupados por origem em janela de 30 minutos, sem robô.
+#             É a pessoa. Só existe para registros gravados DEPOIS de
+#             05/11/2026; antes disso não havia ip_hash, e por isso dá 0 no
+#             histórico em vez de um palpite.
+#   robos   — o que se declarou robô no User-Agent. Fica à vista de propósito:
+#             se esse número for grande, boa parte do que a gente chamou de
+#             "clique pago" nunca foi gente.
 _SQL_FUNIL = """
-WITH cliques AS (
-    SELECT codigo, COUNT(*)::int AS cliques, MAX(criado_em) AS ultimo_clique
+WITH bruto AS (
+    SELECT codigo, ip_hash, robo, criado_em
       FROM campanha_cliques
      WHERE criado_em >= NOW() - (%s || ' days')::interval
+),
+marcado AS (
+    SELECT codigo,
+           CASE WHEN LAG(criado_em) OVER j IS NULL
+                  OR criado_em - LAG(criado_em) OVER j > interval '30 minutes'
+                THEN 1 ELSE 0 END AS nova
+      FROM bruto
+     WHERE ip_hash IS NOT NULL AND NOT robo
+    WINDOW j AS (PARTITION BY codigo, ip_hash ORDER BY criado_em)
+),
+visitas AS (
+    SELECT codigo, SUM(nova)::int AS visitas FROM marcado GROUP BY codigo
+),
+cliques AS (
+    SELECT codigo,
+           COUNT(*)::int                        AS cliques,
+           COUNT(*) FILTER (WHERE robo)::int    AS robos,
+           MAX(criado_em)                       AS ultimo_clique
+      FROM bruto
      GROUP BY codigo
 ),
 clientes AS (
@@ -171,6 +269,8 @@ clientes AS (
 )
 SELECT COALESCE(cl.codigo, ct.codigo)        AS codigo,
        COALESCE(cl.cliques, 0)               AS cliques,
+       COALESCE(v.visitas, 0)                AS visitas,
+       COALESCE(cl.robos, 0)                 AS robos,
        COALESCE(ct.cadastros, 0)             AS cadastros,
        COALESCE(ct.compradores, 0)           AS compradores,
        COALESCE(ct.pedidos, 0)               AS pedidos,
@@ -178,6 +278,7 @@ SELECT COALESCE(cl.codigo, ct.codigo)        AS codigo,
        cl.ultimo_clique
   FROM cliques cl
   FULL JOIN clientes ct ON ct.codigo = cl.codigo
+  LEFT JOIN visitas v   ON v.codigo = cl.codigo
  ORDER BY COALESCE(ct.receita, 0) DESC,
           COALESCE(ct.cadastros, 0) DESC,
           COALESCE(cl.cliques, 0) DESC

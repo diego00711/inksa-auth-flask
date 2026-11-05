@@ -1364,7 +1364,16 @@ def admin_reports_export():
         return jsonify({}), 204
     date_from = request.args.get("from")
     date_to = request.args.get("to")
-    # request.args.get("scope"): reservado; hoje só existe o escopo 'orders'.
+    # 'orders' = uma linha por pedido. 'resumo' = uma linha por parceiro no
+    # período, que é o formato que o contador usa pra conferir NFS-e.
+    scope = (request.args.get("scope") or "orders").lower()
+    if scope not in ("orders", "resumo"):
+        scope = "orders"
+    # ⚠️ PEDIDO CANCELADO FICAVA NO CSV com o valor cheio. Quem abre a planilha
+    # sem ler status por status soma receita que nunca existiu — e é um número
+    # que vai pra declaração. Agora cancelado SAI por padrão, e quem quiser a
+    # base crua pede de propósito.
+    incluir_cancelados = (request.args.get("cancelados") or "").lower() in ("1", "true", "sim")
 
     conn = get_db_connection()
     if not conn:
@@ -1377,46 +1386,202 @@ def admin_reports_export():
         if date_to:
             where.append("(o.created_at AT TIME ZONE 'America/Sao_Paulo')::date <= %s")
             params.append(date_to)
+        if not incluir_cancelados:
+            where.append("o.status NOT IN ('cancelled', 'canceled', 'rejected')")
 
-        rows = _fetchall(conn, f"""
-            SELECT o.id::text AS id,
-                   to_char(o.created_at AT TIME ZONE 'America/Sao_Paulo', 'DD/MM/YYYY HH24:MI') AS criado_em,
-                   COALESCE(rp.restaurant_name, '')                       AS restaurante,
-                   TRIM(COALESCE(dp.first_name,'') || ' ' || COALESCE(dp.last_name,'')) AS entregador,
-                   o.status,
-                   COALESCE(o.status_pagamento, '')                       AS status_pagamento,
-                   COALESCE(o.payment_method, '')                         AS forma_pagamento,
-                   COALESCE(o.total_amount_items, 0)                      AS total_itens,
-                   COALESCE(o.delivery_fee, 0)                            AS frete,
-                   COALESCE(o.total_amount, 0)                            AS total,
-                   COALESCE(o.comissao_plataforma, 0)                     AS comissao_plataforma,
-                   COALESCE(o.valor_repassado_restaurante, 0)             AS repasse_restaurante,
-                   COALESCE(o.valor_repassado_entregador, 0)              AS repasse_entregador,
-                   COALESCE(o.margem_frete, 0)                            AS margem_frete
-              FROM {ORDERS_TABLE} o
-              LEFT JOIN {RESTAURANTS_TABLE} rp ON rp.id = o.restaurant_id
-              LEFT JOIN {DELIVERY_TABLE}    dp ON dp.id = o.delivery_id
-             WHERE {" AND ".join(where)}
-             ORDER BY o.created_at
-        """, tuple(params))
+        # DINHEIRO E ONLINE SÃO EVENTOS CONTÁBEIS DIFERENTES, e misturar os dois
+        # numa coluna só de "total" faz a planilha mentir:
+        #
+        #   ONLINE   — o dinheiro ENTRA na Inksa (Asaas), ela repassa pra loja e
+        #              pro entregador e fica com a comissão. Tem entrada de caixa
+        #              e tem obrigação de repasse.
+        #   DINHEIRO — o dinheiro NUNCA passa pela Inksa. Quem recebe é a loja ou
+        #              o entregador, na mão. A Inksa fica só com um CRÉDITO a
+        #              receber (commission_debt / cash_debt), não com caixa.
+        #
+        # `pending_cash` entra junto porque é o status que um pedido em dinheiro
+        # carrega a vida inteira — ele nunca vira 'approved'.
+        tipo_sql = ("CASE WHEN COALESCE(o.payment_method,'') = 'cash' "
+                    "          OR COALESCE(o.status_pagamento,'') = 'pending_cash' "
+                    "     THEN 'DINHEIRO' ELSE 'ONLINE' END")
 
-        money_cols = {"total_itens", "frete", "total", "comissao_plataforma",
-                      "repasse_restaurante", "repasse_entregador", "margem_frete"}
-        headers = ["id", "criado_em", "restaurante", "entregador", "status",
-                   "status_pagamento", "forma_pagamento", "total_itens", "frete",
-                   "total", "comissao_plataforma", "repasse_restaurante",
-                   "repasse_entregador", "margem_frete"]
+        rows_entregador = []
+        if scope == "resumo":
+            rows = _fetchall(conn, f"""
+                SELECT COALESCE(rp.restaurant_name, '(sem parceiro)')          AS restaurante,
+                       COALESCE(rp.cnpj, '')                                   AS cnpj,
+                       {tipo_sql}                                              AS tipo_transacao,
+                       COUNT(*)::int                                           AS pedidos,
+                       SUM(COALESCE(o.total_amount, 0))                        AS total_transacionado,
+                       SUM(COALESCE(o.delivery_fee, 0))                        AS frete,
+                       SUM(COALESCE(o.comissao_plataforma, 0))                 AS comissao_inksa,
+                       SUM(COALESCE(o.margem_frete, 0))                        AS margem_frete_inksa,
+                       SUM(COALESCE(o.valor_repassado_restaurante, 0))         AS repasse_restaurante,
+                       SUM(COALESCE(o.valor_repassado_entregador, 0))          AS repasse_entregador
+                  FROM {ORDERS_TABLE} o
+                  LEFT JOIN {RESTAURANTS_TABLE} rp ON rp.id = o.restaurant_id
+                 WHERE {" AND ".join(where)}
+                 GROUP BY 1, 2, 3
+                 ORDER BY 1, 3
+            """, tuple(params))
+            headers = ["restaurante", "cnpj", "tipo_transacao", "pedidos",
+                       "total_transacionado", "frete", "comissao_inksa",
+                       "margem_frete_inksa", "repasse_restaurante", "repasse_entregador"]
+            money_cols = {"total_transacionado", "frete", "comissao_inksa",
+                          "margem_frete_inksa", "repasse_restaurante", "repasse_entregador"}
+
+            # ENTREGADOR POR PESSOA, e só no resumo.
+            #
+            # Entregador é autônomo: o quanto cada um recebeu no período tem
+            # implicação fiscal, e o contador precisa do número POR PESSOA —
+            # não dá pra deduzir isso de uma coluna de soma. Mas é justamente
+            # por ser dado de pessoa que ele fica AGREGADO aqui, uma linha por
+            # entregador no período inteiro, e não colado em cada pedido.
+            #
+            # Pedido em dinheiro aparece em `recebido_em_dinheiro`: ali o
+            # entregador pegou o valor na mão e passou a DEVER à plataforma
+            # (cash_debt). Somar isso com o repasse seria contar duas vezes.
+            rows_entregador = _fetchall(conn, f"""
+                SELECT TRIM(COALESCE(dp.first_name,'') || ' ' || COALESCE(dp.last_name,'')) AS entregador,
+                       COALESCE(dp.cpf, '')                                    AS cpf,
+                       COUNT(*)::int                                           AS entregas,
+                       SUM(CASE WHEN {tipo_sql} = 'ONLINE'
+                                THEN COALESCE(o.valor_repassado_entregador, 0)
+                                ELSE 0 END)                                    AS repasse_online,
+                       SUM(CASE WHEN {tipo_sql} = 'DINHEIRO'
+                                THEN COALESCE(o.total_amount, 0)
+                                ELSE 0 END)                                    AS recebido_em_dinheiro
+                  FROM {ORDERS_TABLE} o
+                  JOIN {DELIVERY_TABLE} dp ON dp.id = o.delivery_id
+                 WHERE {" AND ".join(where)}
+                 GROUP BY 1, 2
+                 ORDER BY 1
+            """, tuple(params))
+        else:
+            rows = _fetchall(conn, f"""
+                SELECT o.id::text AS id,
+                       to_char(o.created_at AT TIME ZONE 'America/Sao_Paulo', 'DD/MM/YYYY HH24:MI') AS criado_em,
+                       COALESCE(rp.restaurant_name, '')                       AS restaurante,
+                       COALESCE(rp.cnpj, '')                                  AS cnpj,
+                       o.status,
+                       {tipo_sql}                                             AS tipo_transacao,
+                       COALESCE(o.status_pagamento, '')                       AS status_pagamento,
+                       COALESCE(o.payment_method, '')                         AS forma_pagamento,
+                       COALESCE(o.total_amount_items, 0)                      AS total_itens,
+                       COALESCE(o.delivery_fee, 0)                            AS frete,
+                       COALESCE(o.total_amount, 0)                            AS total,
+                       COALESCE(o.comissao_plataforma, 0)                     AS comissao_plataforma,
+                       COALESCE(o.valor_repassado_restaurante, 0)             AS repasse_restaurante,
+                       COALESCE(o.valor_repassado_entregador, 0)              AS repasse_entregador,
+                       COALESCE(o.margem_frete, 0)                            AS margem_frete
+                  FROM {ORDERS_TABLE} o
+                  LEFT JOIN {RESTAURANTS_TABLE} rp ON rp.id = o.restaurant_id
+                 WHERE {" AND ".join(where)}
+                 ORDER BY o.created_at
+            """, tuple(params))
+            # SEM NOME DE PESSOA. O cliente nunca esteve aqui; o entregador
+            # saiu em 05/11/2026 a pedido do Diego. Esta planilha deixa a
+            # empresa e vai pra um terceiro — o contador precisa de QUANTO foi
+            # repassado, não de PARA QUEM. O valor continua na coluna
+            # `repasse_entregador`; o que sumiu foi só o nome.
+            #
+            # Se um dia o contador pedir o repasse por entregador (autônomo tem
+            # implicação fiscal), isso vira um resumo agregado por pessoa, não
+            # o nome colado em cada linha de pedido.
+            headers = ["id", "criado_em", "restaurante", "cnpj", "status", "tipo_transacao",
+                       "status_pagamento", "forma_pagamento", "total_itens", "frete",
+                       "total", "comissao_plataforma", "repasse_restaurante",
+                       "repasse_entregador", "margem_frete"]
+            money_cols = {"total_itens", "frete", "total", "comissao_plataforma",
+                          "repasse_restaurante", "repasse_entregador", "margem_frete"}
+
+        def _br(valor):
+            return f"{float(valor or 0):.2f}".replace(".", ",")
 
         buf = io.StringIO()
         writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
         writer.writerow(headers)
         for r in rows:
             writer.writerow([
-                (f"{float(r.get(h) or 0):.2f}".replace(".", ",") if h in money_cols else r.get(h, ""))
+                (_br(r.get(h)) if h in money_cols else r.get(h, ""))
                 for h in headers
             ])
 
-        fname = f"relatorio_{date_from or 'inicio'}_{date_to or 'hoje'}.csv"
+        # ------------------------------------------------------------------
+        # O BLOCO QUE O CONTADOR LÊ PRIMEIRO.
+        #
+        # Sem ele a planilha entrega só o "total" e alguém soma essa coluna
+        # achando que é o faturamento da Inksa. NÃO É: a maior parte daquele
+        # dinheiro passa pela plataforma e vai pro restaurante e pro
+        # entregador. Receita da Inksa é comissão + margem do frete; o resto é
+        # repasse de terceiros. Declarar o transacionado como receita é pagar
+        # imposto sobre dinheiro dos outros.
+        # ------------------------------------------------------------------
+        if rows_entregador:
+            writer.writerow([])
+            writer.writerow(["POR ENTREGADOR (autonomo) — repasse no periodo"])
+            cab_e = ["entregador", "cpf", "entregas", "repasse_online", "recebido_em_dinheiro"]
+            writer.writerow(cab_e)
+            for r in rows_entregador:
+                writer.writerow([
+                    (_br(r.get(h)) if h in ("repasse_online", "recebido_em_dinheiro")
+                     else r.get(h, ""))
+                    for h in cab_e
+                ])
+            writer.writerow(["", "", "",
+                             "o que a Inksa PAGOU",
+                             "o que ele pegou na mao (vira divida dele)"])
+
+        def _soma(*chaves, tipo=None):
+            t = 0.0
+            for r in rows:
+                if tipo and (r.get("tipo_transacao") or "") != tipo:
+                    continue
+                for k in chaves:
+                    if k in r:
+                        t += float(r.get(k) or 0)
+            return t
+
+        comissao = _soma("comissao_plataforma", "comissao_inksa")
+        margem = _soma("margem_frete", "margem_frete_inksa")
+        rep_rest = _soma("repasse_restaurante")
+        rep_entr = _soma("repasse_entregador")
+        transacionado = _soma("total", "total_transacionado")
+        trans_online = _soma("total", "total_transacionado", tipo="ONLINE")
+        trans_dinheiro = _soma("total", "total_transacionado", tipo="DINHEIRO")
+        com_online = _soma("comissao_plataforma", "comissao_inksa", tipo="ONLINE")
+        com_dinheiro = _soma("comissao_plataforma", "comissao_inksa", tipo="DINHEIRO")
+
+        writer.writerow([])
+        writer.writerow(["RESUMO DO PERIODO", f"{date_from or 'inicio'} a {date_to or 'hoje'}"])
+        writer.writerow(["Pedidos considerados", len(rows) if scope == "orders" else _soma("pedidos")])
+        writer.writerow(["Cancelados incluidos?", "SIM" if incluir_cancelados else "NAO"])
+        writer.writerow([])
+        writer.writerow(["RECEITA DA INKSA (e so isto)"])
+        writer.writerow(["  Comissao da plataforma", _br(comissao)])
+        writer.writerow(["  Margem do frete", _br(margem)])
+        writer.writerow(["  TOTAL DE RECEITA", _br(comissao + margem)])
+        writer.writerow([])
+        writer.writerow(["REPASSE A TERCEIROS (nao e receita da Inksa)"])
+        writer.writerow(["  Repassado aos restaurantes", _br(rep_rest)])
+        writer.writerow(["  Repassado aos entregadores", _br(rep_entr)])
+        writer.writerow(["  TOTAL REPASSADO", _br(rep_rest + rep_entr)])
+        writer.writerow([])
+        # ONLINE x DINHEIRO: o corte que mais confunde quem fecha o mes.
+        writer.writerow(["ONLINE x DINHEIRO (eventos contabeis diferentes)"])
+        writer.writerow(["  Transacionado ONLINE (entrou na Inksa)", _br(trans_online)])
+        writer.writerow(["    comissao desse total (recebida)", _br(com_online)])
+        writer.writerow(["  Transacionado em DINHEIRO (nao passou pela Inksa)", _br(trans_dinheiro)])
+        writer.writerow(["    comissao desse total (a RECEBER)", _br(com_dinheiro)])
+        writer.writerow(["  No pedido em dinheiro o cliente paga na mao da loja ou do"])
+        writer.writerow(["  entregador. A Inksa nao tem caixa disso — tem credito a receber."])
+        writer.writerow([])
+        writer.writerow(["Valor transacionado (GMV)", _br(transacionado)])
+        writer.writerow(["ATENCAO: o valor transacionado NAO e faturamento da Inksa."])
+        writer.writerow(["A receita a declarar e a comissao + a margem do frete."])
+
+        sufixo = "resumo_parceiro" if scope == "resumo" else "pedidos"
+        fname = f"inksa_{sufixo}_{date_from or 'inicio'}_a_{date_to or 'hoje'}.csv"
         return Response(
             "" + buf.getvalue(),  # BOM: Excel pt-BR abre os acentos certos
             mimetype="text/csv; charset=utf-8",
