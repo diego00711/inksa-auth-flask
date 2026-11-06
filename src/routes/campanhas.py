@@ -70,11 +70,20 @@ def normalizar(bruto):
 # são o próprio Facebook buscando a prévia do link toda vez que ele aparece
 # num post, num story ou numa mensagem. Eles chegam pelo MESMO link do anúncio
 # e por isso sempre estiveram misturados com as pessoas.
+#
+# ⚠️ `powershell` entrou em 05/11/2026 porque o MEU próprio teste de deploy
+# passou como gente. O User-Agent dele é
+# "Mozilla/5.0 (Windows NT; ...) WindowsPowerShell/5.1" — começa com Mozilla,
+# que é o que todo navegador escreve, e a parte que denuncia vem no fim.
+# 👉 A lição: não basta olhar o começo do User-Agent, e cliente de script
+# costuma se esconder atrás de um prefixo de navegador.
 _ROBOS = (
     'bot', 'crawler', 'spider', 'scraper', 'headless', 'preview',
     'facebookexternalhit', 'meta-externalagent', 'whatsapp',
     'telegram', 'slack', 'discord', 'twitter',
     'python-requests', 'curl/', 'wget', 'go-http-client', 'okhttp',
+    'powershell', 'node-fetch', 'axios', 'postman', 'httpie', 'insomnia',
+    'java/', 'libwww', 'httpclient', 'restsharp',
     'uptime', 'pingdom', 'monitor', 'lighthouse', 'pagespeed',
 )
 
