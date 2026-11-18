@@ -3167,6 +3167,265 @@ def descartar_carrinhos_antigos():
 
 
 # ---------------------------------------------------------------------------
+# Cadastrou e nunca pediu
+# ---------------------------------------------------------------------------
+#
+# O MAIOR BURACO DO FUNIL, E O ÚNICO QUE NÃO CUSTA DINHEIRO PRA TAPAR.
+#
+# Medido em 18/11/2026, no banco de produção: 60 clientes cadastrados, 4
+# pediram. Os outros 56 criaram conta, ganharam número da rifa da scooter e
+# nunca voltaram. Até esta tela nascer NÃO HAVIA, em nenhum lugar do admin,
+# jeito de falar com eles — o painel sabia quem eles eram e não oferecia nada.
+#
+# O assunto da chamada é a RIFA, não desconto, por duas razões:
+#   1. É por ela que 59 dos 60 entraram. É o que a pessoa reconhece.
+#   2. Não custa nada por cabeça. Cupom de frete sai do bolso da plataforma
+#      (ver utils/referrals.py); lembrar alguém de um número que ele JÁ TEM
+#      custa zero e continua sendo verdade.
+#
+# ⚠️ A MENSAGEM SÓ PODE DIZER O QUE A TELA DO CLIENTE DIZ. RifaPage.jsx:
+# "A cada R$ 50,00 em pedidos entregues você ganha mais um número. O valor é
+# cumulativo." Nada de sorteio com data nem de Loteria Federal — a
+# autorização federal ainda não voltou, e prometer o rito é prometer o que
+# não se tem.
+
+# As contas de revisão do Google Play vivem neste domínio. Elas NÃO devem ser
+# apagadas (é por elas que o Play entra no app pra revisar), mas também não
+# devem receber campanha.
+_EMAIL_DE_TESTE = "%@inksadelivery.com.br"
+
+
+def _rifa_numeros_do_cliente(conn, client_id):
+    """Números vivos desta pessoa, do menor pro maior. Lista vazia se não tem."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT numero FROM rifa_numeros "
+            " WHERE perfil_id = %s AND tipo = 'cliente' AND cancelado_em IS NULL "
+            " ORDER BY numero", (client_id,))
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def _texto_chamada_rifa(numeros):
+    """Título e corpo do push. Fala do número DELE, não da promoção.
+
+    Promoção em que a pessoa acumula algo invisível não gera a volta — é a
+    mesma razão por que a RifaPage existe. Então o número vai no TÍTULO, que é
+    a única linha garantida de aparecer na tela bloqueada do celular.
+    """
+    if not numeros:
+        # Sem número não há assunto. Quem chama não deve deixar chegar aqui.
+        return (None, None)
+    if len(numeros) == 1:
+        titulo = "Seu número na rifa: %d" % numeros[0]
+    else:
+        titulo = "Você tem %d números na rifa" % len(numeros)
+    corpo = ("Você está concorrendo a uma scooter elétrica. "
+             "A cada R$ 50 em pedidos entregues você ganha mais um número, "
+             "e o valor é cumulativo.")
+    return (titulo, corpo)
+
+
+@admin_bp.route("/nunca-pediu", methods=["GET"])
+@admin_required
+def nunca_pediu():
+    """Quem criou conta e nunca fez um pedido.
+
+    Traz só o que decide se vale chamar: quantos números a pessoa tem, se dá
+    pra mandar push, se tem telefone pro WhatsApp, de onde ela veio e há
+    quantos dias ela está parada.
+
+    ⚠️ A CONTA DE REVISÃO DO PLAY vem marcada em `conta_de_teste` e o front
+    não deixa chamar. Ela existe pro Google entrar no app; push pra ela é push
+    jogado fora — e ela NÃO deve ser apagada por causa disso.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        # O padrão do e-mail vai como PARÂMETRO, não escrito na consulta: com
+        # `%%` no meio de uma f-string quem lê depois não sabe mais se o
+        # psycopg2 vai desdobrar ou não, e um LIKE que não casa nada falha em
+        # silêncio — a conta de revisão deixaria de vir marcada.
+        linhas = _fetchall(conn, f"""
+            SELECT cp.id,
+                   COALESCE(NULLIF(TRIM(CONCAT_WS(' ', cp.first_name, cp.last_name)), ''),
+                            'sem nome') AS nome,
+                   NULLIF(TRIM(cp.phone), '') AS telefone,
+                   cp.created_at,
+                   cp.last_seen,
+                   cp.origem_campanha,
+                   (NULLIF(TRIM(cp.fcm_token), '') IS NOT NULL) AS tem_push,
+                   COALESCE(u.email ILIKE %s, FALSE) AS conta_de_teste,
+                   COALESCE(r.numeros, 0)::int AS numeros,
+                   r.primeiro AS primeiro_numero,
+                   ROUND(EXTRACT(EPOCH FROM (NOW() - cp.created_at)) / 86400)::int AS dias,
+                   EXISTS (SELECT 1 FROM push_campaign_log l
+                            WHERE l.client_id = cp.id
+                              AND l.campanha = 'rifa:' ||
+                                  (NOW() AT TIME ZONE 'America/Sao_Paulo')::date::text
+                   ) AS ja_chamado_hoje,
+                   (SELECT MAX(l2.sent_at) FROM push_campaign_log l2
+                     WHERE l2.client_id = cp.id AND l2.tipo = 'rifa') AS ultimo_chamado
+              FROM {CLIENTS_TABLE} cp
+              LEFT JOIN users u ON u.id = cp.user_id
+              LEFT JOIN (
+                   SELECT perfil_id, COUNT(*) AS numeros, MIN(numero) AS primeiro
+                     FROM rifa_numeros
+                    WHERE tipo = 'cliente' AND cancelado_em IS NULL
+                    GROUP BY perfil_id
+              ) r ON r.perfil_id = cp.id
+             WHERE NOT EXISTS (SELECT 1 FROM {ORDERS_TABLE} o WHERE o.client_id = cp.id)
+             ORDER BY cp.created_at DESC
+        """, (_EMAIL_DE_TESTE,))
+        for l in linhas:
+            l["id"] = str(l["id"])
+            l["numeros"] = int(l["numeros"] or 0)
+            l["dias"] = int(l["dias"] or 0)
+            l["primeiro_numero"] = (int(l["primeiro_numero"])
+                                    if l.get("primeiro_numero") is not None else None)
+            for campo in ("created_at", "last_seen", "ultimo_chamado"):
+                l[campo] = l[campo].isoformat() if l.get(campo) else None
+
+        # O resumo é o que se lê primeiro: de quantos dá pra falar hoje.
+        # `sem_contato` é o número que dói — gente que entrou e não deixou
+        # nenhum caminho de volta. Serve pra decidir o que pedir no cadastro.
+        chamaveis = [l for l in linhas
+                     if l["tem_push"] and not l["conta_de_teste"]
+                     and not l["ja_chamado_hoje"] and l["numeros"] > 0]
+        return jsonify({"status": "success", "data": {
+            "pessoas": linhas,
+            "total": len(linhas),
+            "com_push": sum(1 for l in linhas if l["tem_push"] and not l["conta_de_teste"]),
+            "com_telefone": sum(1 for l in linhas if l["telefone"] and not l["conta_de_teste"]),
+            "sem_contato": sum(1 for l in linhas
+                               if not l["tem_push"] and not l["telefone"]
+                               and not l["conta_de_teste"]),
+            "chamaveis_agora": len(chamaveis),
+        }}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@admin_bp.route("/nunca-pediu/chamar", methods=["POST"])
+@admin_required
+@limiter.limit("10 per minute")
+def chamar_nunca_pediu():
+    """Manda o push da rifa pra uma pessoa ou pra todas as que dá.
+
+    Corpo: {"client_ids": [...]} — uma ou várias.
+
+    UMA VEZ POR DIA POR PESSOA, garantido pelo índice único de
+    push_campaign_log (client_id, campanha) com a data no nome da campanha.
+    Dois cliques no botão não viram dois pushes, e o "chamar todos" clicado
+    duas vezes não repete em ninguém.
+
+    ⚠️ A RESERVA VEM ANTES DO ENVIO, igual ao lembrete de carrinho. Se o push
+    falhar depois, a reserva volta atrás (DELETE) — melhor não chamar do que
+    marcar como chamado alguém que não recebeu nada.
+    """
+    from ..services.notification_service import send_campaign
+
+    corpo_req = request.get_json(silent=True) or {}
+    ids = corpo_req.get("client_ids") or []
+    if isinstance(ids, str):
+        ids = [ids]
+    ids = [str(x) for x in ids][:200]
+    if not ids:
+        return jsonify({"status": "error", "message": "Ninguém pra chamar."}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT (NOW() AT TIME ZONE 'America/Sao_Paulo')::date::text AS d")
+            campanha = "rifa:" + cur.fetchone()["d"]
+
+            # ANY(%s::uuid[]) e não um IN montado à mão: id inválido vira erro
+            # de tipo aqui, e não string interpolada dentro da consulta.
+            cur.execute(f"""
+                SELECT cp.id, NULLIF(TRIM(cp.fcm_token), '') AS token,
+                       COALESCE(u.email ILIKE %s, FALSE) AS teste
+                  FROM {CLIENTS_TABLE} cp
+                  LEFT JOIN users u ON u.id = cp.user_id
+                 WHERE cp.id = ANY(%s::uuid[])
+                   AND NOT EXISTS (SELECT 1 FROM {ORDERS_TABLE} o WHERE o.client_id = cp.id)
+            """, (_EMAIL_DE_TESTE, ids))
+            candidatos = cur.fetchall()
+
+        alvos = []
+        pulados = {"sem_push": 0, "teste": 0, "sem_numero": 0, "ja_hoje": 0}
+        for c in candidatos:
+            cid = str(c["id"])
+            if c["teste"]:
+                pulados["teste"] += 1
+                continue
+            if not c["token"]:
+                pulados["sem_push"] += 1
+                continue
+            numeros = _rifa_numeros_do_cliente(conn, cid)
+            if not numeros:
+                pulados["sem_numero"] += 1
+                continue
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO push_campaign_log (client_id, campanha, tipo) "
+                    "VALUES (%s, %s, 'rifa') ON CONFLICT (client_id, campanha) DO NOTHING "
+                    "RETURNING id",
+                    (cid, campanha))
+                reservado = cur.fetchone() is not None
+            conn.commit()
+            if not reservado:
+                pulados["ja_hoje"] += 1
+                continue
+            alvos.append((cid, c["token"], numeros))
+
+        if not alvos:
+            return jsonify({"status": "error", "pulados": pulados,
+                            "message": "Ninguém elegível agora."}), 409
+
+        # O texto é por pessoa (o número é dela), então o envio é por pessoa.
+        enviados = 0
+        invalidos = []
+        for cid, token, numeros in alvos:
+            titulo, texto = _texto_chamada_rifa(numeros)
+            res = send_campaign([(cid, token)], titulo, texto,
+                                {"type": "rifa", "url": "/rifa"})
+            enviados += int(res.get("enviados") or 0)
+            invalidos += [str(x) for x in (res.get("invalidos") or [])]
+
+        # Token recusado = app desinstalado. Limpa o token e devolve o direito
+        # do dia, senão a pessoa fica marcada por um push que não saiu.
+        if invalidos:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE {CLIENTS_TABLE} SET fcm_token = NULL "
+                            "WHERE id = ANY(%s::uuid[])", (invalidos,))
+                cur.execute("DELETE FROM push_campaign_log "
+                            "WHERE campanha = %s AND client_id = ANY(%s::uuid[])",
+                            (campanha, invalidos))
+            conn.commit()
+
+        log_admin_action_auto("ChamarNuncaPediu",
+                              f"Push da rifa pra {enviados} de {len(alvos)} "
+                              f"(invalidos: {len(invalidos)})")
+        recado = f"{enviados} aviso(s) enviado(s)."
+        if invalidos:
+            recado += f" {len(invalidos)} aparelho(s) recusaram (app desinstalado)."
+        return jsonify({"status": "success", "enviados": enviados,
+                        "invalidos": len(invalidos), "pulados": pulados,
+                        "message": recado}), 200
+    except Exception as e:
+        logger.exception("Erro em chamar_nunca_pediu: %s", e)
+        try: conn.rollback()
+        except Exception: pass
+        return jsonify({"status": "error", "message": "Erro ao enviar."}), 500
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+# ---------------------------------------------------------------------------
 # Monitor de saúde sob demanda
 # ---------------------------------------------------------------------------
 @admin_bp.route("/monitor", methods=["GET", "OPTIONS"])

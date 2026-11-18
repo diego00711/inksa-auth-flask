@@ -15,13 +15,15 @@ VALID_ROLES = {"super_admin", "admin", "operator", "viewer"}
 # com os checkboxes do AdminsPage.jsx. Se uma página existe no menu com `page`
 # mas não está aqui, ela fica impossível de conceder (some pra admin não-super).
 VALID_PAGES = {
-    "dashboard", "metricas", "prontidao", "carrinhos",
+    "dashboard", "metricas", "prontidao", "carrinhos", "nunca_pediu",
     "usuarios", "restaurantes", "prospeccao", "avaliacoes", "gamificacao",
     "banners", "cupons", "recompensas", "clube", "social",
     # `indicacoes` estava faltando desde que a tela nasceu — exatamente o furo
     # que o comentário acima descreve. Invisível hoje porque só existe
     # super-admin, e viraria "sumiu do menu" no dia do primeiro admin comum.
     "indicacoes", "campanhas",
+    # `rifa` tambem estava de fora desde que a tela nasceu, pelo mesmo motivo.
+    "rifa",
     "logs", "administradores", "relatorios", "financeiro", "payouts", "dividas",
     "ocorrencias", "suporte", "configuracoes", "integracoes",
 }
