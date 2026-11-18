@@ -3426,6 +3426,92 @@ def chamar_nunca_pediu():
 
 
 # ---------------------------------------------------------------------------
+# Quem está no app agora (a lista por trás dos dois cartões do dashboard)
+# ---------------------------------------------------------------------------
+#
+# Os cartões "Clientes com o app aberto" e "Clientes ativos hoje" diziam um
+# NÚMERO e paravam ali. Em 18/11/2026, depois do primeiro push da rifa, o
+# cartão marcou 1 — e a única pergunta que importava era QUEM: se fosse quem
+# recebeu o aviso, o push tinha funcionado; se fosse outra pessoa, não.
+#
+# Mesma doença da tela de entregadores (17/09) e da de carrinhos: número certo
+# escondendo justamente o que decide o que fazer a seguir.
+#
+# As duas janelas saem do MESMO SQL dos cartões (`last_seen`), de propósito. Se
+# cada uma tivesse a sua régua, um dia o cartão diria 3 e a lista mostraria 2.
+
+
+@admin_bp.route("/clientes/agora", methods=["GET"])
+@admin_required
+def clientes_agora():
+    """Quem abriu o app — agora (≤5 min) e no resto do dia.
+
+    Traz junto o que responde a pergunta seguinte, que vem sempre: a pessoa
+    montou carrinho? já pediu alguma vez? recebeu o aviso de hoje?
+
+    ⚠️ `last_seen` é PRESENÇA, não um botão. O app do cliente bate no servidor
+    enquanto está aberto; cliente não tem "ficar online" como o entregador
+    tem. Então "sem sinal há 2h" aqui não é problema de ninguém — só quer
+    dizer que ele fechou o app.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Banco indisponível."}), 500
+    try:
+        linhas = _fetchall(conn, f"""
+            SELECT cp.id,
+                   COALESCE(NULLIF(TRIM(CONCAT_WS(' ', cp.first_name, cp.last_name)), ''),
+                            'sem nome') AS nome,
+                   NULLIF(TRIM(cp.phone), '') AS telefone,
+                   cp.last_seen,
+                   cp.origem_campanha,
+                   ROUND(EXTRACT(EPOCH FROM (NOW() - cp.last_seen)) / 60)::int AS min_sem_sinal,
+                   COALESCE(cp.cart_items_count, 0) AS itens_carrinho,
+                   COALESCE(cp.cart_value, 0)       AS valor_carrinho,
+                   (SELECT COUNT(*)::int FROM {ORDERS_TABLE} o
+                     WHERE o.client_id = cp.id) AS pedidos,
+                   (SELECT COUNT(*)::int FROM {ORDERS_TABLE} o
+                     WHERE o.client_id = cp.id
+                       AND (o.created_at AT TIME ZONE 'America/Sao_Paulo')::date
+                           = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) AS pedidos_hoje,
+                   (SELECT COUNT(*)::int FROM rifa_numeros r
+                     WHERE r.perfil_id = cp.id AND r.tipo = 'cliente'
+                       AND r.cancelado_em IS NULL) AS numeros,
+                   EXISTS (SELECT 1 FROM push_campaign_log l
+                            WHERE l.client_id = cp.id
+                              AND l.sent_at >= DATE_TRUNC('day',
+                                   NOW() AT TIME ZONE 'America/Sao_Paulo')
+                                   AT TIME ZONE 'America/Sao_Paulo'
+                   ) AS recebeu_aviso_hoje
+              FROM {CLIENTS_TABLE} cp
+             WHERE cp.last_seen IS NOT NULL
+               AND (cp.last_seen AT TIME ZONE 'America/Sao_Paulo')::date
+                   = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+             ORDER BY cp.last_seen DESC
+        """)
+        for l in linhas:
+            l["id"] = str(l["id"])
+            l["min_sem_sinal"] = int(l["min_sem_sinal"] or 0)
+            l["itens_carrinho"] = int(l["itens_carrinho"] or 0)
+            l["valor_carrinho"] = float(l["valor_carrinho"] or 0)
+            l["last_seen"] = l["last_seen"].isoformat() if l.get("last_seen") else None
+
+        # O corte de 5 minutos é o MESMO do cartão "com o app aberto".
+        agora = [l for l in linhas if l["min_sem_sinal"] <= 5]
+        antes = [l for l in linhas if l["min_sem_sinal"] > 5]
+        return jsonify({"status": "success", "data": {
+            "agora": agora,
+            "antes": antes,
+            "total_hoje": len(linhas),
+            "com_carrinho": sum(1 for l in linhas if l["itens_carrinho"] > 0),
+            "pediram_hoje": sum(1 for l in linhas if l["pedidos_hoje"] > 0),
+        }}), 200
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+# ---------------------------------------------------------------------------
 # Monitor de saúde sob demanda
 # ---------------------------------------------------------------------------
 @admin_bp.route("/monitor", methods=["GET", "OPTIONS"])
